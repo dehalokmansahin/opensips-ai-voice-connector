@@ -63,7 +63,7 @@ class SimpleVAD:
         self.speech_frames = 0
         self.is_tts_playing = False
         self.barge_in_callback = None
-        self.sample_rate = 8000
+        self.sample_rate = 16000
         
         # For emulation without WebRTC
         self._emulate_mode = not WEBRTC_AVAILABLE

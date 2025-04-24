@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Copyright (C) 2024 SIP Point Consulting SRL
+# Copyright (C) 2024 SIP Point Consulting SRL - adapted for Vosk
 #
 # This file is part of the OpenSIPS AI Voice Connector project
 # (see https://github.com/OpenSIPS/opensips-ai-voice-connector-ce).
@@ -20,198 +20,643 @@
 #
 
 """
-Integration with Vosk Speech-to-Text service via WebSocket
+STT için Vosk WebSocket iletişimini uygulayan modül
 """
 
-import json
-import asyncio
 import logging
-from enum import Enum
-import websockets
-from websockets.exceptions import ConnectionClosed, ConnectionClosedError
+import asyncio
+import json
+import websockets  # WebSockets kütüphanesini içe aktar
+import time
+import numpy as np
+from scipy import signal
 
+from ai import AIEngine
 from config import Config
+from codec import get_codecs, CODECS, UnsupportedCodec
 
+# Loglamayı yapılandır
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-class VoskSTTState(Enum):
-    """Represents the state of the Vosk STT connection"""
-    DISCONNECTED = 0
-    CONNECTING = 1
-    CONNECTED = 2
-    TRANSCRIBING = 3
-    FAILED = 4
+class FlowControl:
+    """Akış kontrolü için token bucket algoritmasını uygular"""
+    
+    def __init__(self, rate=50, capacity=100):
+        """Saniyede rate token ile akış kontrolünü başlat"""
+        self.rate = rate  # saniyede token sayısı
+        self.capacity = capacity
+        self.tokens = capacity
+        self.last_update = time.time()
+        self.connection_health = 1.0  # 0.0-1.0 arasında bağlantı sağlığını belirtir
+        self.lock = asyncio.Lock()
+    
+    async def consume(self, tokens=1):
+        """Tokenleri tüket, gerekirse bekle. Tokenler tüketildiğinde True döner."""
+        # GELİŞTİRİLEBİLİR: Tüketim hızına göre dinamik olarak token kapasitesini ayarlayabilir
+        async with self.lock:
+            now = time.time()
+            # Geçen süreye göre token yenile
+            elapsed = now - self.last_update
+            self.tokens = min(self.capacity, self.tokens + elapsed * self.rate * self.connection_health)
+            self.last_update = now
+            
+            if tokens <= self.tokens:
+                # Yeterli token var
+                self.tokens -= tokens
+                return 0  # Bekleme gerekmez
+            else:
+                # Yeterli token yok, bekleme süresi hesapla
+                wait_time = (tokens - self.tokens) / (self.rate * self.connection_health)
+                self.tokens = 0
+                return wait_time
+    
+    def connection_error(self):
+        """Bağlantı sorunu olduğunu bildir, hızı düşür"""
+        self.connection_health = max(0.2, self.connection_health * 0.7)
+        logger.info(f"Flow control: reducing to {self.connection_health*100:.1f}% of normal rate")
+    
+    def connection_success(self):
+        """Başarılı işlemi bildir, hızı kademeli olarak arttır"""
+        self.connection_health = min(1.0, self.connection_health * 1.05)
 
+class VoskSTT(AIEngine):
+    """ Vosk WebSocket iletişimini uygular """
 
-class VoskSTT:
-    """
-    Handles speech-to-text conversion using Vosk via WebSocket
-    """
+    def __init__(self, call, cfg):
+        """ Vosk STT motorunu başlatır """
+        logger.info("Initializing Vosk STT Engine")
+        self.cfg = Config.get("vosk", cfg)
+        self.call = call  # İleride kullanılabilecek çağrı referansını sakla
+        self.b2b_key = call.b2b_key # Tanımlama için B2B anahtarını sakla
 
-    def __init__(self, callback_func=None):
-        """
-        Initialize the Vosk STT client
-        
-        Args:
-            callback_func: Function to call when transcription is available
-        """
-        self.config = Config.get("vosk")
-        self.ws_url = self.config.get("ws_url", "VOSK_WS_URL", "ws://localhost:2700")
-        self.sample_rate = int(self.config.get("sample_rate", "VOSK_SAMPLE_RATE", "8000"))
-        self.reconnect_delay = int(self.config.get("reconnect_delay", "VOSK_RECONNECT_DELAY", "5"))
-        self.max_reconnect_attempts = int(self.config.get("max_reconnect_attempts", "VOSK_MAX_RECONNECT_ATTEMPTS", "3"))
-        
+        # --- Konfigürasyon ---
+        self.vosk_server_url = self.cfg.get("url", "VOSK_URL")
+        # Belirtilmemişse 16000hz varsayılan olarak kullan, Vosk genellikle  16k kullanır
+        # GELİŞTİRİLEBİLİR: Farklı örnek hızlarını destekleyecek şekilde yeniden örnekleme eklenebilir
+        self.sample_rate = int(self.cfg.get("sample_rate", "VOSK_SAMPLE_RATE", 16000))
+        # Kuyruk büyüklüğünü sınırla, bellek sorunlarını önlemek için
+        self.max_queue_size = int(self.cfg.get("max_queue_size", "VOSK_MAX_QUEUE_SIZE", 100))
+        # İhtiyaç duyulursa buraya daha fazla Vosk'a özel yapılandırma seçeneği eklenebilir (ör. model)
+
+        if not self.vosk_server_url:
+            logger.error("Vosk server URL is not configured. Please set 'url' in the [vosk] section or VOSK_URL env var.")
+            raise ValueError("Vosk server URL not configured")
+
+        logger.info(f"Vosk Config: URL={self.vosk_server_url}, SampleRate={self.sample_rate}")
+
+        # --- Durum ---
+        self.codec = self.choose_codec(call.sdp) # Erken aşamada codec'i belirle
+        logger.info(f"Chosen Codec: {self.codec.name}@{self.codec.sample_rate}Hz (Target Vosk Rate: {self.sample_rate}Hz)")
+
         self.websocket = None
-        self.state = VoskSTTState.DISCONNECTED
-        self.reconnect_attempts = 0
-        self.callback_func = callback_func
-        self.reconnect_task = None
+        self.connection_task = None
+        self.receive_task = None
+        self.send_task = None
+        self.send_queue = asyncio.Queue() # Gönderilecek ses verileri için kuyruk
+        self.transcription_queue = asyncio.Queue() # Alınan transkripsiyon sonuçları için kuyruk
+        self.is_active = False
+        self.stop_event = asyncio.Event() # Görevleri durdurmak için sinyal
+        
+        # Örnek hızına göre hedef paket hızıyla akış kontrolünü başlat
+        # 20ms paket varsayarak: 1000ms/20ms = saniyede 50 paket
+        # GELİŞTİRİLEBİLİR: Bu değer dinamik olarak ayarlanabilir
+        packet_rate = 1000 / 20  # 20ms'lik parçalar için saniyede 50 paket
+        self.flow_control = FlowControl(rate=packet_rate, capacity=packet_rate)
+        
+        # Uyarlanabilir geri çekilme için hata izleme
+        self.consecutive_errors = 0
+        self.last_error_time = 0
+        self.reconnection_attempts = 0
 
-    async def connect(self):
-        """
-        Establish a WebSocket connection to the Vosk server
-        """
-        if self.state in (VoskSTTState.CONNECTED, VoskSTTState.TRANSCRIBING):
-            return True
+        # ChatGPT veya benzer bir bileşenle potansiyel entegrasyon için yer tutucu
+        # self.chat_handler = ... # Proje modeline bağlı olarak gerekirse başlat
+
+        logger.info(f"VoskSTT initialized for call {self.b2b_key}")
+
+
+    def choose_codec(self, sdp):
+        """ Tercih edilen codec'i seçer, Vosk için PCM'e kolayca dönüştürülebilenleri önceliklendirir """
+        # GELİŞTİRİLEBİLİR: Daha geniş codec desteği eklenebilir (örn. Opus)
+        codecs = get_codecs(sdp)
+        cmap = {c.name.lower(): c for c in codecs}
+
+        # Vosk genellikle ham PCM (L16) gerektirir. PCMU/PCMA kolayca dönüştürülebilir.
+        preferred_codecs = ["pcmu", "pcma"] # Sadece G.711 mu-law tercih ediliyor
         
-        if self.state == VoskSTTState.CONNECTING:
-            # Wait for the connection to establish
-            while self.state == VoskSTTState.CONNECTING:
-                await asyncio.sleep(0.1)
-            return self.state == VoskSTTState.CONNECTED
+        for codec_name in preferred_codecs:
+            if codec_name in cmap:
+                selected_codec = CODECS[codec_name](cmap[codec_name])
+                # Codec sınıfının gerekirse decode metodu olduğundan emin ol
+                if not hasattr(selected_codec, 'decode'):
+                     logger.warning(f"Codec {codec_name} selected but has no decode method in codec.py!")
+                     # Bu ölümcül bir hata mı yoksa ham geçişi varsayarak devam edebilir miyiz karar ver
+                     # Şimdilik hedef örnekleme hızı eşleşiyorsa sorun olmadığını varsayalım
+                     
+                     #TODO: Bu kısım açılabilir.
+                     # if selected_codec.sample_rate != self.sample_rate:
+                     #     continue # Veya dönüşüm imkansızsa hata yükselt
+
+                logger.info(f"Selected codec based on SDP: {codec_name}")
+                return selected_codec
         
-        self.state = VoskSTTState.CONNECTING
-        logging.info(f"Connecting to Vosk server at {self.ws_url}")
-        
-        try:
-            self.websocket = await websockets.connect(
-                self.ws_url,
-                ping_timeout=30,
-                ping_interval=10,
-                close_timeout=10
-            )
-            
-            # Send configuration to Vosk
-            await self.websocket.send(json.dumps({
-                "config": {
-                    "sample_rate": self.sample_rate
-                }
-            }))
-            
-            # Start the listener
-            asyncio.create_task(self._listen_for_results())
-            
-            self.state = VoskSTTState.CONNECTED
-            self.reconnect_attempts = 0
-            logging.info("Connected to Vosk STT server")
-            return True
-            
-        except (ConnectionRefusedError, OSError, TimeoutError) as e:
-            logging.error(f"Failed to connect to Vosk server: {str(e)}")
-            self.state = VoskSTTState.FAILED
-            await self._handle_reconnection()
-            return False
-    
-    async def _listen_for_results(self):
-        """
-        Listen for transcription results from the WebSocket
-        """
-        try:
-            async for message in self.websocket:
-                try:
-                    result = json.loads(message)
-                    
-                    # Handle different result types
-                    if 'text' in result:
-                        # Final transcription
-                        if self.callback_func and result['text']:
-                            await self.callback_func(result['text'], final=True)
-                    
-                    elif 'partial' in result:
-                        # Partial transcription
-                        if self.callback_func and result['partial']:
-                            await self.callback_func(result['partial'], final=False)
-                    
-                except json.JSONDecodeError:
-                    logging.warning(f"Received invalid JSON from Vosk: {message}")
+        # Tercih edilen codec bulunamazsa, Opus var mı ve *dönüştürebilir miyiz* kontrol et (harici kütüphane gerekir)
+        # if "opus" in cmap:
+        #     # codec.py veya opus.py'da opus çözümü uygulanmış/mümkün mü kontrol et
+        #     logger.warning("Opus found, but direct use/decoding for Vosk PCM needs verification/implementation.")
+        #     # İşleme uygulanmışsa Opus codec'i döndür, aksi takdirde yedekleme veya hata ver
+
+        # Uygun codec yoksa yedekleme veya hata ver
+        logger.error(f"No suitable codec found in SDP for Vosk. Available: {list(cmap.keys())}. Need PCMU/PCMA or PCM compatible.")
+        raise UnsupportedCodec(f"No suitable codec (PCMU/PCMA) found for Vosk in SDP: {list(cmap.keys())}")
+
+
+    async def _connect_and_manage(self):
+        """ WebSocket bağlantısını yöneten dahili görev, gönderme/alma döngüleri. """
+        # GELİŞTİRİLEBİLİR: Devre kesici (circuit breaker) deseni eklenebilir
+        while self.is_active and not self.stop_event.is_set():
+            try:
+                logger.info(f"Connecting to Vosk server at {self.vosk_server_url}")
+                self.websocket = await websockets.connect(self.vosk_server_url)
+                logger.info(f"Connected to Vosk server for call {self.b2b_key}")
                 
-        except ConnectionClosed as e:
-            logging.warning(f"Vosk WebSocket connection closed: {str(e)}")
-            self.state = VoskSTTState.DISCONNECTED
-            await self._handle_reconnection()
-        
-        except Exception as e:
-            logging.error(f"Error in Vosk listener: {str(e)}")
-            self.state = VoskSTTState.FAILED
-            await self._handle_reconnection()
-    
-    async def _handle_reconnection(self):
-        """
-        Handle reconnection attempts to the Vosk server
-        """
-        if self.reconnect_task and not self.reconnect_task.done():
-            return
-        
-        self.reconnect_task = asyncio.create_task(self._reconnect())
-    
-    async def _reconnect(self):
-        """
-        Attempt to reconnect to the Vosk server
-        """
-        if self.reconnect_attempts >= self.max_reconnect_attempts:
-            logging.error(f"Failed to reconnect to Vosk server after {self.reconnect_attempts} attempts")
-            self.state = VoskSTTState.FAILED
-            return
-        
-        self.reconnect_attempts += 1
-        logging.info(f"Attempting to reconnect to Vosk server (attempt {self.reconnect_attempts})")
-        
-        await asyncio.sleep(self.reconnect_delay)
-        await self.connect()
-    
-    async def transcribe(self, audio_data):
-        """
-        Send audio data to the Vosk server for transcription
-        
-        Args:
-            audio_data: Audio bytes to transcribe
-        
-        Returns:
-            bool: True if the audio was sent successfully, False otherwise
-        """
-        if not await self.connect():
-            return False
-        
-        try:
-            if self.state == VoskSTTState.CONNECTED:
-                self.state = VoskSTTState.TRANSCRIBING
+                # Başarılı bağlantıda hata sayaçlarını sıfırla
+                self.consecutive_errors = 0
+                self.reconnection_attempts = 0
+                self.flow_control.connection_success()
+                
+                # Bağlandıktan hemen sonra yapılandırma mesajı gönder
+                config_message = json.dumps({
+                    "config": {
+                        "sample_rate": self.sample_rate
+                    }
+                })
+                await self.websocket.send(config_message)  # String olarak gönder
+                logger.info(f"Sent configuration to Vosk: {config_message}")
+                
+                # Gönderme ve alma görevlerini başlat
+                self.send_task = asyncio.create_task(self._send_loop())
+                self.receive_task = asyncio.create_task(self._receive_loop())
+                
+                # Herhangi bir görev tamamlanırsa - biri başarısız olursa, yeniden bağlanacağız
+                done, pending = await asyncio.wait(
+                    [self.send_task, self.receive_task],
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                
+                # Bekleyen görevi iptal et
+                for task in pending:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as e:
+                        logger.error(f"Error during task cleanup for call {self.b2b_key}: {e}")
+                
+                # Görevlerin neden tamamlandığını kontrol et
+                for task in done:
+                    try:
+                        await task  # Bu, görevi öldüren herhangi bir istisnaı yeniden yükseltecektir
+                    except asyncio.CancelledError:
+                        logger.info(f"Task was cancelled for call {self.b2b_key}")
+                    except Exception as e:
+                        logger.error(f"Task failed with error for call {self.b2b_key}: {e}")
+                        self.consecutive_errors += 1
+                        self.flow_control.connection_error()
+                
+                if self.stop_event.is_set():
+                    logger.info(f"Stop event set, not reconnecting for call {self.b2b_key}")
+                    break
+                    
+                logger.warning(f"One of the WebSocket tasks ended, will reconnect for call {self.b2b_key}")
+                
+            except websockets.exceptions.ConnectionClosed as e:
+                if self.stop_event.is_set():
+                    logger.info(f"Connection closed while stopping, exiting for call {self.b2b_key}")
+                    break
+                logger.warning(f"Vosk WebSocket connection closed for call {self.b2b_key}: {e}")
+                self.consecutive_errors += 1
+                self.flow_control.connection_error()
+            except Exception as e:
+                if self.stop_event.is_set():
+                    logger.info(f"Exception while stopping, exiting for call {self.b2b_key}")
+                    break
+                logger.error(f"Error in Vosk WebSocket connection for call {self.b2b_key}: {e}")
+                self.consecutive_errors += 1
+                self.flow_control.connection_error()
             
-            await self.websocket.send(audio_data)
-            return True
-            
-        except (ConnectionClosedError, ConnectionClosed) as e:
-            logging.error(f"Connection to Vosk server closed while sending audio: {str(e)}")
-            self.state = VoskSTTState.DISCONNECTED
-            await self._handle_reconnection()
-            return False
-            
-        except Exception as e:
-            logging.error(f"Error sending audio to Vosk: {str(e)}")
-            return False
-    
-    async def close(self):
-        """
-        Close the WebSocket connection to the Vosk server
-        """
-        try:
-            if self.reconnect_task:
-                self.reconnect_task.cancel()
-            
+            # WebSocket'i temizle
             if self.websocket:
-                await self.websocket.close()
-                self.websocket = None
+                try:
+                    await self.websocket.close()
+                except Exception as e:
+                    logger.warning(f"Error closing WebSocket for call {self.b2b_key}: {e}")
+                finally:
+                    self.websocket = None
             
-            self.state = VoskSTTState.DISCONNECTED
-            logging.info("Closed connection to Vosk STT server")
+            # Hala aktifse, yeniden bağlantı geri çekilmesini uygula
+            if self.is_active and not self.stop_event.is_set():
+                self.reconnection_attempts += 1
+                # Titreşimli üstel geri çekilme
+                # GELİŞTİRİLEBİLİR: Daha gelişmiş geri çekilme stratejileri ve daha iyi yeniden bağlanma mantığı
+                base_delay = min(1.0 * (1.5 ** min(self.reconnection_attempts, 10)), 30)
+                jitter = 0.1 * base_delay * (asyncio.get_event_loop().time() % 1.0)
+                retry_delay = base_delay + jitter
+                
+                logger.info(f"Reconnecting to Vosk server in {retry_delay:.2f}s... (attempt {self.reconnection_attempts})")
+                try:
+                    await asyncio.wait_for(self.stop_event.wait(), timeout=retry_delay)
+                    if self.stop_event.is_set():
+                        logger.info(f"Received stop event during reconnection delay for call {self.b2b_key}")
+                        break
+                except asyncio.TimeoutError:
+                    # Zaman aşımı, bağlantıyı yeniden denememiz gerektiği anlamına gelir
+                    pass
             
+            # Maksimum yeniden bağlanma sayısını kontrol et
+            if self.reconnection_attempts >= 5:
+                logger.warning(f"Maximum reconnection attempts (5) reached for call {self.b2b_key}, stopping")
+                self.is_active = False
+                self.stop_event.set()
+                break
+        
+        logger.info(f"Vosk connection manager exiting for call {self.b2b_key}")
+
+    async def _send_loop(self):
+        """ Sürekli olarak kuyruktan ses verilerini gönderen dahili görev """
+        try:
+            logger.info(f"Starting Vosk audio send loop for call {self.b2b_key}")
+            error_count = 0
+            success_count = 0
+            
+            while self.is_active and not self.stop_event.is_set() and self.websocket:
+                try:
+                    # WebSocket bağlantısının durumunu kontrol et
+                    try:
+                        # Basit bir ping ile bağlantının açık olduğunu kontrol edebiliriz
+                        # Eğer bağlantı kapalıysa, bu hata verecektir
+                        pong_waiter = await self.websocket.ping()
+                        await asyncio.wait_for(pong_waiter, timeout=0.5)
+                    except Exception:
+                        logger.warning(f"WebSocket appears to be closed for call {self.b2b_key}")
+                        break  # Bağlantı kapalıysa döngüden çık
+                    
+                    # Bir sonraki ses parçasını zaman aşımı ile kuyruktan al
+                    # Bu, periyodik olarak çıkış yapıp yapmamamız gerektiğini kontrol etmemizi sağlar
+                    audio_data = await asyncio.wait_for(self.send_queue.get(), timeout=0.5)
+                    
+                    # Akış kontrolünü uygula
+                    wait_time = await self.flow_control.consume()
+                    if wait_time > 0:
+                        await asyncio.sleep(wait_time)
+                    
+                    # Vosk'un beklediği formata (PCM) sesi eşleştir
+                    pcm_data = audio_data
+                    if hasattr(self.codec, 'decode'):
+                        try:
+                            # Önce codec'i decode et
+                            pcm_data = self.codec.decode(audio_data)
+                            
+                            # Örnek hızları farklı ise yeniden örnekleme yap
+                            if self.codec.sample_rate != self.sample_rate:
+                                try:
+                                    # PCM verisini bytearray'den int16 numpy dizisine dönüştür
+                                    audio_array = np.frombuffer(pcm_data, dtype=np.int16)
+
+                                    # --- Start of Improved Resampling Logic ---
+                                    # int16 verisini float32'ye dönüştür ve normalleştir
+                                    max_val = np.iinfo(np.int16).max
+                                    audio_array_float = audio_array.astype(np.float32) / max_val
+
+                                    # Oranı hesapla
+                                    resample_ratio = self.sample_rate / self.codec.sample_rate
+
+                                    # Yeni uzunluğu hesapla
+                                    new_length = int(len(audio_array_float) * resample_ratio)
+
+                                    # Float verisi üzerinde yeniden örnekle
+                                    resampled_audio_float = signal.resample(audio_array_float, new_length)
+
+                                    # Sonucu [-1.0, 1.0] aralığına kırp
+                                    resampled_audio_float = np.clip(resampled_audio_float, -1.0, 1.0)
+
+                                    # Sonucu 16-bit PCM olarak geri dönüştür (normalizasyonu kaldır)
+                                    resampled_audio_int16 = (resampled_audio_float * max_val).astype(np.int16)
+
+                                    # byte'a dönüştür
+                                    pcm_data = resampled_audio_int16.tobytes()
+                                    # --- End of Improved Resampling Logic ---
+
+                                    logger.debug(f"Resampled audio from {self.codec.sample_rate}Hz to {self.sample_rate}Hz using float32 method.")
+                                except Exception as e:
+                                    logger.error(f"Error during resampling for call {self.b2b_key}: {e}")
+                                    # Yeniden örnekleme başarısız olursa, yeniden örnekleme olmadan devam et? (pcm_data hala orijinal decode edilmiş haldedir)
+                                    # Veya eski pcm_data'yı kullanmaya devam et:
+                                    # pcm_data = self.codec.decode(audio_data) # Yeniden decode etmek yerine orijinali saklamak daha iyi olabilir
+                        except Exception as e:
+                            logger.error(f"Error decoding audio for Vosk for call {self.b2b_key}: {e}")
+                            # Çözme başarısız olursa orijinal veriyle devam et
+                            pcm_data = audio_data
+                    
+                    # Ses verisinin bytes türünde olduğundan emin ol
+                    if not isinstance(pcm_data, bytes):
+                        logger.error(f"Audio data is not bytes, converting. Type is {type(pcm_data)}")
+                        # Eğer string ise bytes'a dönüştür
+                        if isinstance(pcm_data, str):
+                            pcm_data = pcm_data.encode('utf-8')
+                        # Başka bir tür ise bytes'a dönüştürmeyi dene
+                        else:
+                            try:
+                                pcm_data = bytes(pcm_data)
+                            except Exception as e:
+                                logger.error(f"Failed to convert audio data to bytes: {e}")
+                                # Başarısız olursa kuyruğu ilerlet ve devam et
+                                self.send_queue.task_done()
+                                continue
+                        
+                    # Ses verisini Vosk'a ikili (binary) olarak gönder
+                    await self.websocket.send(pcm_data)
+                    self.send_queue.task_done()
+                    
+                    # Başarıyı izle
+                    success_count += 1
+                    error_count = 0  # Başarıda hata sayısını sıfırla
+                    
+                    # Periyodik olarak bağlantı sağlığını bildir
+                    if success_count % 100 == 0:
+                        self.flow_control.connection_success()
+                    
+                except asyncio.TimeoutError:
+                    # queue.get() üzerinde sadece bir zaman aşımı, döngüye devam et
+                    continue
+                except websockets.exceptions.ConnectionClosed as e:
+                    logger.warning(f"WebSocket closed during send for call {self.b2b_key}: {e}")
+                    # _connect_and_manage yönteminin yeniden bağlanmayı ele almasına izin ver
+                    raise
+                except Exception as e:
+                    logger.error(f"Error in Vosk send loop for call {self.b2b_key}: {e}")
+                    # Uyarlanabilir geri çekilme için ardışık hataları izle
+                    error_count += 1
+                    if error_count >= 3:
+                        self.flow_control.connection_error()
+                        
+                    # Ardışık hatalara dayalı artan gecikme ekle
+                    backoff_delay = min(0.1 * (2 ** min(error_count, 5)), 2.0)
+                    await asyncio.sleep(backoff_delay)
+            
+            # Kapatıyorsak, transkripsiyonu sonlandırmak için Vosk'a EOF işaretçisi gönder
+            if self.websocket and not self.websocket.closed and not self.stop_event.is_set():
+                try:
+                    logger.info(f"Sending EOF marker to Vosk for call {self.b2b_key}")
+                    await self.websocket.send(json.dumps({"eof": 1}))
+                except Exception as e:
+                    logger.error(f"Error sending EOF to Vosk for call {self.b2b_key}: {e}")
+            
+            logger.info(f"Vosk audio send loop exiting for call {self.b2b_key}")
         except Exception as e:
-            logging.error(f"Error closing Vosk connection: {str(e)}") 
+            logger.error(f"Unexpected error in Vosk send loop for call {self.b2b_key}: {e}")
+            raise  # Yeniden bağlanmayı ele alması için _connect_and_manage'e yeniden yükselt
+
+    async def _receive_loop(self):
+        """ Vosk'tan sürekli olarak mesaj alan dahili görev """
+        try:
+            logger.info(f"Starting Vosk transcription receive loop for call {self.b2b_key}")
+            
+            # Zaman içinde cümle parçalarını toplamak için
+            # Deepgram uygulamasının metni nasıl tamponladığına benzer
+            # GELİŞTİRİLEBİLİR: Tampon boyutu sınırlandırılabilir ve tamponlama stratejisi iyileştirilebilir
+            sentence_buffer = []
+            
+            while self.is_active and not self.stop_event.is_set() and self.websocket:
+                try:
+                    # WebSocket bağlantısının durumunu ayrıca kontrol etmeye gerek yok
+                    # recv() zaten bağlantı kapalıysa hata verecektir
+                    
+                    # Vosk'tan bir sonraki mesajı al
+                    message = await self.websocket.recv()
+                    
+                    # Akış kontrolüne başarılı iletişimi bildir
+                    self.flow_control.connection_success()
+                    
+                    # JSON yanıtını ayrıştır
+                    try:
+                        result = json.loads(message)
+                        # Hata ayıklama çıktısı (üretimde kaldırılabilir veya debug seviyesine değiştirilebilir)
+                        logger.info(f"Received from Vosk: {result}")
+                        
+                        # Sonuç nesnesini işle: birkaç olası yanıt türü var
+                        
+                        # 1. Final metin/sonuç transkripsiyon
+                        if "text" in result and result["text"]:
+                            final_text = result["text"]
+                            if final_text.strip():  # Boş değilse
+                                sentence_buffer.append(final_text)
+                                # Bu bir cümlenin sonu gibi görünüyorsa
+                                if final_text.endswith((".", "?", "!")):
+                                    complete_sentence = " ".join(sentence_buffer)
+                                    logger.info(f"Complete sentence from Vosk for call {self.b2b_key}: {complete_sentence}")
+                                    
+                                    # Deepgram uygulamasına benzer şekilde, tam cümleleri işleyeceğiz
+                                    # Ayrıca bir handle_phrase veya eşdeğerini tetikleyeceğiz
+                                    
+                                    # Döngüyü engellememe için create_task kullan
+                                    # GELİŞTİRİLEBİLİR: Bu görevleri izlemek ve düzgün temizlenmesini sağlamak için bir mekanizma eklenebilir
+                                    asyncio.create_task(self.handle_phrase(complete_sentence))
+                                    
+                                    # Tam bir cümleden sonra tamponu temizle
+                                    sentence_buffer.clear()
+                        
+                        # 2. Kısmi sonuç (hala devam eden geçici transkripsiyon)
+                        elif "partial" in result and result["partial"]:
+                            partial_text = result["partial"]
+                            if logger.level <= logging.DEBUG:  # Kısmi sonuçları sadece debug seviyesinde logla
+                                logger.debug(f"Partial from Vosk for call {self.b2b_key}: {partial_text}")
+                            # Genellikle kısmi sonuçlar üzerinde UI'da gösterme veya izleme dışında bir işlem yapmayız.
+                            # Gerekirse transkripsiyon kuyruğunda saklayabiliriz.
+                            # await self.transcription_queue.put({"type": "partial", "text": partial_text})
+                        
+                        # Vosk'un sağladığı diğer yanıt türlerini ekle
+                    
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Failed to decode JSON from Vosk for call {self.b2b_key}: {e}. Message: {message}")
+                    
+                except websockets.exceptions.ConnectionClosed as e:
+                    logger.warning(f"WebSocket closed during receive for call {self.b2b_key}: {e}")
+                    # _connect_and_manage yönteminin yeniden bağlanmayı ele almasına izin ver
+                    raise
+                except Exception as e:
+                    logger.error(f"Error in Vosk receive loop for call {self.b2b_key}: {e}")
+                    # Akış kontrolünde bağlantı sorununu işaretle
+                    self.flow_control.connection_error()
+                    
+                    # Hatalar için uyarlanabilir geri çekilme kullan
+                    backoff_delay = min(0.1 * (2 ** min(self.consecutive_errors, 5)), 2.0)
+                    await asyncio.sleep(backoff_delay)
+            
+            logger.info(f"Vosk transcription receive loop exiting for call {self.b2b_key}")
+        except Exception as e:
+            logger.error(f"Unexpected error in Vosk receive loop for call {self.b2b_key}: {e}")
+            raise  # Yeniden bağlanmayı ele alması için _connect_and_manage'e yeniden yükselt
+
+    # Deepgram'ın handle_phrase'ine benzer şekilde, transkribe edilmiş metni işleme yardımcı yöntemi
+    async def handle_phrase(self, phrase):
+        """ Tam transkribe edilmiş cümleyi işler """
+        logger.info(f"Handling phrase from Vosk for call {self.b2b_key}: {phrase}")
+        
+        # TODO: ChatGPT yerine yerel LLM servisi ile entegre et
+        # TODO: Bir TTS servisine bağlan (belirlenecek)
+        # TODO: Akış Deepgram uygulamasına benzer olacak:
+        #       1. Cümleyi yerel LLM servisine aktar
+        #       2. LLM'den yanıt al
+        #       3. Yanıtı TTS servisi kullanarak konuşmaya dönüştür
+        #       4. Konuşmayı arayana geri gönder
+        
+        # Şimdilik, sadece transkribe edilen cümleyi logla
+        return
+
+    async def start(self):
+        """ WebSocket bağlantısını başlatarak Vosk STT işlemeyi başlatır """
+        logger.info(f"Starting Vosk STT for call {self.b2b_key}")
+        if not self.vosk_server_url:
+             logger.error("Cannot start Vosk STT: URL not configured.")
+             return # Veya bir hata yükselt
+
+        self.is_active = True
+        self.stop_event.clear()
+        # Bağlantı ve işleme görevini başlat
+        self.connection_task = asyncio.create_task(self._connect_and_manage())
+        logger.info(f"Vosk STT connection manager task created for call {self.b2b_key}")
+        # Bağlantının kurulmasını beklemek isteyebiliriz
+        # await self.websocket.wait_connected() # Kolayca destekleyen bir kütüphane kullanıyorsak
+        # veya _connect_and_manage tarafından sinyallenen dahili bir olay kullan
+
+
+    async def send(self, audio):
+        """ Ses verilerini WebSocket bağlantısı için gönderme kuyruğuna koyar """
+        if not self.is_active or self.stop_event.is_set():
+            # logger.debug(f"Vosk STT not active or stopping, ignoring audio data for call {self.b2b_key}")
+            return # Çalışmıyorsa kuyruğa koyma
+            
+        # Ses verisinin bytes türünde olduğundan emin ol
+        if not isinstance(audio, bytes):
+            logger.error(f"Incoming audio data is not bytes, converting. Type is {type(audio)}")
+            # Eğer string ise bytes'a dönüştür
+            if isinstance(audio, str):
+                try:
+                    audio = audio.encode('utf-8')
+                    logger.warning(f"Converted string audio data to bytes for call {self.b2b_key}")
+                except Exception as e:
+                    logger.error(f"Failed to convert string audio data to bytes: {e}")
+                    return  # Dönüşüm başarısız olursa işleme
+            # Başka bir tür ise bytes'a dönüştürmeyi dene
+            else:
+                try:
+                    audio = bytes(audio)
+                    logger.warning(f"Converted {type(audio)} audio data to bytes for call {self.b2b_key}")
+                except Exception as e:
+                    logger.error(f"Failed to convert audio data to bytes: {e}")
+                    return  # Dönüşüm başarısız olursa işleme
+
+        # Kuyruk boyutu kontrolü - bellek sorunlarını önlemek için
+        if self.send_queue.qsize() >= self.max_queue_size:
+            # Kuyruktaki ilk öğeyi çıkar (FIFO) - veya daha agresif bir yaklaşım için tüm kuyruğu temizle
+            try:
+                # En eski veriyi çıkar
+                if not self.send_queue.empty():
+                    _ = self.send_queue.get_nowait()
+                    self.send_queue.task_done()
+                    
+                if self.send_queue.qsize() >= self.max_queue_size:
+                    # Hala çok büyükse, tamamen temizle
+                    logger.warning(f"Queue too large ({self.send_queue.qsize()}) for call {self.b2b_key}, clearing to prevent memory issues")
+                    while not self.send_queue.empty():
+                        try:
+                            _ = self.send_queue.get_nowait()
+                            self.send_queue.task_done()
+                        except asyncio.QueueEmpty:
+                            break
+            except Exception as e:
+                logger.error(f"Error managing queue size for call {self.b2b_key}: {e}")
+
+        # WebSocket kontrolü ve kuyruğa alma
+        if self.websocket:
+            try:
+                # Bağlantının açık olduğunu kontrol et
+                try:
+                    pong_waiter = await self.websocket.ping()
+                    await asyncio.wait_for(pong_waiter, timeout=0.2)
+                    # Bağlantı açık, veriyi kuyruğa koy
+                    await self.send_queue.put(audio)
+                except Exception:
+                    # Bağlantı kapalı, yeniden bağlanma denemesi sayısını kontrol et
+                    if self.reconnection_attempts > 3:
+                        logger.warning(f"Multiple reconnection attempts for call {self.b2b_key}, skipping audio queueing")
+                        # 3'ten fazla yeniden bağlanma denemesi varsa, veriyi kuyruğa ekleme
+                        return
+                    # Az sayıda yeniden bağlanma denemesi varsa, kuyruğa al
+                    await self.send_queue.put(audio)
+            except Exception as e:
+                logger.error(f"Error queuing audio: {e}")
+                # Hatada bile kuyruğa koy, ancak yeniden bağlanma sayısını kontrol et
+                if self.reconnection_attempts <= 3:
+                    await self.send_queue.put(audio)
+        else:
+            # WebSocket henüz bağlanmadıysa
+            await self.send_queue.put(audio)
+
+
+    async def close(self):
+        """ Vosk STT oturumunu kapatır ve kaynakları temizler """
+        logger.info(f"Closing Vosk STT connection for call {self.b2b_key}")
+        if not self.is_active:
+            return
+
+        self.is_active = False
+        self.stop_event.set() # Tüm görevlere durma sinyali ver
+
+        # Görevleri nazikçe durdur
+        # GELİŞTİRİLEBİLİR: Bekleyen tüm görevleri (handle_phrase görevleri gibi) izleyip temizleyebiliriz
+        if self.connection_task:
+            try:
+                 # Bağlantı görevine EOF gönderme ve WebSocket'i kapatma şansı ver
+                 await asyncio.wait_for(self.connection_task, timeout=5.0)
+            except asyncio.TimeoutError:
+                 logger.warning(f"Vosk connection task did not finish gracefully within timeout for call {self.b2b_key}. Cancelling.")
+                 self.connection_task.cancel()
+            except Exception as e:
+                 logger.error(f"Error during connection task shutdown for call {self.b2b_key}: {e}")
+                 self.connection_task.cancel() # Diğer hatalarda iptali sağla
+
+        # connection_task yapmadıysa WebSocket'i açıkça kapat
+        if self.websocket and not self.websocket.closed:
+            try:
+                await self.websocket.close(code=1000, reason='Client closing')
+                logger.info(f"Vosk WebSocket closed explicitly for call {self.b2b_key}")
+            except Exception as e:
+                logger.error(f"Error closing Vosk WebSocket for call {self.b2b_key}: {e}")
+
+        self.websocket = None
+        self.connection_task = None
+        self.receive_task = None
+        # Kuyrukları temizle? Kapatma sırasındaki istenen davranışa göre karar ver.
+        # while not self.send_queue.empty(): self.send_queue.get_nowait()
+        # while not self.transcription_queue.empty(): self.transcription_queue.get_nowait()
+
+        logger.info(f"Vosk STT resources cleaned up for call {self.b2b_key}")
+
+    # --- İhtiyaç duyulan ek yöntemler ---
+    async def get_transcription(self):
+        """ Bir sonraki transkripsiyon sonucunu alır (yer tutucu) """
+        # Deepgram'daki gibi geri aramalar aracılığıyla sonuçlar itilirse bu gerekli olmayabilir
+        # Veya self.transcription_queue'dan çekebilir
+        try:
+             return await self.transcription_queue.get()
+        except asyncio.QueueEmpty:
+             return None
+
+    # engine.py veya call.py'nin AIEngine örneğini nasıl kullandığına bağlı olarak
+    # Deepgram'ın on_text geri arama kaydına benzer bir yönteme ihtiyacımız olabilir.
+
+
+# vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4 

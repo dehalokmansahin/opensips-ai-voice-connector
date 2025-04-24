@@ -28,16 +28,25 @@ from sipmessage import Address
 from deepgram_api import Deepgram
 from openai_api import OpenAI
 from deepgram_native_api import DeepgramNative
-from azure_api import AzureAI
-from vosk_engine import VoskSTTEngine
+# Try to import Azure, but don't fail if not available
+try:
+    from azure_api import AzureAI
+    has_azure = True
+except ImportError:
+    has_azure = False
+    print("Azure module not available, Azure STT provider will be disabled")
+from stt_vosk import VoskSTT
 from config import Config
 
+# Initialize FLAVORS dictionary
 FLAVORS = {"deepgram": Deepgram,
            "openai": OpenAI,
            "deepgram_native": DeepgramNative,
-           "azure": AzureAI,
-           "vosk": VoskSTTEngine}
+           "vosk": VoskSTT}
 
+# Add Azure if available
+if has_azure:
+    FLAVORS["azure"] = AzureAI
 
 class UnknownSIPUser(Exception):
     """ User is not known """
@@ -77,7 +86,6 @@ def indialog(params):
 
 def get_user(params):
     """ Returns the User from the SIP headers """
-
     to = get_to(params)
     return to.uri.user.lower() if to.uri else None
 

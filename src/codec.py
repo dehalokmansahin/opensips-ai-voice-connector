@@ -82,7 +82,7 @@ class G711(GenericCodec):
     def __init__(self, params):
         super().__init__(params)
 
-        self.sample_rate = 8000
+        self.sample_rate = 16000
         self.bitrate = None
         self.container = 'none'
         self.name = "g711"

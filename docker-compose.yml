@@ -6,17 +6,20 @@ services:
     build: . # Dockerfile'ın bulunduğu dizin (proje kök dizini varsayıldı)
     container_name: oavc
     ports:
-      # OAVC'nin kullandığı RTP port aralığını host'a map'leyin
-      - "35000-35100:35000-35100/udp"
+
+      # Gelen istekler için TCP port 8088'i host'a map'leyin
+      - "8088:8088/tcp"
       # Not: MI (8088) ve Event (35010) portları sadece diğer konteynerlerce
       # erişileceği için host'a maplenmesi genellikle GEREKMEZ.
+      # Ancak, isteğiniz üzerine TCP 8088'i dışarıya açıyoruz.
+    volumes:
+      # Genel yapılandırma dosyasını konteynere bağla
+      - ./cfg/opensips-ai-voice-connector.ini:/app/cfg/opensips-ai-voice-connector.ini
     environment:
-      # Vosk sunucusuna erişim için servis adını kullanın
-      - VOSK_WS_URL=ws://vosk-server:2700
-      # Dockerfile'daki diğer environment değişkenleri (gerekirse buraya da eklenebilir)
-      - CONFIG_FILE=/app/cfg/vosk.cfg
+      # Vosk sunucusuna erişim için servis adını kullanın      # Ana yapılandırma dosyasının yolunu belirtin
+      - CONFIG_FILE=/app/cfg/opensips-ai-voice-connector.ini
       - PYTHONPATH=/app
-      - SIP_PORT=8088 # Bu değişkenin kullanım amacına göre kontrol edin
+
     networks:
       - opensips_network
     depends_on:
@@ -24,35 +27,25 @@ services:
       - vosk-server # OAVC başlamadan önce rtpproxy ve vosk'un hazır olmasını bekle
     restart: unless-stopped # Konteyner durursa yeniden başlatmayı dene
 
-  # RTPProxy Servisi
-  rtpproxy:
-    image: sippylabs/rtpproxy:sha-e3d3511-ubuntu_latest # Resmi geliştirici imajı
-    container_name: rtpproxy
-    command: rtpproxy -F -l 0.0.0.0 -s udp:0.0.0.0:35005 -d LOG_DEBUG  # İçeride 35005'i dinle
-    ports:
-      # Sadece RTP medya port aralığını host'a map'leyin
-      - "7000-8000:7000-8000/udp"
-    networks:
-      - opensips_network
-    restart: unless-stopped
-
   # OpenSIPS Servisi
   opensips:
     # Seçenek 1: Hazır OpenSIPS imajı kullanın (versiyonu ihtiyacınıza göre seçin)
-    image: opensips/opensips:latest
+    image: opensips/opensips:3.4
     # Seçenek 2: Eğer OpenSIPS için kendi Dockerfile'ınız varsa:
     # build: ./path/to/opensips/docker/context # Gerçek yolu belirtin
     container_name: opensips
     ports:
-      # Standart SIP portunu host'a map'leyin
-      - "5060:5060/udp"
+      # Kubernetes tanımına göre portlar
+      - "5060:5060/udp" # Standart SIP (UDP)
+      - "5060:5060/tcp" # SIP (TCP)
+      - "8080:8080/udp" # SIP Alternatif (UDP)
+      - "8088:8088/udp" # MI Datagram (UDP)
     volumes:
       # Güncellenmiş opensips.cfg dosyasını konteynere bağlayın
       - ./cfg/opensips.cfg:/etc/opensips/opensips.cfg
     networks:
       - opensips_network
-    depends_on:
-      - rtpproxy # OpenSIPS başlamadan önce rtpproxy'nin hazır olmasını bekle
+
     restart: unless-stopped
 
   # Vosk STT Servisi

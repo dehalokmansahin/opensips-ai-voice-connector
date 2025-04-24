@@ -39,8 +39,8 @@ import utils as utils
 
 
 mi_cfg = Config.get("opensips")
-mi_ip = mi_cfg.get("ip", "MI_IP", "opensips")
-mi_port = int(mi_cfg.get("port", "MI_PORT", "8088"))
+mi_ip = mi_cfg.get("ip", "MI_IP", "127.0.0.1")
+mi_port = int(mi_cfg.get("port", "MI_PORT", "8080"))
 
 mi_conn = OpenSIPSMI(conn="datagram", datagram_ip=mi_ip, datagram_port=mi_port)
 
