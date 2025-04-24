@@ -1,10 +1,10 @@
 version: '3.8'
 
 services:
-  # OpenSIPS AI Voice Connector (OAVC - Sizin Python uygulamanız)
-  oavc:
+  # OpenSIPS AI Voice Connector (opensips-ai-voice-connector - Sizin Python uygulamanız)
+  opensips-ai-voice-connector:
     build: . # Dockerfile'ın bulunduğu dizin (proje kök dizini varsayıldı)
-    container_name: oavc
+    container_name: opensips-ai-voice-connector-oavc
     ports:
 
       # Gelen istekler için TCP port 8088'i host'a map'leyin
@@ -24,7 +24,7 @@ services:
       - opensips_network
     depends_on:
       - opensips
-      - vosk-server # OAVC başlamadan önce rtpproxy ve vosk'un hazır olmasını bekle
+      - vosk-server # opensips-ai-voice-connector başlamadan önce rtpproxy ve vosk'un hazır olmasını bekle
     restart: unless-stopped # Konteyner durursa yeniden başlatmayı dene
 
   # OpenSIPS Servisi

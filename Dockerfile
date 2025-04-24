@@ -3,9 +3,10 @@ FROM python:3.10-slim
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies including OPUS codec support
+# Install system dependencies including OPUS codec support and libsndfile for soundfile library
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libopus-dev \
+    libsndfile1 \
     gcc \
     g++ \
     python3-dev \
@@ -21,6 +22,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy source code and configuration
 COPY src/ /app/src/
 COPY cfg/ /app/cfg/
+COPY test.wav /app/test.wav
+COPY test_vosk_with_wav.py /app/test_vosk_with_wav.py
 
 # Environment variables (can be overridden at runtime)
 ENV CONFIG_FILE=/app/cfg/vosk.cfg

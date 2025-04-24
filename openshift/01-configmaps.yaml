@@ -1,0 +1,149 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oavc-config
+data:
+  opensips-ai-voice-connector.ini: |
+    [opensips]
+    # Use the Kubernetes service name
+    ip = opensips
+    port = 8088
+
+    [engine]
+    event_ip = 0.0.0.0
+    # Corrected based on image
+    event_port = 8089
+
+    [rtp]
+    min_port = 35000
+    # Reduced range for Kubernetes Service example
+    max_port = 35100 
+    bind_ip = 0.0.0.0
+
+    [vosk]
+    # Use the Kubernetes service name and port
+    url = ws://vosk-server:2700
+    sample_rate = 16000
+    match = ^2581$  # Explicitly match user 2581
+    disabled = false
+
+    [deepgram]
+    disabled = true
+
+    [openai]
+    disabled = true
+
+    [general]
+    # Consider logging to stdout/stderr for Kubernetes
+    # logfile = vosk_connector.log 
+    loglevel = INFO
+
+    [ai]
+    type = vosk
+
+    [azure]
+    # Present in previous version and implied disabled at bottom of image
+    disabled = true
+  vosk.cfg: |
+    # Configuration for Vosk Speech-to-Text engine connection in OAVC
+
+    [vosk]
+    # WebSocket URL to connect to the Vosk server (Set via ENV Var preferably)
+    # ws_url = ws://vosk-server:2700 
+
+    # Sample rate of the audio (should match the model used by Vosk)
+    # Telephony typically uses 8kHz - ensure your Vosk model matches this setting
+    sample_rate = 16000 
+
+    max_queue_size = 100
+    # VAD (Voice Activity Detection) settings
+    use_vad = true
+
+    # WebRTC VAD settings
+    vad_aggressiveness = 2      # 0-3, higher values are more aggressive (less sensitive)
+    silence_frames_threshold = 10  # Number of consecutive silent frames to consider end of speech
+    speech_frames_threshold = 3    # Number of consecutive speech frames to consider start of speech
+
+    # Barge-in settings (interrupting TTS with speech)
+    enable_barge_in = true      # Enable or disable barge-in functionality
+    barge_in_threshold = 5      # Number of speech frames needed to trigger barge-in
+
+    # Legacy VAD settings (kept for backward compatibility)
+    silence_threshold = 500     # Number of consecutive silent frames to consider end of speech (legacy)
+    speech_threshold = 300      # Energy threshold to consider audio as speech (legacy)
+
+    # Connection settings
+    reconnect_delay = 5         # Seconds to wait between reconnection attempts
+    max_reconnect_attempts = 3
+
+    # Debugging
+    buffer_audio = false        # Whether to buffer audio for debugging/saving
+
+    # Matching patterns for this engine
+    # Calls to these URIs will use the Vosk engine
+    match = ^vosk.*$ 
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opensips-config
+data:
+  opensips.cfg: |
+    ####### Global Parameters #########
+
+    log_level=3
+    # Log to stderr for Kubernetes/OpenShift
+    stderror_enabled=yes
+    syslog_enabled=no 
+
+    socket=udp:*:5060
+    socket=tcp:*:5060
+    socket=udp:*:8080
+
+    ####### Modules Section ########
+
+    #set module path
+    mpath="/usr/lib/x86_64-linux-gnu/opensips/modules/"
+
+    loadmodule "tm.so"
+    loadmodule "rr.so"
+    loadmodule "sipmsgops.so"
+    loadmodule "signaling.so"
+    loadmodule "cfgutils.so"
+    # Use mi_datagram for container communication
+    # loadmodule "mi_fifo.so" 
+    loadmodule "proto_tcp.so"
+    loadmodule "proto_udp.so"
+    loadmodule "sl.so"
+
+    loadmodule "event_datagram.so"
+    loadmodule "mi_datagram.so"
+    loadmodule "b2b_entities.so"
+
+    # modparam("mi_fifo", "fifo_name", "/tmp/opensips_fifo")
+
+    modparam("tm", "fr_timeout", 2)
+    modparam("tm", "fr_inv_timeout", 3)
+    modparam("tm", "restart_fr_on_each_reply", 0)
+    modparam("tm", "onreply_avp_mode", 1)
+
+    # MI Datagram - Listen on all interfaces within the pod for MI commands from OAVC
+    modparam("mi_datagram", "socket_name", "udp:0.0.0.0:8088") 
+
+    ####### Routing Logic ########
+
+    # Main request routing
+    route {
+
+
+        # Initial request processing
+        # Check for unwanted requests
+        if (!is_method("INVITE") || has_totag()) {
+            send_reply(405, "Method Not Allowed");
+            exit;
+        }
+        ua_session_server_init($var(b2b_key),"rbh");
+        xlog("Started new call for $var(b2b_key)\n");
+        exit;
+
+    } 

@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vosk-server
+  labels:
+    app: vosk-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vosk-server
+  template:
+    metadata:
+      labels:
+        app: vosk-server
+    spec:
+      containers:
+      - name: vosk-server
+        image: dehalokmansahin/vosk-server:latest
+        ports:
+        - containerPort: 2700
+          name: ws
+          protocol: TCP 

@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opensips
+  labels:
+    app: opensips
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: opensips
+  template:
+    metadata:
+      labels:
+        app: opensips
+    spec:
+      containers:
+      - name: opensips
+        image: opensips/opensips:3.4
+        ports:
+        - containerPort: 5060
+          name: sip-udp
+          protocol: UDP
+        - containerPort: 5060
+          name: sip-tcp
+          protocol: TCP
+        - containerPort: 8080
+          name: sip-alt-udp
+          protocol: UDP
+        - containerPort: 8088 # MI Datagram port
+          name: mi-udp 
+          protocol: UDP
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/opensips/opensips.cfg
+          subPath: opensips.cfg # Mount only the specific file
+      volumes:
+      - name: config-volume
+        configMap:
+          name: opensips-config 

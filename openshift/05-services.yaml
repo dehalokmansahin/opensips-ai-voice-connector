@@ -1,0 +1,74 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensips-ai-voice-connector
+  labels:
+    app: oavc
+spec:
+  selector:
+    app: oavc
+  ports:
+  - name: sip-udp
+    port: 8088
+    targetPort: 8088
+    protocol: UDP
+  # Note: Exposing UDP port ranges in ClusterIP services is complex.
+  # This defines the starting port. Your CNI might handle ranges differently.
+  # For NodePort/LoadBalancer, you might need specific annotations or multiple port entries.
+  # Check OpenShift/Kubernetes docs for UDP range exposure with your CNI.
+  - name: rtp-udp-start
+    port: 35000
+    targetPort: 35000 # Corresponds to rtp-start in Deployment
+    protocol: UDP
+  # Add entries for other ports in the range if needed/supported, e.g.:
+  # - name: rtp-udp-35001
+  #   port: 35001
+  #   targetPort: 35001
+  #   protocol: UDP
+  # ... up to 35100
+  type: ClusterIP # Internal only by default
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensips
+  labels:
+    app: opensips
+spec:
+  selector:
+    app: opensips
+  ports:
+  - name: sip-udp
+    port: 5060
+    targetPort: 5060
+    protocol: UDP
+  - name: sip-tcp
+    port: 5060
+    targetPort: 5060
+    protocol: TCP
+  - name: sip-alt-udp
+    port: 8080
+    targetPort: 8080
+    protocol: UDP
+  - name: mi-udp
+    port: 8088
+    targetPort: 8088
+    protocol: UDP
+  # Change type to LoadBalancer or NodePort for external access if needed
+  type: ClusterIP 
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vosk-server
+  labels:
+    app: vosk-server
+spec:
+  selector:
+    app: vosk-server
+  ports:
+  - name: ws
+    port: 2700
+    targetPort: 2700
+    protocol: TCP
+  type: ClusterIP 
