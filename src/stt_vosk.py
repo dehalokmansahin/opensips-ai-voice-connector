@@ -30,6 +30,8 @@ import websockets  # WebSockets kütüphanesini içe aktar
 import time
 import numpy as np
 from scipy import signal
+import soundfile as sf  # WAV okumak için eklendi
+import os # Dosya yolunu kontrol etmek için eklendi
 
 from ai import AIEngine
 from config import Config
@@ -90,14 +92,16 @@ class VoskSTT(AIEngine):
         self.call = call  # İleride kullanılabilecek çağrı referansını sakla
         self.b2b_key = call.b2b_key # Tanımlama için B2B anahtarını sakla
 
-        # --- Konfigürasyon ---
+        # --- Konfigürasyon (Using self.cfg, assuming Config.get worked) ---
+        # Assuming self.cfg now holds the [vosk] section dictionary/object
+        # And assuming self.cfg.get() handles env fallback and type conversion
         self.vosk_server_url = self.cfg.get("url", "VOSK_URL")
-        # Belirtilmemişse 16000hz varsayılan olarak kullan, Vosk genellikle  16k kullanır
-        # GELİŞTİRİLEBİLİR: Farklı örnek hızlarını destekleyecek şekilde yeniden örnekleme eklenebilir
         self.sample_rate = int(self.cfg.get("sample_rate", "VOSK_SAMPLE_RATE", 16000))
-        # Kuyruk büyüklüğünü sınırla, bellek sorunlarını önlemek için
         self.max_queue_size = int(self.cfg.get("max_queue_size", "VOSK_MAX_QUEUE_SIZE", 100))
-        # İhtiyaç duyulursa buraya daha fazla Vosk'a özel yapılandırma seçeneği eklenebilir (ör. model)
+        # Use getboolean or similar method if provided by your Config object
+        # This line might need adjustment based on how Config handles booleans
+        self.test_mode_wav_enabled = self.cfg.getboolean("test_mode_wav", "VOSK_TEST_MODE_WAV", False)
+        self.test_wav_path = self.cfg.get("test_wav_path", "VOSK_TEST_WAV_PATH", "/app/test.wav")
 
         if not self.vosk_server_url:
             logger.error("Vosk server URL is not configured. Please set 'url' in the [vosk] section or VOSK_URL env var.")
@@ -113,7 +117,7 @@ class VoskSTT(AIEngine):
         self.connection_task = None
         self.receive_task = None
         self.send_task = None
-        self.send_queue = asyncio.Queue() # Gönderilecek ses verileri için kuyruk
+        self.send_queue = asyncio.Queue() # Gönderilecek ses verileri için kuyruk (normal mod için hala gerekli)
         self.transcription_queue = asyncio.Queue() # Alınan transkripsiyon sonuçları için kuyruk
         self.is_active = False
         self.stop_event = asyncio.Event() # Görevleri durdurmak için sinyal
@@ -137,6 +141,24 @@ class VoskSTT(AIEngine):
 
     def choose_codec(self, sdp):
         """ Tercih edilen codec'i seçer, Vosk için PCM'e kolayca dönüştürülebilenleri önceliklendirir """
+        # Test modunda SDP olmayabilir veya codec gereksiz olabilir.
+        if self.test_mode_wav_enabled:
+            logger.info("WAV test mode enabled, skipping SDP codec selection.")
+            # Varsayılan bir codec nesnesi döndür veya sesin zaten PCM olduğunu varsay
+            # Sesin WAV dosyasından PCM olarak okunacağını varsayıyoruz.
+            class DummyCodec:
+                # Minimal object to satisfy Call.get_new_sdp
+                class Params:
+                    pt = 96 # Example dynamic payload type for L16
+                    name = 'L16'
+                    rate = 16000 # Default rate, might be updated in start()
+                params = Params()
+                name = "pcm_wav"
+                sample_rate = self.sample_rate # WAV dosyasının sample_rate'ine uygun olmalı
+                payload_type = params.pt # Add direct attribute
+                # decode metodu eklemeyin, _send_loop yeniden örnekleme yapmasın diye
+            return DummyCodec()
+
         # GELİŞTİRİLEBİLİR: Daha geniş codec desteği eklenebilir (örn. Opus)
         codecs = get_codecs(sdp)
         cmap = {c.name.lower(): c for c in codecs}
@@ -194,8 +216,16 @@ class VoskSTT(AIEngine):
                 await self.websocket.send(config_message)  # String olarak gönder
                 logger.info(f"Sent configuration to Vosk: {config_message}")
                 
-                # Gönderme ve alma görevlerini başlat
-                self.send_task = asyncio.create_task(self._send_loop())
+                # --- Start EITHER the WAV sending loop OR the regular queue sending loop ---
+                if self.test_mode_wav_enabled:
+                    logger.info("Starting direct WAV sending loop.")
+                    self.send_task = asyncio.create_task(self._send_wav_directly_loop())
+                else:
+                    logger.info("Starting queue-based audio sending loop.")
+                    self.send_task = asyncio.create_task(self._send_loop())
+                # --- End loop selection ---
+
+                # Receive loop always starts
                 self.receive_task = asyncio.create_task(self._receive_loop())
                 
                 # Herhangi bir görev tamamlanırsa - biri başarısız olursa, yeniden bağlanacağız
@@ -224,7 +254,17 @@ class VoskSTT(AIEngine):
                         logger.error(f"Task failed with error for call {self.b2b_key}: {e}")
                         self.consecutive_errors += 1
                         self.flow_control.connection_error()
-                
+
+                # --- Check if we should exit after WAV test mode finishes --- 
+                if self.test_mode_wav_enabled and self.send_task in done:
+                    if not self.stop_event.is_set(): # Check if already stopping
+                        logger.info("WAV send task completed in test mode. Exiting connection manager.")
+                        break # Exit the while loop, preventing reconnection
+                    else:
+                        logger.info("WAV send task completed, but stop event already set.")
+                        break # Already stopping anyway
+                # --- End WAV test check --- 
+
                 if self.stop_event.is_set():
                     logger.info(f"Stop event set, not reconnecting for call {self.b2b_key}")
                     break
@@ -289,7 +329,7 @@ class VoskSTT(AIEngine):
             logger.info(f"Starting Vosk audio send loop for call {self.b2b_key}")
             error_count = 0
             success_count = 0
-            
+
             while self.is_active and not self.stop_event.is_set() and self.websocket:
                 try:
                     # WebSocket bağlantısının durumunu kontrol et
@@ -301,92 +341,82 @@ class VoskSTT(AIEngine):
                     except Exception:
                         logger.warning(f"WebSocket appears to be closed for call {self.b2b_key}")
                         break  # Bağlantı kapalıysa döngüden çık
-                    
+
                     # Bir sonraki ses parçasını zaman aşımı ile kuyruktan al
                     # Bu, periyodik olarak çıkış yapıp yapmamamız gerektiğini kontrol etmemizi sağlar
                     audio_data = await asyncio.wait_for(self.send_queue.get(), timeout=0.5)
-                    
+
                     # Akış kontrolünü uygula
                     wait_time = await self.flow_control.consume()
                     if wait_time > 0:
                         await asyncio.sleep(wait_time)
-                    
-                    # Vosk'un beklediği formata (PCM) sesi eşleştir
-                    pcm_data = audio_data
+
+                    # --- Decoding Step (if applicable) ---
+                    pcm_data = audio_data # Assume PCM initially
+                    source_sample_rate = self.codec.sample_rate # Get rate from codec (SDP or WAV)
+
                     if hasattr(self.codec, 'decode'):
                         try:
-                            # Önce codec'i decode et
+                            # Decode codec (e.g., PCMU/PCMA) to PCM
                             pcm_data = self.codec.decode(audio_data)
-                            
-                            # Örnek hızları farklı ise yeniden örnekleme yap
-                            if self.codec.sample_rate != self.sample_rate:
-                                try:
-                                    # PCM verisini bytearray'den int16 numpy dizisine dönüştür
-                                    audio_array = np.frombuffer(pcm_data, dtype=np.int16)
-
-                                    # --- Start of Improved Resampling Logic ---
-                                    # int16 verisini float32'ye dönüştür ve normalleştir
-                                    max_val = np.iinfo(np.int16).max
-                                    audio_array_float = audio_array.astype(np.float32) / max_val
-
-                                    # Oranı hesapla
-                                    resample_ratio = self.sample_rate / self.codec.sample_rate
-
-                                    # Yeni uzunluğu hesapla
-                                    new_length = int(len(audio_array_float) * resample_ratio)
-
-                                    # Float verisi üzerinde yeniden örnekle
-                                    resampled_audio_float = signal.resample(audio_array_float, new_length)
-
-                                    # Sonucu [-1.0, 1.0] aralığına kırp
-                                    resampled_audio_float = np.clip(resampled_audio_float, -1.0, 1.0)
-
-                                    # Sonucu 16-bit PCM olarak geri dönüştür (normalizasyonu kaldır)
-                                    resampled_audio_int16 = (resampled_audio_float * max_val).astype(np.int16)
-
-                                    # byte'a dönüştür
-                                    pcm_data = resampled_audio_int16.tobytes()
-                                    # --- End of Improved Resampling Logic ---
-
-                                    logger.debug(f"Resampled audio from {self.codec.sample_rate}Hz to {self.sample_rate}Hz using float32 method.")
-                                except Exception as e:
-                                    logger.error(f"Error during resampling for call {self.b2b_key}: {e}")
-                                    # Yeniden örnekleme başarısız olursa, yeniden örnekleme olmadan devam et? (pcm_data hala orijinal decode edilmiş haldedir)
-                                    # Veya eski pcm_data'yı kullanmaya devam et:
-                                    # pcm_data = self.codec.decode(audio_data) # Yeniden decode etmek yerine orijinali saklamak daha iyi olabilir
+                            # Source rate remains self.codec.sample_rate
                         except Exception as e:
                             logger.error(f"Error decoding audio for Vosk for call {self.b2b_key}: {e}")
-                            # Çözme başarısız olursa orijinal veriyle devam et
-                            pcm_data = audio_data
-                    
-                    # Ses verisinin bytes türünde olduğundan emin ol
-                    if not isinstance(pcm_data, bytes):
-                        logger.error(f"Audio data is not bytes, converting. Type is {type(pcm_data)}")
-                        # Eğer string ise bytes'a dönüştür
-                        if isinstance(pcm_data, str):
-                            pcm_data = pcm_data.encode('utf-8')
-                        # Başka bir tür ise bytes'a dönüştürmeyi dene
-                        else:
-                            try:
+                            # If decoding fails, mark queue task done and skip this chunk
+                            self.send_queue.task_done()
+                            continue
+                    # else: If no decode method, pcm_data remains audio_data (e.g. from WAV)
+                    # and source_sample_rate is already set correctly.
+
+                    # --- Resampling Step (if necessary) ---
+                    if source_sample_rate != self.sample_rate:
+                        try:
+                            # PCM data (whether originally PCM or decoded) needs resampling
+                            # Ensure pcm_data is bytes before numpy conversion
+                            if not isinstance(pcm_data, bytes):
+                                # This shouldn't happen often here, but handle defensively
+                                logger.warning(f"Data for resampling is not bytes ({type(pcm_data)}), attempting conversion.")
                                 pcm_data = bytes(pcm_data)
-                            except Exception as e:
-                                logger.error(f"Failed to convert audio data to bytes: {e}")
-                                # Başarısız olursa kuyruğu ilerlet ve devam et
-                                self.send_queue.task_done()
-                                continue
-                        
-                    # Ses verisini Vosk'a ikili (binary) olarak gönder
+
+                            audio_array = np.frombuffer(pcm_data, dtype=np.int16)
+
+                            # --- Start of Improved Resampling Logic ---
+                            max_val = np.iinfo(np.int16).max
+                            audio_array_float = audio_array.astype(np.float32) / max_val
+                            resample_ratio = self.sample_rate / source_sample_rate
+                            new_length = int(len(audio_array_float) * resample_ratio)
+                            resampled_audio_float = signal.resample(audio_array_float, new_length)
+                            resampled_audio_float = np.clip(resampled_audio_float, -1.0, 1.0)
+                            resampled_audio_int16 = (resampled_audio_float * max_val).astype(np.int16)
+                            pcm_data = resampled_audio_int16.tobytes()
+                            # --- End of Improved Resampling Logic ---
+
+                            logger.debug(f"Resampled audio from {source_sample_rate}Hz to {self.sample_rate}Hz using float32 method.")
+                        except Exception as e:
+                            logger.error(f"Error during resampling for call {self.b2b_key}: {e}")
+                            # If resampling fails, mark task done and skip chunk to avoid sending wrong data
+                            self.send_queue.task_done()
+                            continue
+
+                    # --- Final Check and Send ---
+                    # Ensure data is bytes before sending
+                    if not isinstance(pcm_data, bytes):
+                        logger.error(f"Final audio data is not bytes after processing, skipping. Type is {type(pcm_data)}")
+                        self.send_queue.task_done()
+                        continue
+
+                    # Send the (potentially decoded and/or resampled) PCM data to Vosk
                     await self.websocket.send(pcm_data)
                     self.send_queue.task_done()
-                    
+
                     # Başarıyı izle
                     success_count += 1
                     error_count = 0  # Başarıda hata sayısını sıfırla
-                    
+
                     # Periyodik olarak bağlantı sağlığını bildir
                     if success_count % 100 == 0:
                         self.flow_control.connection_success()
-                    
+
                 except asyncio.TimeoutError:
                     # queue.get() üzerinde sadece bir zaman aşımı, döngüye devam et
                     continue
@@ -400,11 +430,11 @@ class VoskSTT(AIEngine):
                     error_count += 1
                     if error_count >= 3:
                         self.flow_control.connection_error()
-                        
+
                     # Ardışık hatalara dayalı artan gecikme ekle
                     backoff_delay = min(0.1 * (2 ** min(error_count, 5)), 2.0)
                     await asyncio.sleep(backoff_delay)
-            
+
             # Kapatıyorsak, transkripsiyonu sonlandırmak için Vosk'a EOF işaretçisi gönder
             if self.websocket and not self.websocket.closed and not self.stop_event.is_set():
                 try:
@@ -412,7 +442,7 @@ class VoskSTT(AIEngine):
                     await self.websocket.send(json.dumps({"eof": 1}))
                 except Exception as e:
                     logger.error(f"Error sending EOF to Vosk for call {self.b2b_key}: {e}")
-            
+
             logger.info(f"Vosk audio send loop exiting for call {self.b2b_key}")
         except Exception as e:
             logger.error(f"Unexpected error in Vosk send loop for call {self.b2b_key}: {e}")
@@ -522,18 +552,53 @@ class VoskSTT(AIEngine):
              logger.error("Cannot start Vosk STT: URL not configured.")
              return # Veya bir hata yükselt
 
+        if self.test_mode_wav_enabled:
+            logger.warning("--- Vosk STT WAV Test Mode Enabled ---")
+            if not os.path.exists(self.test_wav_path):
+                logger.error(f"WAV test file not found at {self.test_wav_path}. Disabling test mode.")
+                self.test_mode_wav_enabled = False # Test modunu devre dışı bırak
+            else:
+                # WAV dosyasının örnek hızını kontrol et (isteğe bağlı ama önerilir)
+                try:
+                    with sf.SoundFile(self.test_wav_path) as f:
+                        wav_actual_rate = f.samplerate
+                        if wav_actual_rate != self.sample_rate:
+                             logger.warning(f"Test WAV file sample rate ({wav_actual_rate}Hz) differs from configured Vosk rate ({self.sample_rate}Hz). Resampling will occur.")
+                        # Codec'i WAV dosyasına göre ayarla (özellikle decode etmeye gerek yoksa)
+                        class DummyCodec:
+                            # Minimal object to satisfy Call.get_new_sdp
+                            class Params:
+                                pt = 96 # Example dynamic payload type for L16
+                                name = 'L16'
+                                rate = wav_actual_rate # Use actual rate here for SDP
+                            params = Params()
+                            name = "pcm_wav"
+                            sample_rate = wav_actual_rate # _send_loop'un doğru şekilde yeniden örneklemesi için
+                            payload_type = params.pt # Add direct attribute
+                        self.codec = DummyCodec()
+                        logger.info(f"Using dummy codec based on WAV file ({wav_actual_rate}Hz)")
+                except Exception as e:
+                    logger.error(f"Could not read WAV file info {self.test_wav_path}: {e}. Disabling test mode.")
+                    self.test_mode_wav_enabled = False
+                    # Reset codec if WAV reading failed and test mode disabled
+                    logger.info("Resetting codec selection due to WAV read error.")
+                    self.codec = self.choose_codec(self.call.sdp)
+
         self.is_active = True
         self.stop_event.clear()
         # Bağlantı ve işleme görevini başlat
         self.connection_task = asyncio.create_task(self._connect_and_manage())
         logger.info(f"Vosk STT connection manager task created for call {self.b2b_key}")
-        # Bağlantının kurulmasını beklemek isteyebiliriz
-        # await self.websocket.wait_connected() # Kolayca destekleyen bir kütüphane kullanıyorsak
-        # veya _connect_and_manage tarafından sinyallenen dahili bir olay kullan
+        # Bağlantının kurulmasını beklemek isteyebiliriz (ancak WAV okumayı _connect_and_manage içinde başlatıyoruz)
 
 
     async def send(self, audio):
         """ Ses verilerini WebSocket bağlantısı için gönderme kuyruğuna koyar """
+        # WAV test modu etkinse, bu fonksiyondan gelen veriyi yoksay
+        if self.test_mode_wav_enabled:
+            # logger.debug(f"WAV test mode enabled, ignoring audio data from network for call {self.b2b_key}")
+            return
+
         if not self.is_active or self.stop_event.is_set():
             # logger.debug(f"Vosk STT not active or stopping, ignoring audio data for call {self.b2b_key}")
             return # Çalışmıyorsa kuyruğa koyma
@@ -615,6 +680,17 @@ class VoskSTT(AIEngine):
         self.is_active = False
         self.stop_event.set() # Tüm görevlere durma sinyali ver
 
+        # --- WAV Test Modu: Okuma görevini iptal et ---
+        if self.send_task and not self.send_task.done():
+            self.send_task.cancel()
+            try:
+                await self.send_task
+            except asyncio.CancelledError:
+                logger.info(f"WAV sending task cancelled for call {self.b2b_key}")
+            except Exception as e:
+                logger.error(f"Error during WAV sending task cancellation for call {self.b2b_key}: {e}")
+        # --- WAV Test Modu Sonu ---
+
         # Görevleri nazikçe durdur
         # GELİŞTİRİLEBİLİR: Bekleyen tüm görevleri (handle_phrase görevleri gibi) izleyip temizleyebiliriz
         if self.connection_task:
@@ -629,7 +705,7 @@ class VoskSTT(AIEngine):
                  self.connection_task.cancel() # Diğer hatalarda iptali sağla
 
         # connection_task yapmadıysa WebSocket'i açıkça kapat
-        if self.websocket and not self.websocket.closed:
+        if self.websocket:
             try:
                 await self.websocket.close(code=1000, reason='Client closing')
                 logger.info(f"Vosk WebSocket closed explicitly for call {self.b2b_key}")
@@ -639,11 +715,110 @@ class VoskSTT(AIEngine):
         self.websocket = None
         self.connection_task = None
         self.receive_task = None
+        self.send_task = None # Bu değişkeni de temizle
         # Kuyrukları temizle? Kapatma sırasındaki istenen davranışa göre karar ver.
         # while not self.send_queue.empty(): self.send_queue.get_nowait()
         # while not self.transcription_queue.empty(): self.transcription_queue.get_nowait()
 
         logger.info(f"Vosk STT resources cleaned up for call {self.b2b_key}")
+
+    # --- New Direct WAV Sending Loop (for Test Mode) ---
+    async def _send_wav_directly_loop(self):
+        """ Reads, processes (mono/resample), and sends WAV file chunks directly to WebSocket. """
+        try:
+            logger.info(f"Starting direct WAV send loop for {self.test_wav_path}")
+            chunk_size_ms = 20 # Chunk duration in ms
+            wav_actual_rate = self.codec.sample_rate # Rate determined in start()
+            blocksize = int(wav_actual_rate * chunk_size_ms / 1000) # Frames per chunk
+            target_rate = self.sample_rate # Target rate for Vosk
+
+            logger.info(f"Processing WAV {self.test_wav_path} with blocksize {blocksize} frames ({chunk_size_ms}ms) at {wav_actual_rate}Hz, Target: {target_rate}Hz")
+
+            wav_file = sf.SoundFile(self.test_wav_path, mode='r')
+            channels = wav_file.channels
+            logger.info(f"WAV file channels: {channels}")
+
+            block_generator = wav_file.blocks(blocksize=blocksize, dtype='int16', always_2d=False, fill_value=0)
+
+            total_frames_sent = 0
+            for block in block_generator:
+                # Check stop event and websocket connection state
+                # Rely on send() exception handling for connection state
+                if self.stop_event.is_set() or not self.websocket:
+                    logger.info("Stopping direct WAV send loop due to stop event or missing websocket.")
+                    break
+
+                # --- Processing Steps ---
+                processed_block = block # Start with the raw block
+
+                # 1. Mono Conversion
+                if channels > 1:
+                    if processed_block.ndim == 2:
+                        processed_block = np.mean(processed_block, axis=1).astype(np.int16)
+                    else:
+                        logger.warning(f"Expected 2D array for multi-channel audio, but got shape {processed_block.shape}. Skipping mono conversion.")
+                
+                # 2. Resampling (if necessary)
+                if wav_actual_rate != target_rate:
+                    try:
+                        # Use float32 for resampling
+                        max_val = np.iinfo(np.int16).max
+                        block_float = processed_block.astype(np.float32) / max_val
+                        # Use resample_poly for potentially better results with integer ratios
+                        gcd = np.gcd(wav_actual_rate, target_rate)
+                        up = target_rate // gcd
+                        down = wav_actual_rate // gcd
+                        # resample_ratio = target_rate / wav_actual_rate
+                        # new_length = int(len(block_float) * resample_ratio)
+                        # resampled_float = signal.resample(block_float, new_length)
+                        resampled_float = signal.resample_poly(block_float, up, down)
+                        resampled_float = np.clip(resampled_float, -1.0, 1.0)
+                        processed_block = (resampled_float * max_val).astype(np.int16)
+                        # logger.debug(f"Resampled block from {wav_actual_rate}Hz to {target_rate}Hz")
+                    except Exception as e:
+                        logger.error(f"Error resampling block: {e}. Skipping block.")
+                        continue # Skip sending this block
+                
+                # 3. Convert to bytes
+                audio_chunk_bytes = processed_block.tobytes()
+
+                # --- Send Chunk ---
+                if audio_chunk_bytes:
+                    try:
+                        await self.websocket.send(audio_chunk_bytes)
+                        total_frames_sent += len(processed_block) 
+
+                        # Simulate real-time by waiting for chunk duration
+                        await asyncio.sleep(chunk_size_ms / 1000.0)
+                    except websockets.exceptions.ConnectionClosed:
+                        logger.warning("WebSocket closed during direct WAV send.")
+                        break # Exit loop if connection closed
+                    except Exception as e:
+                        logger.error(f"Error sending WAV chunk: {e}")
+                        # Consider breaking or adding backoff here too
+                        await asyncio.sleep(0.1) # Small delay on error
+                else:
+                    logger.info("Received empty block from WAV generator.")
+                    # Continue loop, generator might yield empty blocks
+
+            wav_file.close()
+            logger.info(f"Finished processing WAV file {self.test_wav_path}. Total frames processed and sent: {total_frames_sent}")
+
+            # Send EOF marker after finishing the file
+            if self.websocket:
+                try:
+                    logger.info("Sending EOF marker after WAV file completion.")
+                    await self.websocket.send(json.dumps({"eof": 1}))
+                except Exception as e:
+                    logger.error(f"Error sending EOF after WAV file: {e}")
+
+        except FileNotFoundError:
+            logger.error(f"WAV test file not found: {self.test_wav_path}")
+        except Exception as e:
+            logger.error(f"Error in _send_wav_directly_loop: {e}", exc_info=True)
+        finally:
+            logger.info(f"Direct WAV sending loop finished for call {self.b2b_key}")
+    # --- End New Direct WAV Sending Loop ---
 
     # --- İhtiyaç duyulan ek yöntemler ---
     async def get_transcription(self):

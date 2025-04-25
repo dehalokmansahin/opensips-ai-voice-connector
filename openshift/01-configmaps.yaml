@@ -17,47 +17,23 @@ data:
     [rtp]
     min_port = 35000
     # Reduced range for Kubernetes Service example
-    max_port = 35100 
+    max_port = 35100
     bind_ip = 0.0.0.0
 
     [vosk]
+    # WebSocket URL to connect to the Vosk server
     # Use the Kubernetes service name and port
     url = ws://vosk-server:2700
-    sample_rate = 16000
-    match = ^2581$  # Explicitly match user 2581
     disabled = false
-
-    [deepgram]
-    disabled = true
-
-    [openai]
-    disabled = true
-
-    [general]
-    # Consider logging to stdout/stderr for Kubernetes
-    # logfile = vosk_connector.log 
-    loglevel = INFO
-
-    [ai]
-    type = vosk
-
-    [azure]
-    # Present in previous version and implied disabled at bottom of image
-    disabled = true
-  vosk.cfg: |
-    # Configuration for Vosk Speech-to-Text engine connection in OAVC
-
-    [vosk]
-    # WebSocket URL to connect to the Vosk server (Set via ENV Var preferably)
-    # ws_url = ws://vosk-server:2700 
-
     # Sample rate of the audio (should match the model used by Vosk)
-    # Telephony typically uses 8kHz - ensure your Vosk model matches this setting
-    sample_rate = 16000 
+    sample_rate = 16000
 
     max_queue_size = 100
     # VAD (Voice Activity Detection) settings
     use_vad = true
+    # Ensure test mode is reflected here if needed for deployment
+    test_mode_wav = true 
+    # Note: test_wav_path will likely be different or need mounting in OpenShift
 
     # WebRTC VAD settings
     vad_aggressiveness = 2      # 0-3, higher values are more aggressive (less sensitive)
@@ -81,7 +57,28 @@ data:
 
     # Matching patterns for this engine
     # Calls to these URIs will use the Vosk engine
-    match = ^vosk.*$ 
+    match = ^vosk.*$
+
+    [deepgram]
+    disabled = true
+
+    [openai]
+    disabled = true
+
+    [general]
+    # Consider logging to stdout/stderr for Kubernetes
+    # logfile = vosk_connector.log
+    loglevel = INFO
+
+    [ai]
+    type = vosk
+
+    [azure]
+    # Present in previous version and implied disabled at bottom of image
+    disabled = true
+
+  # Removed vosk.cfg entry as settings are merged above
+
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -94,7 +91,7 @@ data:
     log_level=3
     # Log to stderr for Kubernetes/OpenShift
     stderror_enabled=yes
-    syslog_enabled=no 
+    syslog_enabled=no
 
     socket=udp:*:5060
     socket=tcp:*:5060
@@ -128,7 +125,7 @@ data:
     modparam("tm", "onreply_avp_mode", 1)
 
     # MI Datagram - Listen on all interfaces within the pod for MI commands from OAVC
-    modparam("mi_datagram", "socket_name", "udp:0.0.0.0:8088") 
+    modparam("mi_datagram", "socket_name", "udp:0.0.0.0:8088")
 
     ####### Routing Logic ########
 
