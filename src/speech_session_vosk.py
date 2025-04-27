@@ -73,6 +73,8 @@ class VoskSTT(AIEngine):
         
         # Durum
         self.receive_task = None
+        self.queue_processor_task = None
+        self._queue_processor_running = False
         
         # Set default logging level to INFO
         logging.basicConfig(level=logging.INFO)
@@ -144,6 +146,10 @@ class VoskSTT(AIEngine):
             # Transcript alma işini başlat
             self.receive_task = asyncio.create_task(self.receive_transcripts())
             
+            # Kuyruk işleyici task'ı başlat
+            self._queue_processor_running = True
+            self.queue_processor_task = asyncio.create_task(self._process_queue())
+            
             logging.info("Vosk STT motoru başarıyla başlatıldı")
             return True
         except Exception as e:
@@ -155,6 +161,20 @@ class VoskSTT(AIEngine):
         logging.info("Vosk STT motoru durduruluyor")
         
         try:
+            # Queue processor'ı durdur
+            self._queue_processor_running = False
+            if self.queue_processor_task and not self.queue_processor_task.done():
+                try:
+                    # Queue processor task'ini bekle
+                    await asyncio.wait_for(self.queue_processor_task, timeout=2.0)
+                except asyncio.TimeoutError:
+                    # Zaman aşımında task'ı iptal et
+                    self.queue_processor_task.cancel()
+                    try:
+                        await self.queue_processor_task
+                    except asyncio.CancelledError:
+                        pass
+            
             # Eğer send_eof etkinse, Vosk'a EOF işareti gönder
             if self.send_eof and self.vosk_client.is_connected:
                 try:
@@ -495,9 +515,61 @@ class VoskSTT(AIEngine):
                 except Exception:
                     pass
 
+    async def _process_queue(self):
+        """RTP kuyruğundan ses verilerini işleyen metod."""
+        logging.info("Queue processor started for VoskSTT")
+        
+        while self._queue_processor_running:
+            try:
+                # get_nowait() ile kuyruktaki bir sonraki ses verisini al
+                audio_chunk = self.queue.get_nowait()
+                
+                if self.debug:
+                    logging.debug(f"Processing audio chunk from queue: {len(audio_chunk)} bytes")
+                
+                # Ses verisini send() metoduna gönder
+                try:
+                    await self.send(audio_chunk)
+                except Exception as e:
+                    logging.error(f"Error sending audio chunk from queue: {str(e)}")
+                    logging.error(f"Exception details: {traceback.format_exc()}")
+                
+                # İşi tamamlandı olarak işaretle
+                self.queue.task_done()
+                
+            except Empty:
+                # Kuyruk boşsa, kısa bir süre bekle ve tekrar dene
+                await asyncio.sleep(0.01)  # CPU kullanımını azaltmak için kısa bir bekleme
+                
+                # Eğer çağrı sonlandırıldıysa döngüden çık
+                if self.call.terminated or not self._queue_processor_running:
+                    logging.info("Call terminated or processor stopped, ending queue processor")
+                    break
+            
+            except Exception as e:
+                logging.error(f"Unexpected error in queue processor: {str(e)}")
+                logging.error(f"Exception details: {traceback.format_exc()}")
+                await asyncio.sleep(0.1)  # Hata durumunda biraz daha uzun bekle
+        
+        logging.info("Queue processor finished")
+
     async def close(self):
         """Closes the VoskSTT session"""
         logging.info("Closing VoskSTT session")
+        
+        # Stop queue processor
+        self._queue_processor_running = False
+        if self.queue_processor_task and not self.queue_processor_task.done():
+            try:
+                # Queue processor task'ini bekle
+                await asyncio.wait_for(self.queue_processor_task, timeout=1.0)
+            except asyncio.TimeoutError:
+                # Zaman aşımında task'ı iptal et
+                self.queue_processor_task.cancel()
+                try:
+                    await self.queue_processor_task
+                except asyncio.CancelledError:
+                    pass
         
         # Flush any remaining audio in the VAD buffer
         if not self.bypass_vad and len(self._vad_buffer) > 0:

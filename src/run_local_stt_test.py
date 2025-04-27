@@ -38,29 +38,6 @@ class DummyCall:
         self.client_port = 4000
         self.terminated = False
 
-# Kuyruk işleme fonksiyonu - Modified to handle Queue instead of asyncio.Queue
-async def process_queue(queue: Queue, stt_instance: VoskSTT):
-    """Kuyruktan ses parçalarını okur ve STT motoruna gönderir."""
-    logging.info("Queue processor started.")
-    while True:
-        try:
-            # Use get_nowait() to match how it's done in production call.py
-            audio_chunk = queue.get_nowait()
-            logging.debug(f"Processing chunk from queue: type={type(audio_chunk)}")
-            try:
-                await stt_instance.send(audio_chunk)
-            except Exception as e:
-                logging.error(f"Error sending chunk from queue: {e}")
-            queue.task_done()
-        except Exception:
-            # If queue is empty, wait a bit and try again
-            await asyncio.sleep(0.01)  # Small sleep to avoid CPU spinning
-            # Check termination flag
-            if getattr(stt_instance, '_test_terminated', False):
-                logging.info("Test termination detected, stopping processor.")
-                break
-    logging.info("Queue processor finished.")
-
 async def main():
     call = DummyCall()
 
@@ -87,14 +64,22 @@ async def main():
     waveform, sample_rate = torchaudio.load("C:/Cursor/opensips-ai-voice-connector/src/test.wav")
     logging.info(f"Loaded test.wav: {waveform.shape}, sample_rate={sample_rate}Hz")
 
+    # Transkript callback'lerini tanımla
+    async def on_partial_transcript(text):
+        logging.info(f"Partial transcript: {text}")
+
+    async def on_final_transcript(text):
+        logging.info(f"Final transcript: {text}")
+
     stt = VoskSTT(call, cfg)
     stt.set_log_level(logging.DEBUG)  # Set to debug level for more detailed logs
-    # Add termination flag for testing
-    stt._test_terminated = False
+    
+    # Callback'leri ayarla
+    stt.on_partial_transcript = on_partial_transcript
+    stt.on_final_transcript = on_final_transcript
+    
+    # STT motorunu başlat (artık kendi içinde queue processor'ı da başlatacak)
     await stt.start()
-
-    # Kuyruk işleme görevini başlat
-    queue_processor_task = asyncio.create_task(process_queue(call.rtp, stt))
 
     # --- Ses verisini hazırlama ve kuyruğa koyma --- 
     if waveform.size(0) > 1:
@@ -143,13 +128,11 @@ async def main():
     logging.info("Finished putting audio into queue. Waiting for processing...")
     await asyncio.sleep(2.0)  # Allow time for processing final chunks
 
-    # Signal termination
-    stt._test_terminated = True
-    
-    # Wait a bit more to ensure all data is processed
-    logging.info("Waiting for queue processor to finish...")
+    # Temiz kapanış için yeterli süre ver
+    logging.info("Waiting for final processing to complete...")
     await asyncio.sleep(1.0)
 
+    # STT motorunu kapat
     await stt.close()
     logging.info("STT session closed.")
 
