@@ -72,7 +72,7 @@ async def main():
         logging.info(f"Final transcript: {text}")
 
     stt = VoskSTT(call, cfg)
-    stt.set_log_level(logging.DEBUG)  # Set to debug level for more detailed logs
+    stt.set_log_level(logging.INFO)  # Set to debug level for more detailed logs
     
     # Callback'leri ayarla
     stt.on_partial_transcript = on_partial_transcript
@@ -126,7 +126,6 @@ async def main():
 
     # --- Allow some time for processing the last chunks --- 
     logging.info("Finished putting audio into queue. Waiting for processing...")
-    await asyncio.sleep(2.0)  # Allow time for processing final chunks
 
     # Temiz kapanış için yeterli süre ver
     logging.info("Waiting for final processing to complete...")
