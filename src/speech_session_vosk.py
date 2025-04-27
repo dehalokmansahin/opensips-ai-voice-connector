@@ -52,7 +52,7 @@ class VoskSTT(AIEngine):
         self.bypass_vad = self.cfg.get("bypass_vad", "bypass_vad", False)
         
         # VAD buffer ayarları - 200ms için optimize edildi (Madde 7)
-        self.vad_buffer_chunk_ms =  self.cfg.get("vad_buffer_chunk_ms", "vad_buffer_chunk_ms", 500)  # 200ms chunk size for VAD processing
+        self.vad_buffer_chunk_ms =  self.cfg.get("vad_buffer_chunk_ms", "vad_buffer_chunk_ms", 750)  # 200ms chunk size for VAD processing
         self.vad_buffer_max_seconds = self.cfg.get("vad_buffer_max_seconds", "vad_buffer_max_seconds", 1.0)
         
         # Yeni konsekütif (ardışık) RTP paket sayacı - VAD için
@@ -257,16 +257,16 @@ class VoskSTT(AIEngine):
                 logging.debug(f"{session_id}Decoded PCM: {len(pcm16_samples)} bytes") # Log after decode
                 
                 # Create a copy to ensure we don't modify original data
-                pcm16_samples_copy = pcm16_samples.copy().tobytes()
+               #pcm16_samples_copy = pcm16_samples.copy().tobytes()
                 
                 # Ensure data is valid before conversion
-                if len(pcm16_samples_copy) == 0:
+                if len(pcm16_samples) == 0:
                     logging.warning(f"{session_id}Empty PCM after copy conversion. Skipping.")
                     return
                 
                 # Convert to float tensor for resampling
                 try:
-                    audio_tensor = torch.frombuffer(pcm16_samples_copy, dtype=torch.int16).float() / 32768.0
+                    audio_tensor = torch.frombuffer(bytearray(pcm16_samples), dtype=torch.int16).float() / 32768.0
                     logging.debug(f"{session_id}Converted to tensor: shape={audio_tensor.shape}, min={audio_tensor.min():.4f}, max={audio_tensor.max():.4f}") # Log after tensor conversion
                     
                     # Check for NaN or Inf values
@@ -277,11 +277,12 @@ class VoskSTT(AIEngine):
                     # Normalize - optimize edilmiş kısım
                     audio_max = torch.max(torch.abs(audio_tensor))
                     
-                    # Sadece çok düşük sesleri normalize et
-                    if audio_max < 0.01:  # Daha düşük eşik
-                        gain = min(0.3 / (audio_max + 1e-10), 10.0)
+                    # Sadece çok düşük sesleri normalize et - eşik değerini daha da düşürüyorum
+                    if audio_max < 0.005:  # Daha düşük eşik: 0.01 -> 0.005
+                        # Hızlı max-based normalization
+                        gain = min(0.2 / (audio_max + 1e-10), 5.0)  # Max gain değerini de azalttım: 10.0 -> 5.0
                         audio_tensor = audio_tensor * gain
-                        logging.info(f"{session_id}Applied normalization with gain: {gain:.2f}")
+                        logging.debug(f"{session_id}Applied normalization with gain: {gain:.2f}")  # info -> debug
                     
                     # Resample to target rate (Adım 6)
                     resampled_tensor = self.resampler(audio_tensor.unsqueeze(0)).squeeze(0)
@@ -323,12 +324,12 @@ class VoskSTT(AIEngine):
                 # Normalize - optimize edilmiş kısım
                 audio_max = torch.max(torch.abs(audio))
                 
-                # Sadece çok düşük sesleri normalize et
-                if audio_max < 0.01:  # Daha düşük eşik
+                # Sadece çok düşük sesleri normalize et - eşik değerini daha da düşürüyorum
+                if audio_max < 0.005:  # Daha düşük eşik: 0.01 -> 0.005
                     # Hızlı max-based normalization
-                    gain = min(0.3 / (audio_max + 1e-10), 10.0)
+                    gain = min(0.2 / (audio_max + 1e-10), 5.0)  # Max gain değerini de azalttım: 10.0 -> 5.0
                     audio = audio * gain
-                    logging.info(f"{session_id}Applied normalization with gain: {gain:.2f}")
+                    logging.debug(f"{session_id}Applied normalization with gain: {gain:.2f}")  # info -> debug
                 
                 # Add to VAD buffer for 200ms accumulation (Adım 7)
                 if not self.bypass_vad:
@@ -374,7 +375,7 @@ class VoskSTT(AIEngine):
         # Convert buffer to tensor for VAD processing
         buffer_bytes = bytes(self._vad_buffer)
         try:
-            audio_tensor = torch.frombuffer(buffer_bytes, dtype=torch.int16).float() / 32768.0
+            audio_tensor = torch.frombuffer(bytearray(buffer_bytes), dtype=torch.int16).float() / 32768.0
             
             # Apply VAD to detect speech (Adım 8)
             is_speech = self.vad.is_speech(audio_tensor)
@@ -399,7 +400,7 @@ class VoskSTT(AIEngine):
             
             # Send to Vosk if speech is detected or we're in active speech mode (Adım 9)
             if is_speech or self.speech_active:
-                logging.info(f"{session_id}Sending 200ms chunk to Vosk: speech={is_speech}, active={self.speech_active}")
+                logging.info(f"{session_id}Sending {self.vad_buffer_chunk_ms}ms chunk to Vosk: speech={is_speech}, active={self.speech_active}")
                 await self.vosk_client.send_audio(buffer_bytes)
             else:
                 logging.debug(f"{session_id}No speech detected in 200ms chunk, not sending to Vosk")
