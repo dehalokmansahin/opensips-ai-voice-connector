@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy source code and configuration
 COPY src/ /app/src/
 COPY cfg/ /app/cfg/
-COPY test.wav /app/test.wav
+
 COPY run_local_stt_test.py /app/run_local_stt_test.py
 
 # Environment variables (can be overridden at runtime)

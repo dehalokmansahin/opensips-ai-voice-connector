@@ -15,372 +15,216 @@ from pcmu_decoder import PCMUDecoder
 import websockets
 import traceback
 
-class VoskSTT(AIEngine):
-    """Vosk API'yi kullanan konuşma tanıma motoru"""
+class AudioProcessor:
+    """Audio processing utilities for speech recognition"""
     
-    def __init__(self, call, cfg):
-        """Vosk temelli konuşma tanıma motorunu başlat
-        
-        Args:
-            call: OpenSIPS çağrısı
-            cfg: Genel sistem yapılandırması
-        """
-        # Get Vosk-specific config
-        self.cfg = Config.get("vosk", cfg)
-        
-        # Session ID olarak B2B Key'i kullan
-        self.b2b_key = call.b2b_key if hasattr(call, 'b2b_key') else None
-        
-        # Yapılandırmayı al
-        self.vosk_server_url = self.cfg.get("url","url" ,"ws://localhost:2700")
-        self.websocket_timeout = self.cfg.get("websocket_timeout","websocket_timeout", 5.0)
-        self.target_sample_rate = int(self.cfg.get("sample_rate", "sample_rate", 16000))
-        self.channels = self.cfg.get("channels", "channels", 1)
-        self.send_eof = self.cfg.get("send_eof", "send_eof", True)
-        self.debug = self.cfg.get("debug", "debug", False)
-        
-        # Son transkript sonuçlarını saklamak için değişkenler
-        self.last_partial_transcript = ""  # Son alınan partial transkript
-        self.last_final_transcript = ""    # Son alınan final transkript
-        
-        # VAD Setup - RTP packet'lari için optimize edilmiş değerler
-        vad_threshold = self.cfg.get("vad_threshold", "vad_threshold", 0.12)  # Daha hassas değer
-        vad_min_speech_ms = self.cfg.get("vad_min_speech_ms", "vad_min_speech_ms", 40)  # 20ms RTP paketleri için uygun değer
-        vad_min_silence_ms = self.cfg.get("vad_min_silence_ms", "vad_min_silence_ms", 200)
-        
-        # Add bypass_vad option
-        self.bypass_vad = self.cfg.get("bypass_vad", "bypass_vad", False)
-        
-        # VAD buffer ayarları - 200ms için optimize edildi (Madde 7)
-        self.vad_buffer_chunk_ms =  self.cfg.get("vad_buffer_chunk_ms", "vad_buffer_chunk_ms", 750)  # 200ms chunk size for VAD processing
-        self.vad_buffer_max_seconds = self.cfg.get("vad_buffer_max_seconds", "vad_buffer_max_seconds", 1.0)
-        
-        # Yeni konsekütif (ardışık) RTP paket sayacı - VAD için
-        self.consecutive_speech_packets = 0
-        self.consecutive_silence_packets = 0
-        self.speech_detection_threshold = self.cfg.get("speech_detection_threshold", "speech_detection_threshold", 3)  # Kaç ardışık paket konuşma olarak algılanmalı
-        self.silence_detection_threshold = self.cfg.get("silence_detection_threshold", "silence_detection_threshold", 10)  # Kaç ardışık paket sessizlik olarak algılanmalı
-        
-        # Konuşma durumu
-        self.speech_active = False
-        
-        # Geri çağırma fonksiyonları
-        self.on_partial_transcript = None  # Kısmi transkript için geri çağırma
-        self.on_final_transcript = None    # Tam transkript için geri çağırma
-        
-        # PCM-U Decoderı hazırla
+    def __init__(self, target_sample_rate=16000, debug=False):
+        self.target_sample_rate = target_sample_rate
+        self.debug = debug
         self.pcmu_decoder = PCMUDecoder()
-        
-        # Bağlantı için VoskClient oluştur (bağlantı start() metodunda kurulacak)
-        self.vosk_client = VoskClient(self.vosk_server_url, timeout=self.websocket_timeout)
-        
-        # Durum
-        self.receive_task = None
-        self.queue_processor_task = None
-        self._queue_processor_running = False
-        
-        # Set default logging level to INFO
-        logging.basicConfig(level=logging.INFO)
-        
-        # Debugging için
-        if self.debug:
-            logging.getLogger().setLevel(logging.DEBUG)
-            logging.debug("Debug logging enabled")
-            
-        if self.bypass_vad:
-            logging.info("VAD bypassed - all audio will be sent to Vosk")
-            # VAD bypass durumunda otomatik olarak konuşma modunu etkinleştir
-            self.speech_active = True
-
-        # Call içinden alınan bilgiler
-        self.queue = call.rtp
-        self.client_addr = call.client_addr
-        self.client_port = call.client_port
-        self.call = call
-
-        # SDP içinden codec seçimi
-        self.codec = self.choose_codec(call.sdp)
-
-        # Initialize VAD detector
-        self.vad = VADDetector(
-            sample_rate=self.target_sample_rate,
-            threshold=vad_threshold,
-            min_speech_duration_ms=vad_min_speech_ms,
-            min_silence_duration_ms=vad_min_silence_ms
-        )
-
-        # VAD için ses buffer
-        self._vad_buffer = bytearray()
-        self._vad_buffer_size_samples = 0  # Buffer'daki örnek sayısı
-        self._last_buffer_flush_time = time.time()  # Son buffer gönderme zamanı
-        self._vad_buffer_locks = asyncio.Lock()  # Eşzamanlı erişim için kilit
-
-        # Resampler for audio
-        self.resampler = torchaudio.transforms.Resample(orig_freq=8000, new_freq=self.target_sample_rate)
-        
-        # Oturum ID'si ile birlikte log mesajları
-        session_id = f"[Session:{self.b2b_key}] " if self.b2b_key else ""
-        logging.info(f"{session_id}VoskSTT initialized. bypass_vad = {self.bypass_vad}")
-
-    def choose_codec(self, sdp):
-        """ SDP içinden PCMU codec'ini seçer """
-        codecs = get_codecs(sdp)
-        for c in codecs:
-            if c.payloadType == 0:  # PCMU
-                return PCMU(c)
-        raise UnsupportedCodec("No supported codec (PCMU) found in SDP.")
-
-    async def start(self):
-        """STT motoru başlat ve bağlantıyı kur."""
-        session_id = f"[Session:{self.b2b_key}] " if self.b2b_key else ""
-        logging.info(f"{session_id}Vosk sunucusuna bağlanılıyor: {self.vosk_server_url}")
-        
-        try:
-            # WebSocket bağlantısını kur
-            await self.vosk_client.connect()
-            
-            # Başlangıç konfigürasyon mesajını gönder
-            config = {
-                "config": {
-                    "sample_rate": self.target_sample_rate,
-                    "num_channels": self.channels
-                }
-            }
-            await self.vosk_client.send(config)
-            
-            # Transcript alma işini başlat
-            self.receive_task = asyncio.create_task(self.receive_transcripts())
-            
-            # Kuyruk işleyici task'ı başlat
-            self._queue_processor_running = True
-            self.queue_processor_task = asyncio.create_task(self._process_queue())
-            
-            logging.info(f"{session_id}Vosk STT motoru başarıyla başlatıldı")
-            return True
-        except Exception as e:
-            logging.error(f"{session_id}Vosk motorunu başlatırken hata: {str(e)}")
-            return False
+        self.resampler = torchaudio.transforms.Resample(orig_freq=8000, new_freq=target_sample_rate)
     
-    async def stop(self):
-        """STT motorunu durdur ve bağlantıyı kapat."""
-        session_id = f"[Session:{self.b2b_key}] " if self.b2b_key else ""
-        logging.info(f"{session_id}Vosk STT motoru durduruluyor")
-        
-        try:
-            # Queue processor'ı durdur
-            self._queue_processor_running = False
-            if self.queue_processor_task and not self.queue_processor_task.done():
-                try:
-                    # Queue processor task'ini bekle
-                    await asyncio.wait_for(self.queue_processor_task, timeout=2.0)
-                except asyncio.TimeoutError:
-                    # Zaman aşımında task'ı iptal et
-                    self.queue_processor_task.cancel()
-                    try:
-                        await self.queue_processor_task
-                    except asyncio.CancelledError:
-                        pass
-            
-            # Eğer send_eof etkinse, Vosk'a EOF işareti gönder
-            if self.send_eof and self.vosk_client.is_connected:
-                try:
-                    logging.debug(f"{session_id}Vosk'a EOF işareti gönderiliyor")
-                    await self.vosk_client.send(json.dumps({"eof": 1}))
-                except Exception as e:
-                    logging.error(f"{session_id}EOF gönderirken hata: {str(e)}")
-            
-            # WebSocket bağlantısını kapat
-            if self.vosk_client.is_connected:
-                await self.vosk_client.disconnect()
-            
-            # Varsa receive_task'i iptal et
-            if self.receive_task and not self.receive_task.done():
-                self.receive_task.cancel()
-                try:
-                    await self.receive_task
-                except asyncio.CancelledError:
-                    pass
-            
-            logging.info(f"{session_id}Vosk STT motoru başarıyla durduruldu")
-            return True
-        except Exception as e:
-            logging.error(f"{session_id}Vosk STT motorunu durdururken hata: {str(e)}")
-            return False
-            
-    async def process_audio(self, audio_data):
-        """Ses verisini işle ve Vosk'a gönder
+    def process_bytes_audio(self, audio, session_id=""):
+        """Process raw audio bytes (PCMU) to tensor format
         
         Args:
-            audio_data: İşlenecek raw ses verisi (PCM 16-bit)
+            audio: Raw audio bytes (PCMU format)
+            session_id: Session ID for logging
             
         Returns:
-            bool: İşleme başarılı olduysa True
+            tuple: (resampled_tensor, audio_bytes) or (None, None) on error
         """
-        session_id = f"[Session:{self.b2b_key}] " if self.b2b_key else ""
-        if not self.vosk_client.is_connected:
-            logging.warning(f"{session_id}Ses verisini işleyemiyorum: Vosk ile bağlantı kurulamadı")
-            return False
+        if len(audio) == 0:
+            logging.warning(f"{session_id}Received empty audio bytes. Skipping processing.")
+            return None, None
             
-        try:
-            # Ses verisini Vosk'a gönder
-            await self.vosk_client.send_audio(audio_data)
-            return True
-        except Exception as e:
-            logging.error(f"{session_id}Ses verisini işlerken hata: {str(e)}")
-            return False
-
-    async def send(self, audio):
-        """Sends audio to Vosk"""
-        session_id = f"[Session:{self.b2b_key}] " if self.b2b_key else ""
-        if not self.vosk_client.is_connected:
-            logging.warning(f"{session_id}WebSocket not connected, cannot send audio")
-            return
+        # Log input for debugging    
+        if self.debug:
+            logging.debug(f"{session_id}Raw input audio: {len(audio)} bytes")
+        
+        # Decode PCMU to PCM
+        pcm16_samples = self.pcmu_decoder.decode(audio)
+        
+        if pcm16_samples is None or len(pcm16_samples) == 0:
+            logging.warning(f"{session_id}PCMU decoder returned empty result. Skipping processing.")
+            return None, None
             
+        logging.debug(f"{session_id}Decoded PCM: {len(pcm16_samples)} bytes")
+        
+        # Ensure data is valid before conversion
+        if len(pcm16_samples) == 0:
+            logging.warning(f"{session_id}Empty PCM after conversion. Skipping.")
+            return None, None
+        
         try:
-            # Decode (PCMU to PCM) if needed
-            if isinstance(audio, bytes):
-                # Check if audio is empty
-                if len(audio) == 0:
-                    logging.warning(f"{session_id}Received empty audio bytes. Skipping processing.")
-                    return
-                    
-                # Log input for debugging    
-                if self.debug:
-                    logging.debug(f"{session_id}Raw input audio: {len(audio)} bytes")
-                
-                # Decode PCMU to PCM (Adım 5)
-                pcm16_samples = self.pcmu_decoder.decode(audio)
-                
-                if pcm16_samples is None or len(pcm16_samples) == 0:
-                    logging.warning(f"{session_id}PCMU decoder returned empty result. Skipping processing.")
-                    return
-                logging.debug(f"{session_id}Decoded PCM: {len(pcm16_samples)} bytes") # Log after decode
-                
-                # Create a copy to ensure we don't modify original data
-               #pcm16_samples_copy = pcm16_samples.copy().tobytes()
-                
-                # Ensure data is valid before conversion
-                if len(pcm16_samples) == 0:
-                    logging.warning(f"{session_id}Empty PCM after copy conversion. Skipping.")
-                    return
-                
-                # Convert to float tensor for resampling
-                try:
-                    audio_tensor = torch.frombuffer(bytearray(pcm16_samples), dtype=torch.int16).float() / 32768.0
-                    logging.debug(f"{session_id}Converted to tensor: shape={audio_tensor.shape}, min={audio_tensor.min():.4f}, max={audio_tensor.max():.4f}") # Log after tensor conversion
-                    
-                    # Check for NaN or Inf values
-                    if torch.isnan(audio_tensor).any() or torch.isinf(audio_tensor).any():
-                        logging.warning(f"{session_id}Audio tensor contains NaN or Inf values. Cleaning tensor.")
-                        audio_tensor = torch.nan_to_num(audio_tensor, nan=0.0, posinf=0.99, neginf=-0.99)
-
-                    # Normalize - optimize edilmiş kısım
-                    audio_max = torch.max(torch.abs(audio_tensor))
-                    
-                    # Sadece çok düşük sesleri normalize et - eşik değerini daha da düşürüyorum
-                    if audio_max < 0.005:  # Daha düşük eşik: 0.01 -> 0.005
-                        # Hızlı max-based normalization
-                        gain = min(0.2 / (audio_max + 1e-10), 5.0)  # Max gain değerini de azalttım: 10.0 -> 5.0
-                        audio_tensor = audio_tensor * gain
-                        logging.debug(f"{session_id}Applied normalization with gain: {gain:.2f}")  # info -> debug
-                    
-                    # Resample to target rate (Adım 6)
-                    resampled_tensor = self.resampler(audio_tensor.unsqueeze(0)).squeeze(0)
-                    logging.debug(f"{session_id}Resampled tensor: shape={resampled_tensor.shape}, min={resampled_tensor.min():.4f}, max={resampled_tensor.max():.4f}") # Log after resampling
-                    
-                    # Check the resampled audio validity
-                    if resampled_tensor.shape[0] == 0:
-                        logging.warning(f"{session_id}Resampling resulted in empty tensor. Skipping.")
-                        return
-                    
-                    # Add to VAD buffer for 200ms accumulation (Adım 7)
-                    if not self.bypass_vad:
-                        # Convert to audio bytes for buffer
-                        audio_bytes = (torch.clamp(resampled_tensor, -1.0, 1.0) * 32768.0).to(torch.int16).numpy().tobytes()
-                        await self._add_to_vad_buffer(audio_bytes, resampled_tensor.shape[0])
-                    else:
-                        # In bypass mode, send directly
-                        processed_tensor = torch.clamp(resampled_tensor, -1.0, 1.0)
-                        audio_bytes = (processed_tensor * 32768.0).to(torch.int16).numpy().tobytes()
-                        await self.vosk_client.send_audio(audio_bytes)
-                    
-                except Exception as e:
-                    logging.error(f"{session_id}Error processing audio tensor: {str(e)}")
-                    logging.error(f"{session_id}Exception details: {traceback.format_exc()}") # Add traceback here too
-                    
-            elif isinstance(audio, torch.Tensor):
-                logging.debug(f"{session_id}Processing audio as torch.Tensor")
-                # For tensors, use directly (assuming it's already at target sample rate)
-                # Ensure tensor has valid values
-                if torch.isnan(audio).any() or torch.isinf(audio).any():
-                    logging.warning(f"{session_id}Input tensor contains NaN or Inf values. Cleaning.")
-                    audio = torch.nan_to_num(audio, nan=0.0, posinf=0.99, neginf=-0.99)
-                
-                # Validate tensor
-                if audio.numel() == 0:
-                    logging.warning(f"{session_id}Empty audio tensor received. Skipping.")
-                    return
-                
-                # Normalize - optimize edilmiş kısım
-                audio_max = torch.max(torch.abs(audio))
-                
-                # Sadece çok düşük sesleri normalize et - eşik değerini daha da düşürüyorum
-                if audio_max < 0.005:  # Daha düşük eşik: 0.01 -> 0.005
-                    # Hızlı max-based normalization
-                    gain = min(0.2 / (audio_max + 1e-10), 5.0)  # Max gain değerini de azalttım: 10.0 -> 5.0
-                    audio = audio * gain
-                    logging.debug(f"{session_id}Applied normalization with gain: {gain:.2f}")  # info -> debug
-                
-                # Add to VAD buffer for 200ms accumulation (Adım 7)
-                if not self.bypass_vad:
-                    # Convert to audio bytes for buffer
-                    audio_bytes = (torch.clamp(audio, -1.0, 1.0) * 32768.0).to(torch.int16).numpy().tobytes()
-                    await self._add_to_vad_buffer(audio_bytes, audio.shape[0])
-                else:
-                    # In bypass mode, send directly
-                    audio = torch.clamp(audio, -1.0, 1.0)
-                    audio_bytes = (audio * 32768.0).to(torch.int16).numpy().tobytes()
-                    await self.vosk_client.send_audio(audio_bytes)
-            else:
-                logging.warning(f"{session_id}Unexpected audio type: {type(audio)}, skipping")
-                
+            # Convert to float tensor for resampling
+            audio_tensor = torch.frombuffer(bytearray(pcm16_samples), dtype=torch.int16).float() / 32768.0
+            logging.debug(f"{session_id}Converted to tensor: shape={audio_tensor.shape}, min={audio_tensor.min():.4f}, max={audio_tensor.max():.4f}")
+            
+            # Clean tensor if needed
+            audio_tensor = self._clean_tensor(audio_tensor, session_id)
+            
+            # Normalize audio
+            audio_tensor = self._normalize_audio(audio_tensor, session_id)
+            
+            # Resample to target rate
+            resampled_tensor = self.resampler(audio_tensor.unsqueeze(0)).squeeze(0)
+            logging.debug(f"{session_id}Resampled tensor: shape={resampled_tensor.shape}, min={resampled_tensor.min():.4f}, max={resampled_tensor.max():.4f}")
+            
+            # Check the resampled audio validity
+            if resampled_tensor.shape[0] == 0:
+                logging.warning(f"{session_id}Resampling resulted in empty tensor. Skipping.")
+                return None, None
+            
+            # Convert to audio bytes
+            processed_tensor = torch.clamp(resampled_tensor, -1.0, 1.0)
+            audio_bytes = (processed_tensor * 32768.0).to(torch.int16).numpy().tobytes()
+            
+            return resampled_tensor, audio_bytes
+            
         except Exception as e:
-            logging.error(f"{session_id}Error sending audio to Vosk: {str(e)}")
+            logging.error(f"{session_id}Error processing audio bytes: {str(e)}")
             logging.error(f"{session_id}Exception details: {traceback.format_exc()}")
-
-    async def _add_to_vad_buffer(self, audio_bytes, num_samples):
-        """VAD buffer'a ses ekler ve 200ms'ye ulaştığında işler (Adım 7-8)
+            return None, None
+    
+    def process_tensor_audio(self, audio, session_id=""):
+        """Process audio tensor directly
         
         Args:
-            audio_bytes: Eklenecek ses verisi
-            num_samples: Eklenen ses verisindeki örnek sayısı
+            audio: Audio tensor
+            session_id: Session ID for logging
+            
+        Returns:
+            tuple: (processed_tensor, audio_bytes) or (None, None) on error
         """
-        session_id = f"[Session:{self.b2b_key}] " if self.b2b_key else ""
+        try:
+            # Validate tensor
+            if audio.numel() == 0:
+                logging.warning(f"{session_id}Empty audio tensor received. Skipping.")
+                return None, None
+            
+            # Clean tensor if needed
+            audio = self._clean_tensor(audio, session_id)
+            
+            # Normalize audio
+            audio = self._normalize_audio(audio, session_id)
+            
+            # Convert to audio bytes
+            processed_tensor = torch.clamp(audio, -1.0, 1.0)
+            audio_bytes = (processed_tensor * 32768.0).to(torch.int16).numpy().tobytes()
+            
+            return processed_tensor, audio_bytes
+            
+        except Exception as e:
+            logging.error(f"{session_id}Error processing audio tensor: {str(e)}")
+            return None, None
+    
+    def _clean_tensor(self, tensor, session_id=""):
+        """Clean tensor by removing NaN or Inf values
+        
+        Args:
+            tensor: Audio tensor to clean
+            session_id: Session ID for logging
+            
+        Returns:
+            torch.Tensor: Cleaned tensor
+        """
+        if torch.isnan(tensor).any() or torch.isinf(tensor).any():
+            logging.warning(f"{session_id}Audio tensor contains NaN or Inf values. Cleaning tensor.")
+            return torch.nan_to_num(tensor, nan=0.0, posinf=0.99, neginf=-0.99)
+        return tensor
+    
+    def _normalize_audio(self, tensor, session_id=""):
+        """Normalize audio levels for very quiet audio
+        
+        Args:
+            tensor: Audio tensor to normalize
+            session_id: Session ID for logging
+            
+        Returns:
+            torch.Tensor: Normalized tensor
+        """
+        audio_max = torch.max(torch.abs(tensor))
+        
+        # Only normalize very quiet audio
+        if audio_max < 0.005:
+            gain = min(0.2 / (audio_max + 1e-10), 5.0)
+            tensor = tensor * gain
+            logging.debug(f"{session_id}Applied normalization with gain: {gain:.2f}")
+        
+        return tensor
+
+class VADProcessor:
+    """Voice Activity Detection processor"""
+    
+    def __init__(self, vad_detector, target_sample_rate, vad_buffer_chunk_ms=750,
+                 speech_detection_threshold=3, silence_detection_threshold=10, debug=False):
+        self.vad = vad_detector
+        self.target_sample_rate = target_sample_rate
+        self.vad_buffer_chunk_ms = vad_buffer_chunk_ms
+        self.speech_detection_threshold = speech_detection_threshold
+        self.silence_detection_threshold = silence_detection_threshold
+        self.debug = debug
+        
+        # VAD buffer
+        self._vad_buffer = bytearray()
+        self._vad_buffer_size_samples = 0
+        self._last_buffer_flush_time = time.time()
+        self._vad_buffer_locks = asyncio.Lock()
+        
+        # Speech state
+        self.consecutive_speech_packets = 0
+        self.consecutive_silence_packets = 0
+        self.speech_active = False
+    
+    async def add_audio(self, audio_bytes, num_samples, session_id=""):
+        """Add audio to VAD buffer and process if needed
+        
+        Args:
+            audio_bytes: Audio bytes to add
+            num_samples: Number of samples in audio
+            session_id: Session ID for logging
+            
+        Returns:
+            tuple: (is_processed, is_speech, buffer_bytes) - indicates if buffer was processed,
+                  if speech was detected, and the processed buffer bytes
+        """
         async with self._vad_buffer_locks:
-            # Buffer'a ekle
+            # Add to buffer
             self._vad_buffer.extend(audio_bytes)
             self._vad_buffer_size_samples += num_samples
             
             # Calculate buffer duration in ms
             buffer_ms = (self._vad_buffer_size_samples / self.target_sample_rate) * 1000
             
-            # Check if buffer has reached 200ms (Adım 7)
+            # Check if buffer has reached threshold
             if buffer_ms >= self.vad_buffer_chunk_ms:
-                logging.debug(f"{session_id}VAD buffer reached 200ms ({buffer_ms:.2f}ms), processing for VAD")
-                await self._process_vad_buffer()
-
-    async def _process_vad_buffer(self):
-        """VAD buffer'ı 200ms chunk olarak işler ve gerekirse Vosk'a gönderir (Adım 8-9)"""
-        session_id = f"[Session:{self.b2b_key}] " if self.b2b_key else ""
-        # Convert buffer to tensor for VAD processing
+                logging.debug(f"{session_id}VAD buffer reached {buffer_ms:.2f}ms, processing for VAD")
+                is_speech, buffer_bytes = await self._process_buffer(session_id)
+                return True, is_speech, buffer_bytes
+                
+            return False, False, None
+    
+    async def _process_buffer(self, session_id=""):
+        """Process VAD buffer
+        
+        Args:
+            session_id: Session ID for logging
+            
+        Returns:
+            tuple: (is_speech, buffer_bytes) - indicates if speech was detected and buffer bytes
+        """
         buffer_bytes = bytes(self._vad_buffer)
+        send_to_stt = False
+        
         try:
+            # Convert buffer to tensor for VAD processing
             audio_tensor = torch.frombuffer(bytearray(buffer_bytes), dtype=torch.int16).float() / 32768.0
             
-            # Apply VAD to detect speech (Adım 8)
+            # Apply VAD
             is_speech = self.vad.is_speech(audio_tensor)
             
-            # Update consecutive packet counters based on VAD result
+            # Update speech state
             if is_speech:
                 self.consecutive_speech_packets += 1
                 self.consecutive_silence_packets = 0
@@ -398,272 +242,613 @@ class VoskSTT(AIEngine):
                     self.speech_active = False
                     logging.info(f"{session_id}Speech ended after {self.consecutive_silence_packets} consecutive silence packets")
             
-            # Send to Vosk if speech is detected or we're in active speech mode (Adım 9)
-            if is_speech or self.speech_active:
-                logging.info(f"{session_id}Sending {self.vad_buffer_chunk_ms}ms chunk to Vosk: speech={is_speech}, active={self.speech_active}")
-                await self.vosk_client.send_audio(buffer_bytes)
+            # Determine if audio should be sent to STT
+            send_to_stt = is_speech or self.speech_active
+            
+            if send_to_stt:
+                logging.info(f"{session_id}VAD: speech={is_speech}, active={self.speech_active}")
             else:
-                logging.debug(f"{session_id}No speech detected in 200ms chunk, not sending to Vosk")
-                
+                logging.debug(f"{session_id}No speech detected in chunk, not sending to STT")
+            
+            return send_to_stt, buffer_bytes
+            
         except Exception as e:
             logging.error(f"{session_id}Error processing VAD buffer: {str(e)}")
+            # Return false to indicate no speech detected on error
+            return False, buffer_bytes
         finally:
             # Clear buffer after processing
             self._vad_buffer.clear()
             self._vad_buffer_size_samples = 0
             self._last_buffer_flush_time = time.time()
+    
+    async def process_final_buffer(self, session_id=""):
+        """Process any remaining audio in the buffer
+        
+        Args:
+            session_id: Session ID for logging
+            
+        Returns:
+            tuple: (is_speech, buffer_bytes) or (False, None) if empty buffer
+        """
+        if len(self._vad_buffer) > 0:
+            buffer_seconds = self._vad_buffer_size_samples / self.target_sample_rate
+            logging.info(f"{session_id}Processing remaining VAD buffer: {buffer_seconds:.2f} seconds")
+            return await self._process_buffer(session_id)
+        return False, None
 
-    async def receive_transcripts(self):
-        """Vosk'dan transcript alır ve callback fonksiyonlarını çağırır (Adım 10-11)"""
-        session_id = f"[Session:{self.b2b_key}] " if self.b2b_key else ""
+class TranscriptHandler:
+    """Handles transcript processing and callbacks"""
+    
+    def __init__(self):
+        self.last_partial_transcript = ""
+        self.last_final_transcript = ""
+        self.on_partial_transcript = None
+        self.on_final_transcript = None
+    
+    async def handle_message(self, message, session_id=""):
+        """Process transcript message from STT service
+        
+        Args:
+            message: JSON message from STT service
+            session_id: Session ID for logging
+            
+        Returns:
+            bool: True if message was processed successfully
+        """
         try:
-            reconnect_attempts = 0
-            max_reconnect_attempts = 5  # Maximum number of reconnection attempts
+            # Parse JSON response
+            response = json.loads(message)
             
-            while True:
-                # Vosk'dan cevap bekle
-                message = await self.vosk_client.receive_result()
+            # Process partial transcript
+            if "partial" in response:
+                partial_text = response.get("partial", "")
+                # Store last partial transcript
+                self.last_partial_transcript = partial_text
                 
-                if self.debug:
-                    logging.debug(f"{session_id}Vosk yanıtı alındı: {message}")
-                
-                if message is None:
-                    logging.warning(f"{session_id}Vosk'dan boş yanıt alındı")
-                    # Check if the connection is still valid
-                    if not self.vosk_client.is_connected:
-                        logging.error(f"{session_id}WebSocket connection lost during transcript reception")
-                        # Attempt to reconnect
-                        try:
-                            if reconnect_attempts >= max_reconnect_attempts:
-                                logging.error(f"{session_id}Maximum reconnection attempts ({max_reconnect_attempts}) reached. Giving up.")
-                                break
-                                
-                            reconnect_attempts += 1
-                            logging.info(f"{session_id}Attempting to reconnect to Vosk server... (attempt {reconnect_attempts}/{max_reconnect_attempts})")
-                            
-                            reconnected = await self.vosk_client.connect()
-                            if reconnected:
-                                logging.info(f"{session_id}Successfully reconnected to Vosk server")
-                                # Reset reconnection counter on success
-                                reconnect_attempts = 0
-                                
-                                # Resend config
-                                config = {
-                                    "config": {
-                                        "sample_rate": self.target_sample_rate,
-                                        "num_channels": self.channels
-                                    }
-                                }
-                                await self.vosk_client.send(config)
-                            else:
-                                logging.error(f"{session_id}Failed to reconnect to Vosk server")
-                                # Wait before next attempt - increasing backoff
-                                await asyncio.sleep(min(2 * reconnect_attempts, 10))
-                        except Exception as reconnect_error:
-                            logging.error(f"{session_id}Error during reconnection attempt: {reconnect_error}")
-                            await asyncio.sleep(min(2 * reconnect_attempts, 10))
-                    continue
-                
-                try:
-                    # JSON mesajını ayrıştır
-                    response = json.loads(message)
-                    
-                    # Kısmi transkript (partial) işleme (Adım 11)
-                    if "partial" in response:
-                        partial_text = response.get("partial", "")
-                        # Son partial transkripti sakla
-                        self.last_partial_transcript = partial_text
-                        
-                        if partial_text and self.on_partial_transcript:
-                            await self.on_partial_transcript(partial_text)
-                    
-                    # Tam transkript (final) işleme (Adım 11)
-                    if "text" in response:
-                        final_text = response.get("text", "")
-                        # Son final transkripti sakla
-                        self.last_final_transcript = final_text
-                        
-                        if final_text and self.on_final_transcript:
-                            await self.on_final_transcript(final_text)
-                            
-                except json.JSONDecodeError:
-                    logging.error(f"{session_id}Geçersiz JSON yanıtı: {message}")
-                except Exception as e:
-                    logging.error(f"{session_id}Transkript işlenirken hata: {str(e)}")
-                
-        except websockets.exceptions.ConnectionClosed as conn_err:
-            logging.error(f"{session_id}WebSocket connection closed: {conn_err}")
-            self.vosk_client.is_connected = False
+                if partial_text and self.on_partial_transcript:
+                    await self.on_partial_transcript(partial_text)
             
-            # Attempt to reconnect once - but don't create an infinite reconnection loop
-            try:
-                logging.info(f"{session_id}Attempting to reconnect after connection closed...")
-                await asyncio.sleep(1)  # Brief delay before reconnecting
-                reconnected = await self.vosk_client.connect()
-                if reconnected:
-                    logging.info(f"{session_id}Successfully reconnected after connection closed")
-                    # Start a new receive task
-                    asyncio.create_task(self.receive_transcripts())
-                    return  # End this task since we created a new one
-                else:
-                    logging.error(f"{session_id}Failed to reconnect after connection closed")
-                    return  # End this task to avoid cascading reconnection loops
-            except Exception as reconnect_error:
-                logging.error(f"{session_id}Error during reconnection attempt: {reconnect_error}")
-                return  # End this task to avoid cascading reconnection loops
+            # Process final transcript
+            if "text" in response:
+                final_text = response.get("text", "")
+                # Store last final transcript
+                self.last_final_transcript = final_text
                 
-        except asyncio.CancelledError:
-            logging.info(f"{session_id}Transkript alma görevi iptal edildi")
-            raise
+                if final_text and self.on_final_transcript:
+                    await self.on_final_transcript(final_text)
+                    
+            return True
+                
+        except json.JSONDecodeError:
+            logging.error(f"{session_id}Invalid JSON response: {message}")
+            return False
         except Exception as e:
-            logging.error(f"{session_id}Transkript alırken beklenmeyen hata: {str(e)}")
-            traceback_str = traceback.format_exc()
-            logging.error(f"{session_id}Traceback: {traceback_str}")
+            logging.error(f"{session_id}Error processing transcript: {str(e)}")
+            return False
+    
+    def get_final_transcript(self, session_id=""):
+        """Get the last final transcript
+        
+        Args:
+            session_id: Session ID for logging
             
-            # WebSocket kapandıysa, bağlantıyı kapat
+        Returns:
+            str: Last final transcript or partial if no final available
+        """
+        if self.last_final_transcript:
+            logging.debug(f"{session_id}Returning final transcript: {self.last_final_transcript[:50]}...")
+            return self.last_final_transcript
+        elif self.last_partial_transcript:
+            # If no final transcript but partial available, return partial
+            logging.debug(f"{session_id}No final transcript available, returning partial: {self.last_partial_transcript[:50]}...")
+            return self.last_partial_transcript
+        else:
+            # If no transcript available, return empty string
+            logging.debug(f"{session_id}No transcript available, returning empty string")
+            return ""
+
+class VoskSTT(AIEngine):
+    """Vosk API'yi kullanan konuşma tanıma motoru"""
+    
+    def __init__(self, call, cfg):
+        """Vosk temelli konuşma tanıma motorunu başlat
+        
+        Args:
+            call: OpenSIPS çağrısı
+            cfg: Genel sistem yapılandırması
+        """
+        # Get Vosk-specific config
+        self.cfg = Config.get("vosk", cfg)
+        
+        # Session ID olarak B2B Key'i kullan
+        self.b2b_key = call.b2b_key if hasattr(call, 'b2b_key') else None
+        self.session_id = f"[Session:{self.b2b_key}] " if self.b2b_key else ""
+        
+        # Load configuration
+        self._load_config()
+        
+        # Initialize components
+        self._init_components(call)
+        
+        # Task states
+        self.receive_task = None
+        self.queue_processor_task = None
+        self._queue_processor_running = False
+        
+        # Setup logging
+        self._setup_logging()
+        
+        logging.info(f"{self.session_id}VoskSTT initialized. bypass_vad = {self.bypass_vad}")
+
+    def _load_config(self):
+        """Load configuration parameters from config"""
+        # Connection parameters
+        self.vosk_server_url = self.cfg.get("url", "url", "ws://localhost:2700")
+        self.websocket_timeout = self.cfg.get("websocket_timeout", "websocket_timeout", 5.0)
+        self.target_sample_rate = int(self.cfg.get("sample_rate", "sample_rate", 16000))
+        self.channels = self.cfg.get("channels", "channels", 1)
+        self.send_eof = self.cfg.get("send_eof", "send_eof", True)
+        self.debug = self.cfg.get("debug", "debug", False)
+        
+        # VAD configuration
+        self.bypass_vad = self.cfg.get("bypass_vad", "bypass_vad", False)
+        self.vad_threshold = self.cfg.get("vad_threshold", "vad_threshold", 0.12)
+        self.vad_min_speech_ms = self.cfg.get("vad_min_speech_ms", "vad_min_speech_ms", 40)
+        self.vad_min_silence_ms = self.cfg.get("vad_min_silence_ms", "vad_min_silence_ms", 200)
+        self.vad_buffer_chunk_ms = self.cfg.get("vad_buffer_chunk_ms", "vad_buffer_chunk_ms", 750)
+        self.vad_buffer_max_seconds = self.cfg.get("vad_buffer_max_seconds", "vad_buffer_max_seconds", 1.0)
+        self.speech_detection_threshold = self.cfg.get("speech_detection_threshold", "speech_detection_threshold", 3)
+        self.silence_detection_threshold = self.cfg.get("silence_detection_threshold", "silence_detection_threshold", 10)
+
+    def _init_components(self, call):
+        """Initialize required components
+        
+        Args:
+            call: OpenSIPS call object
+        """
+        # Store call info
+        self.call = call
+        self.queue = call.rtp
+        self.client_addr = call.client_addr
+        self.client_port = call.client_port
+        
+        # Initialize codec from SDP
+        self.codec = self.choose_codec(call.sdp)
+        
+        # Initialize audio processor
+        self.audio_processor = AudioProcessor(
+            target_sample_rate=self.target_sample_rate,
+            debug=self.debug
+        )
+        
+        # Initialize VAD detector
+        vad_detector = VADDetector(
+            sample_rate=self.target_sample_rate,
+            threshold=self.vad_threshold,
+            min_speech_duration_ms=self.vad_min_speech_ms,
+            min_silence_duration_ms=self.vad_min_silence_ms
+        )
+        
+        # Initialize VAD processor
+        self.vad_processor = VADProcessor(
+            vad_detector=vad_detector,
+            target_sample_rate=self.target_sample_rate,
+            vad_buffer_chunk_ms=self.vad_buffer_chunk_ms,
+            speech_detection_threshold=self.speech_detection_threshold,
+            silence_detection_threshold=self.silence_detection_threshold,
+            debug=self.debug
+        )
+        
+        # Set speech active if VAD is bypassed
+        if self.bypass_vad:
+            self.vad_processor.speech_active = True
+        
+        # Initialize transcript handler
+        self.transcript_handler = TranscriptHandler()
+        
+        # Initialize Vosk client
+        self.vosk_client = VoskClient(self.vosk_server_url, timeout=self.websocket_timeout)
+
+    def _setup_logging(self):
+        """Set up logging configuration"""
+        # Set default logging level to INFO
+        logging.basicConfig(level=logging.INFO)
+        
+        # Set debug level if enabled
+        if self.debug:
+            logging.getLogger().setLevel(logging.DEBUG)
+            logging.debug(f"{self.session_id}Debug logging enabled")
+
+    def choose_codec(self, sdp):
+        """ SDP içinden PCMU codec'ini seçer """
+        codecs = get_codecs(sdp)
+        for c in codecs:
+            if c.payloadType == 0:  # PCMU
+                return PCMU(c)
+        raise UnsupportedCodec("No supported codec (PCMU) found in SDP.")
+
+    async def start(self):
+        """STT motoru başlat ve bağlantıyı kur."""
+        logging.info(f"{self.session_id}Vosk sunucusuna bağlanılıyor: {self.vosk_server_url}")
+        
+        try:
+            # Connect to Vosk server
+            await self.vosk_client.connect()
+            
+            # Send initial configuration
+            config = {
+                "config": {
+                    "sample_rate": self.target_sample_rate,
+                    "num_channels": self.channels
+                }
+            }
+            await self.vosk_client.send(config)
+            
+            # Start transcript receiver task
+            self.receive_task = asyncio.create_task(self.receive_transcripts())
+            
+            # Start queue processor task
+            self._queue_processor_running = True
+            self.queue_processor_task = asyncio.create_task(self._process_queue())
+            
+            logging.info(f"{self.session_id}Vosk STT motoru başarıyla başlatıldı")
+            return True
+        except Exception as e:
+            logging.error(f"{self.session_id}Vosk motorunu başlatırken hata: {str(e)}")
+            return False
+    
+    async def stop(self):
+        """STT motorunu durdur ve bağlantıyı kapat."""
+        logging.info(f"{self.session_id}Vosk STT motoru durduruluyor")
+        
+        try:
+            # Stop queue processor task
+            await self._stop_queue_processor()
+            
+            # Send EOF if enabled
+            await self._send_eof_if_enabled()
+            
+            # Close WebSocket connection
             if self.vosk_client.is_connected:
-                try:
-                    await self.vosk_client.disconnect()
-                except Exception:
-                    pass
-
-    async def _process_queue(self):
-        """RTP kuyruğundan ses verilerini işleyen metod."""
-        session_id = f"[Session:{self.b2b_key}] " if self.b2b_key else ""
-        logging.info(f"{session_id}Queue processor started for VoskSTT")
-        
-        while self._queue_processor_running:
-            try:
-                # get_nowait() ile kuyruktaki bir sonraki ses verisini al
-                audio_chunk = self.queue.get_nowait()
-                
-                if self.debug:
-                    logging.debug(f"{session_id}Processing audio chunk from queue: {len(audio_chunk)} bytes")
-                
-                # Ses verisini send() metoduna gönder
-                try:
-                    await self.send(audio_chunk)
-                except Exception as e:
-                    logging.error(f"{session_id}Error sending audio chunk from queue: {str(e)}")
-                    logging.error(f"{session_id}Exception details: {traceback.format_exc()}")
-                
-                # İşi tamamlandı olarak işaretle
-                self.queue.task_done()
-                
-            except Empty:
-                # Kuyruk boşsa, kısa bir süre bekle ve tekrar dene
-                await asyncio.sleep(0.01)  # CPU kullanımını azaltmak için kısa bir bekleme
-                
-                # Eğer çağrı sonlandırıldıysa döngüden çık
-                if self.call.terminated or not self._queue_processor_running:
-                    logging.info(f"{session_id}Call terminated or processor stopped, ending queue processor")
-                    break
+                await self.vosk_client.disconnect()
             
-            except Exception as e:
-                logging.error(f"{session_id}Unexpected error in queue processor: {str(e)}")
-                logging.error(f"{session_id}Exception details: {traceback.format_exc()}")
-                await asyncio.sleep(0.1)  # Hata durumunda biraz daha uzun bekle
-        
-        logging.info(f"{session_id}Queue processor finished")
+            # Cancel receive task
+            await self._cancel_receive_task()
+            
+            logging.info(f"{self.session_id}Vosk STT motoru başarıyla durduruldu")
+            return True
+        except Exception as e:
+            logging.error(f"{self.session_id}Vosk STT motorunu durdururken hata: {str(e)}")
+            return False
 
-    async def close(self):
-        """Closes the VoskSTT session"""
-        session_id = f"[Session:{self.b2b_key}] " if self.b2b_key else ""
-        logging.info(f"{session_id}Closing VoskSTT session")
-        
-        # Stop queue processor
+    async def _stop_queue_processor(self):
+        """Stop the queue processor task"""
         self._queue_processor_running = False
         if self.queue_processor_task and not self.queue_processor_task.done():
             try:
-                # Queue processor task'ini bekle
-                await asyncio.wait_for(self.queue_processor_task, timeout=1.0)
+                await asyncio.wait_for(self.queue_processor_task, timeout=2.0)
             except asyncio.TimeoutError:
-                # Zaman aşımında task'ı iptal et
                 self.queue_processor_task.cancel()
                 try:
                     await self.queue_processor_task
                 except asyncio.CancelledError:
                     pass
-        
-        # Flush any remaining audio in the VAD buffer
-        if not self.bypass_vad and len(self._vad_buffer) > 0:
-            try:
-                buffer_seconds = self._vad_buffer_size_samples / self.target_sample_rate
-                logging.info(f"{session_id}Processing remaining VAD buffer before closing: {buffer_seconds:.2f} seconds")
-                
-                # Process the final buffer for VAD
-                await self._process_vad_buffer()
-                
-                # Track the last partial text
-                last_partial = None
-                
-                # Save original callbacks
-                original_on_partial = self.on_partial_transcript
-                original_on_final = self.on_final_transcript
-                
-                # Create tracking callback
-                async def track_partial(text):
-                    nonlocal last_partial
-                    last_partial = text
-                    logging.info(f"{session_id}Got partial after final buffer: {text[:50]}...")
-                    # Print complete result - requested by user
-                    logging.info(f"{session_id}Complete partial result after final buffer: {text}")
-                    
-                    # Also call the original partial handler
-                    if original_on_partial and callable(original_on_partial):
-                        await original_on_partial(text)
-                
-                # Install tracking callback
-                self.on_partial_transcript = track_partial
-                
-                # Wait briefly for response - daha kısa bekleme süresi (optimize edildi)
-                wait_time = min(buffer_seconds * 0.4 + 0.2, 0.5)  # Maksimum 0.5 saniye bekle
-                logging.info(f"{session_id}Waiting {wait_time:.2f} seconds for final response...")
-                await asyncio.sleep(wait_time)  # Optimized wait time
-                
-                # Use the last partial as final
-                if last_partial and original_on_final and callable(original_on_final):
-                    logging.info(f"{session_id}Using last partial as final: {last_partial[:50]}...")
-                    self.last_final_transcript = last_partial  # Son partial'ı final olarak kaydet
-                    await original_on_final(last_partial)
-                
-                # Restore original callbacks
-                self.on_partial_transcript = original_on_partial
-                self.on_final_transcript = original_on_final
-                
-            except Exception as e:
-                logging.error(f"{session_id}Error handling final buffer: {e}")
-        
-        # Eğer final transcript yoksa ve partial transcript varsa, onu final olarak kaydet
-        if not self.last_final_transcript and self.last_partial_transcript:
-            logging.info(f"{session_id}No final transcript received, using last partial as final: {self.last_partial_transcript[:50]}...")
-            self.last_final_transcript = self.last_partial_transcript
-        
-        # Son transkript sonuçlarını logla
-        if self.last_final_transcript:
-            logging.info(f"{session_id}Final transcript result: {self.last_final_transcript}")
-        
-        # Send EOF signal
+
+    async def _send_eof_if_enabled(self):
+        """Send EOF to Vosk if enabled"""
         if self.send_eof and self.vosk_client.is_connected:
             try:
-                logging.info(f"{session_id}Sending EOF message to Vosk server")
-                await self.vosk_client.send_eof()
+                logging.debug(f"{self.session_id}Vosk'a EOF işareti gönderiliyor")
+                await self.vosk_client.send(json.dumps({"eof": 1}))
             except Exception as e:
-                logging.warning(f"{session_id}Could not send final EOF: {e}")
-        
-        # Stop the receive task if running
+                logging.error(f"{self.session_id}EOF gönderirken hata: {str(e)}")
+
+    async def _cancel_receive_task(self):
+        """Cancel the transcript receive task"""
         if self.receive_task and not self.receive_task.done():
             self.receive_task.cancel()
             try:
                 await self.receive_task
             except asyncio.CancelledError:
                 pass
+            
+    async def process_audio(self, audio_data):
+        """Ses verisini işle ve Vosk'a gönder
+        
+        Args:
+            audio_data: İşlenecek raw ses verisi (PCM 16-bit)
+            
+        Returns:
+            bool: İşleme başarılı olduysa True
+        """
+        if not self.vosk_client.is_connected:
+            logging.warning(f"{self.session_id}Ses verisini işleyemiyorum: Vosk ile bağlantı kurulamadı")
+            return False
+            
+        try:
+            # Ses verisini Vosk'a gönder
+            await self.vosk_client.send_audio(audio_data)
+            return True
+        except Exception as e:
+            logging.error(f"{self.session_id}Ses verisini işlerken hata: {str(e)}")
+            return False
+
+    async def send(self, audio):
+        """Sends audio to Vosk"""
+        if not self.vosk_client.is_connected:
+            logging.warning(f"{self.session_id}WebSocket not connected, cannot send audio")
+            return
+            
+        try:
+            if isinstance(audio, bytes):
+                # Process bytes audio
+                resampled_tensor, audio_bytes = self.audio_processor.process_bytes_audio(audio, self.session_id)
+                if resampled_tensor is None or audio_bytes is None:
+                    return
+                
+                await self._handle_processed_audio(resampled_tensor, audio_bytes)
+                    
+            elif isinstance(audio, torch.Tensor):
+                # Process tensor audio
+                processed_tensor, audio_bytes = self.audio_processor.process_tensor_audio(audio, self.session_id)
+                if processed_tensor is None or audio_bytes is None:
+                    return
+                
+                await self._handle_processed_audio(processed_tensor, audio_bytes)
+                
+            else:
+                logging.warning(f"{self.session_id}Unexpected audio type: {type(audio)}, skipping")
+                
+        except Exception as e:
+            logging.error(f"{self.session_id}Error sending audio to Vosk: {str(e)}")
+            logging.error(f"{self.session_id}Exception details: {traceback.format_exc()}")
+
+    async def _handle_processed_audio(self, tensor, audio_bytes):
+        """Handle processed audio
+        
+        Args:
+            tensor: Processed audio tensor
+            audio_bytes: Processed audio bytes
+        """
+        if self.bypass_vad:
+            # In bypass mode, send directly to Vosk
+            await self.vosk_client.send_audio(audio_bytes)
+        else:
+            # Add to VAD buffer for speech detection
+            was_processed, is_speech, buffer_bytes = await self.vad_processor.add_audio(
+                audio_bytes, tensor.shape[0], self.session_id)
+                
+            # If buffer was processed and speech detected, send to Vosk
+            if was_processed and is_speech and buffer_bytes:
+                await self.vosk_client.send_audio(buffer_bytes)
+
+    async def receive_transcripts(self):
+        """Vosk'dan transcript alır ve callback fonksiyonlarını çağırır"""
+        try:
+            reconnect_attempts = 0
+            max_reconnect_attempts = 5  # Maximum number of reconnection attempts
+            
+            while True:
+                # Receive message from Vosk
+                message = await self.vosk_client.receive_result()
+                
+                if self.debug:
+                    logging.debug(f"{self.session_id}Vosk yanıtı alındı: {message}")
+                
+                if message is None:
+                    logging.warning(f"{self.session_id}Vosk'dan boş yanıt alındı")
+                    # Check if the connection is still valid
+                    if not self.vosk_client.is_connected:
+                        logging.error(f"{self.session_id}WebSocket connection lost during transcript reception")
+                        # Try to reconnect
+                        success = await self._try_reconnect(reconnect_attempts, max_reconnect_attempts)
+                        if success:
+                            reconnect_attempts = 0
+                        else:
+                            reconnect_attempts += 1
+                            if reconnect_attempts >= max_reconnect_attempts:
+                                break
+                    continue
+                
+                # Process transcript message
+                await self.transcript_handler.handle_message(message, self.session_id)
+                
+        except websockets.exceptions.ConnectionClosed as conn_err:
+            logging.error(f"{self.session_id}WebSocket connection closed: {conn_err}")
+            self.vosk_client.is_connected = False
+            await self._handle_connection_closed()
+                
+        except asyncio.CancelledError:
+            logging.info(f"{self.session_id}Transkript alma görevi iptal edildi")
+            raise
+        except Exception as e:
+            logging.error(f"{self.session_id}Transkript alırken beklenmeyen hata: {str(e)}")
+            logging.error(f"{self.session_id}Traceback: {traceback.format_exc()}")
+            
+            # Close WebSocket if still connected
+            if self.vosk_client.is_connected:
+                try:
+                    await self.vosk_client.disconnect()
+                except Exception:
+                    pass
+
+    async def _try_reconnect(self, attempts, max_attempts):
+        """Try to reconnect to Vosk server
+        
+        Args:
+            attempts: Current number of attempts
+            max_attempts: Maximum number of attempts
+            
+        Returns:
+            bool: True if reconnection was successful
+        """
+        if attempts >= max_attempts:
+            logging.error(f"{self.session_id}Maximum reconnection attempts ({max_attempts}) reached. Giving up.")
+            return False
+            
+        logging.info(f"{self.session_id}Attempting to reconnect to Vosk server... (attempt {attempts + 1}/{max_attempts})")
+        
+        try:
+            reconnected = await self.vosk_client.connect()
+            if reconnected:
+                logging.info(f"{self.session_id}Successfully reconnected to Vosk server")
+                
+                # Resend config
+                config = {
+                    "config": {
+                        "sample_rate": self.target_sample_rate,
+                        "num_channels": self.channels
+                    }
+                }
+                await self.vosk_client.send(config)
+                return True
+            else:
+                logging.error(f"{self.session_id}Failed to reconnect to Vosk server")
+                # Wait before next attempt with increasing backoff
+                await asyncio.sleep(min(2 * (attempts + 1), 10))
+                return False
+        except Exception as reconnect_error:
+            logging.error(f"{self.session_id}Error during reconnection attempt: {reconnect_error}")
+            await asyncio.sleep(min(2 * (attempts + 1), 10))
+            return False
+
+    async def _handle_connection_closed(self):
+        """Handle WebSocket connection closed"""
+        # Attempt one reconnection, but avoid infinite loop
+        try:
+            logging.info(f"{self.session_id}Attempting to reconnect after connection closed...")
+            await asyncio.sleep(1)  # Brief delay before reconnecting
+            reconnected = await self.vosk_client.connect()
+            if reconnected:
+                logging.info(f"{self.session_id}Successfully reconnected after connection closed")
+                # Start a new receive task
+                asyncio.create_task(self.receive_transcripts())
+            else:
+                logging.error(f"{self.session_id}Failed to reconnect after connection closed")
+        except Exception as reconnect_error:
+            logging.error(f"{self.session_id}Error during reconnection attempt: {reconnect_error}")
+
+    async def _process_queue(self):
+        """RTP kuyruğundan ses verilerini işleyen metod."""
+        logging.info(f"{self.session_id}Queue processor started for VoskSTT")
+        
+        while self._queue_processor_running:
+            try:
+                # Get next audio chunk from queue
+                audio_chunk = self.queue.get_nowait()
+                
+                if self.debug:
+                    logging.debug(f"{self.session_id}Processing audio chunk from queue: {len(audio_chunk)} bytes")
+                
+                # Send audio chunk for processing
+                try:
+                    await self.send(audio_chunk)
+                except Exception as e:
+                    logging.error(f"{self.session_id}Error sending audio chunk from queue: {str(e)}")
+                    logging.error(f"{self.session_id}Exception details: {traceback.format_exc()}")
+                
+                # Mark task as done
+                self.queue.task_done()
+                
+            except Empty:
+                # If queue is empty, wait a bit and try again
+                await asyncio.sleep(0.01)  # Short sleep to reduce CPU usage
+                
+                # Exit loop if call terminated
+                if self.call.terminated or not self._queue_processor_running:
+                    logging.info(f"{self.session_id}Call terminated or processor stopped, ending queue processor")
+                    break
+            
+            except Exception as e:
+                logging.error(f"{self.session_id}Unexpected error in queue processor: {str(e)}")
+                logging.error(f"{self.session_id}Exception details: {traceback.format_exc()}")
+                await asyncio.sleep(0.1)  # Longer sleep on error
+        
+        logging.info(f"{self.session_id}Queue processor finished")
+
+    async def close(self):
+        """Closes the VoskSTT session"""
+        logging.info(f"{self.session_id}Closing VoskSTT session")
+        
+        # Stop queue processor
+        await self._stop_queue_processor()
+        
+        # Process any remaining audio in VAD buffer
+        if not self.bypass_vad:
+            await self._process_final_vad_buffer()
+        
+        # Use last partial as final if no final transcript
+        if not self.transcript_handler.last_final_transcript and self.transcript_handler.last_partial_transcript:
+            logging.info(f"{self.session_id}No final transcript received, using last partial as final: {self.transcript_handler.last_partial_transcript[:50]}...")
+            self.transcript_handler.last_final_transcript = self.transcript_handler.last_partial_transcript
+        
+        # Log final transcript
+        if self.transcript_handler.last_final_transcript:
+            logging.info(f"{self.session_id}Final transcript result: {self.transcript_handler.last_final_transcript}")
+        
+        # Send EOF to Vosk
+        await self._send_eof_if_enabled()
+        
+        # Cancel receive task
+        await self._cancel_receive_task()
         
         # Close WebSocket connection
         if self.vosk_client.is_connected:
             await self.vosk_client.disconnect()
         
-        logging.info(f"{session_id}VoskSTT session closed successfully")
+        logging.info(f"{self.session_id}VoskSTT session closed successfully")
+
+    async def _process_final_vad_buffer(self):
+        """Process final VAD buffer before closing"""
+        try:
+            is_speech, buffer_bytes = await self.vad_processor.process_final_buffer(self.session_id)
+            
+            if buffer_bytes:
+                buffer_seconds = len(buffer_bytes) / (2 * self.target_sample_rate)  # 2 bytes per sample
+                
+                # Track last partial transcript
+                last_partial = None
+                
+                # Save original callbacks
+                original_on_partial = self.transcript_handler.on_partial_transcript
+                original_on_final = self.transcript_handler.on_final_transcript
+                
+                # Create tracking callback
+                async def track_partial(text):
+                    nonlocal last_partial
+                    last_partial = text
+                    logging.info(f"{self.session_id}Got partial after final buffer: {text[:50]}...")
+                    logging.info(f"{self.session_id}Complete partial result after final buffer: {text}")
+                    
+                    # Call original handler
+                    if original_on_partial and callable(original_on_partial):
+                        await original_on_partial(text)
+                
+                # Install tracking callback
+                self.transcript_handler.on_partial_transcript = track_partial
+                
+                # Send buffer to Vosk if speech detected
+                if is_speech:
+                    await self.vosk_client.send_audio(buffer_bytes)
+                
+                # Wait briefly for response
+                wait_time = min(buffer_seconds * 0.4 + 0.2, 0.5)  # Max 0.5 seconds
+                logging.info(f"{self.session_id}Waiting {wait_time:.2f} seconds for final response...")
+                await asyncio.sleep(wait_time)
+                
+                # Use last partial as final
+                if last_partial and original_on_final and callable(original_on_final):
+                    logging.info(f"{self.session_id}Using last partial as final: {last_partial[:50]}...")
+                    self.transcript_handler.last_final_transcript = last_partial
+                    await original_on_final(last_partial)
+                
+                # Restore original callbacks
+                self.transcript_handler.on_partial_transcript = original_on_partial
+                self.transcript_handler.on_final_transcript = original_on_final
+                
+        except Exception as e:
+            logging.error(f"{self.session_id}Error handling final buffer: {e}")
 
     def get_final_transcript(self):
         """Son tanınan final transkript metnini döndürür.
@@ -671,23 +856,11 @@ class VoskSTT(AIEngine):
         Returns:
             str: Son alınan final transkript metni
         """
-        session_id = f"[Session:{self.b2b_key}] " if self.b2b_key else ""
-        if self.last_final_transcript:
-            logging.debug(f"{session_id}Returning final transcript: {self.last_final_transcript[:50]}...")
-            return self.last_final_transcript
-        elif self.last_partial_transcript:
-            # Eğer final transkript yoksa ama partial varsa, partial'ı döndür
-            logging.debug(f"{session_id}No final transcript available, returning partial: {self.last_partial_transcript[:50]}...")
-            return self.last_partial_transcript
-        else:
-            # Hiç transkript alınmadıysa boş string döndür
-            logging.debug(f"{session_id}No transcript available, returning empty string")
-            return ""
+        return self.transcript_handler.get_final_transcript(self.session_id)
 
     def terminate_call(self):
         """ Terminates the call """
-        session_id = f"[Session:{self.b2b_key}] " if self.b2b_key else ""
-        logging.info(f"{session_id}Terminating call")
+        logging.info(f"{self.session_id}Terminating call")
         self.call.terminated = True
 
     def set_log_level(self, level):
@@ -696,13 +869,14 @@ class VoskSTT(AIEngine):
         Args:
             level: The logging level (e.g. logging.INFO, logging.DEBUG)
         """
-        session_id = f"[Session:{self.b2b_key}] " if self.b2b_key else ""
         logging.getLogger().setLevel(level)
-        logging.info(f"{session_id}Set logging level to {logging._levelToName.get(level, level)}")
+        logging.info(f"{self.session_id}Set logging level to {logging._levelToName.get(level, level)}")
         
         # Update debug flag if setting to DEBUG
         if level == logging.DEBUG:
             self.debug = True
+            self.audio_processor.debug = True
         elif level == logging.INFO:
             self.debug = False
+            self.audio_processor.debug = False
 
