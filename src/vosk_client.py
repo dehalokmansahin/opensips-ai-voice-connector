@@ -83,7 +83,9 @@ class VoskClient:
 
         try:
             logging.info("Sending EOF message to Vosk server")
-            await self.websocket.send('{"eof": 1}')
+            await self.websocket.send(json.dumps({"eof": 1}))
+            # Sunucuya EOF işlenmesi için kısa bir süre tanı
+            await asyncio.sleep(0.1)
             return True
         except Exception as e:
             logging.error(f"Failed to send EOF to Vosk server: {e}")
@@ -113,6 +115,10 @@ class VoskClient:
                         logging.info(f"Transcription received from Vosk: {result['text']}")
                     elif "partial" in result and result["partial"]:
                         logging.debug(f"Partial transcription: {result['partial']}")
+                    elif "eof" in result:
+                        logging.info("EOF acknowledgment received from Vosk server")
+                    else:
+                        logging.debug(f"Other message received: {message[:50]}...")
                 except json.JSONDecodeError:
                     logging.warning(f"Received non-JSON message: {message[:50]}...")
                 except Exception as e:
@@ -125,7 +131,12 @@ class VoskClient:
                 return None
             
         except websockets.exceptions.ConnectionClosed as e:
-            logging.info(f"WebSocket connection closed: {e}")
+            if e.code == 1000:
+                logging.info(f"WebSocket connection closed normally with code {e.code}")
+            elif e.code == 1001:
+                logging.info(f"WebSocket connection going away with code {e.code}")
+            else:
+                logging.warning(f"WebSocket connection closed with code {e.code}: {e.reason}")
             self.is_connected = False
             return None
         except Exception as e:
@@ -142,8 +153,9 @@ class VoskClient:
     async def close(self):
         if self.websocket:
             try:
-                await self.websocket.close()
-                logging.info("WebSocket connection closed")
+                # Normal kapatma kodu ile WebSocket'i kapatıyoruz
+                await self.websocket.close(code=1000, reason="Normal closure")
+                logging.info("WebSocket connection closed gracefully")
             except Exception as e:
                 logging.error(f"Error closing WebSocket connection: {e}")
             finally:

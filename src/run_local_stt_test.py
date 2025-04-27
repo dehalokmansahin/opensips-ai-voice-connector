@@ -60,9 +60,7 @@ async def main():
             "debug": True  # Enable debug for more verbose logging
         }
     }
-    logging.info("Starting test: Loading audio file")
     waveform, sample_rate = torchaudio.load("C:/Cursor/opensips-ai-voice-connector/src/test.wav")
-    logging.info(f"Loaded test.wav: {waveform.shape}, sample_rate={sample_rate}Hz")
 
     # Transkript callback'lerini tanımla
     async def on_partial_transcript(text):
@@ -128,8 +126,7 @@ async def main():
     logging.info("Finished putting audio into queue. Waiting for processing...")
 
     # Temiz kapanış için yeterli süre ver
-    logging.info("Waiting for final processing to complete...")
-    await asyncio.sleep(1.0)
+   
 
     # STT motorunu kapat
     await stt.close()
