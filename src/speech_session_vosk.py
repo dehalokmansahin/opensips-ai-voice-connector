@@ -377,6 +377,9 @@ class VoskSTT(AIEngine):
         self.queue_processor_task = None
         self._queue_processor_running = False
         
+        # Closing state
+        self._is_closing = False
+        
         # Setup logging
         self._setup_logging()
         
@@ -477,6 +480,9 @@ class VoskSTT(AIEngine):
         logging.info(f"{self.session_id}Vosk sunucusuna bağlanılıyor: {self.vosk_server_url}")
         
         try:
+            # Reset closing flag when starting
+            self._is_closing = False
+            
             # Connect to Vosk server
             await self.vosk_client.connect()
             
@@ -658,6 +664,12 @@ class VoskSTT(AIEngine):
                         # Check if the connection is still valid
                         if not self.vosk_client.is_connected:
                             logging.error(f"{self.session_id}WebSocket connection lost during transcript reception")
+                            
+                            # Don't try to reconnect if we're closing
+                            if self._is_closing or self.call.terminated:
+                                logging.info(f"{self.session_id}Session is closing, not attempting to reconnect")
+                                break
+                                
                             # Try to reconnect
                             success = await self._try_reconnect(reconnect_attempts, max_reconnect_attempts)
                             if success:
@@ -680,6 +692,11 @@ class VoskSTT(AIEngine):
                     if conn_err.code in (1000, 1001) and self.call.terminated:
                         logging.info(f"{self.session_id}WebSocket bağlantısı normal şekilde kapandı: {conn_err.code}")
                         break  # Çağrı sonlandırıldıysa ve bağlantı normal kapandıysa döngüden çık
+                    
+                    # Don't try to reconnect if we're closing
+                    if self._is_closing or self.call.terminated:
+                        logging.info(f"{self.session_id}Session is closing, not attempting to reconnect after connection closed with code {conn_err.code}")
+                        break
                     
                     logging.error(f"{self.session_id}WebSocket connection closed: {conn_err}")
                     self.vosk_client.is_connected = False
@@ -731,6 +748,9 @@ class VoskSTT(AIEngine):
             reconnected = await self.vosk_client.connect()
             if reconnected:
                 logging.info(f"{self.session_id}Successfully reconnected to Vosk server")
+                
+                # Reset closing flag when reconnecting successfully
+                self._is_closing = False
                 
                 # Resend config
                 config = {
@@ -794,6 +814,9 @@ class VoskSTT(AIEngine):
         logging.info(f"{self.session_id}Closing VoskSTT session")
         
         try:
+            # Set closing flag to prevent reconnection attempts
+            self._is_closing = True
+            
             # Stop all tasks and close connections in the right order
             await self._stop_queue_processor()
             

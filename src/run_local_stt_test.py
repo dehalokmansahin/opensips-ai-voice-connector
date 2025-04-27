@@ -115,7 +115,7 @@ async def main():
         if chunk_tensor.numel() > 0:
             logging.debug(f"Putting float tensor chunk to queue: shape={chunk_tensor.shape}")
             # Put directly to queue without await since it's a standard Queue
-            call.rtp.put(chunk_tensor)
+            call.rtp.put_nowait(chunk_tensor)
         else:
             logging.warning(f"Skipping empty tensor chunk at index {i}")
             

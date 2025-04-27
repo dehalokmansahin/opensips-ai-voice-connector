@@ -23,7 +23,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src/ /app/src/
 COPY cfg/ /app/cfg/
 
-COPY run_local_stt_test.py /app/run_local_stt_test.py
 
 # Environment variables (can be overridden at runtime)
 ENV CONFIG_FILE=/app/cfg/opensips-ai-voice-connector.ini
