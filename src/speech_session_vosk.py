@@ -185,7 +185,7 @@ class VoskSTT(AIEngine):
             if self.send_eof and self.vosk_client.is_connected:
                 try:
                     logging.debug(f"{session_id}Vosk'a EOF işareti gönderiliyor")
-                    await self.vosk_client.send({"eof": 1})
+                    await self.vosk_client.send(json.dumps({"eof": 1}))
                 except Exception as e:
                     logging.error(f"{session_id}EOF gönderirken hata: {str(e)}")
             
