@@ -23,10 +23,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src/ /app/src/
 COPY cfg/ /app/cfg/
 COPY test.wav /app/test.wav
-COPY test_vosk_with_wav.py /app/test_vosk_with_wav.py
+COPY run_local_stt_test.py /app/run_local_stt_test.py
 
 # Environment variables (can be overridden at runtime)
-ENV CONFIG_FILE=/app/cfg/vosk.cfg
+ENV CONFIG_FILE=/app/cfg/opensips-ai-voice-connector.ini
 ENV PYTHONPATH=/app
 # Set default Vosk WebSocket URL - can be overridden when running the container
 # Use the container name when containers are on the same Docker network

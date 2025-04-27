@@ -18,6 +18,7 @@ spec:
       - name: oavc
         # IMPORTANT: Replace <your-project> with your OpenShift project name
         # and ensure this image exists in the internal registry or another accessible registry.
+        # Example: image: image-registry.openshift-image-registry.svc:5000/my-project/opensips-ai-voice-connector-oavc:latest
         image: image-registry.openshift-image-registry.svc:5000/<your-project>/opensips-ai-voice-connector-oavc:latest
         # Or use an externally hosted image:
         # image: your-dockerhub-user/opensips-ai-voice-connector-oavc:latest
@@ -50,4 +51,4 @@ spec:
       volumes:
       - name: config-volume
         configMap:
-          name: oavc-config 
+          name: opensips-ai-voice-connector 

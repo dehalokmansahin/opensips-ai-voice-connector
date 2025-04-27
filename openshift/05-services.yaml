@@ -13,8 +13,10 @@ spec:
     targetPort: 8088
     protocol: UDP
   # Note: Exposing UDP port ranges in ClusterIP services is complex.
-  # This defines the starting port. Your CNI might handle ranges differently.
-  # For NodePort/LoadBalancer, you might need specific annotations or multiple port entries.
+  # This defines the starting port. Your CNI must allow traffic to the pod 
+  # on the other required ports (35001-35100) for RTP to function correctly even internally.
+  # For NodePort/LoadBalancer/external access, you might need specific annotations 
+  # or multiple port entries depending on your OpenShift CNI and configuration.
   # Check OpenShift/Kubernetes docs for UDP range exposure with your CNI.
   - name: rtp-udp-start
     port: 35000

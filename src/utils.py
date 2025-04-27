@@ -35,14 +35,12 @@ try:
 except ImportError:
     has_azure = False
     print("Azure module not available, Azure STT provider will be disabled")
-from stt_vosk import VoskSTT
 from config import Config
 
 # Initialize FLAVORS dictionary
 FLAVORS = {"deepgram": Deepgram,
            "openai": OpenAI,
-           "deepgram_native": DeepgramNative,
-           "vosk": VoskSTT}
+           "deepgram_native": DeepgramNative}
 
 # Add Azure if available
 if has_azure:
@@ -139,6 +137,9 @@ def get_ai_flavor(params):
 
 def get_ai(flavor, call, cfg):
     """ Returns an AI object """
+    if flavor == "vosk":
+        from speech_session_vosk import VoskSTT
+        return VoskSTT(call, cfg)
     return FLAVORS[flavor](call, cfg)
 
 # vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4

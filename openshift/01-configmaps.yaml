@@ -32,6 +32,7 @@ data:
     # VAD (Voice Activity Detection) settings
     use_vad = true
     # Ensure test mode is reflected here if needed for deployment
+    # Set to false for normal operation!
     test_mode_wav = true 
     # Note: test_wav_path will likely be different or need mounting in OpenShift
 
