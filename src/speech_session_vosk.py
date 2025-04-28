@@ -404,7 +404,7 @@ class VoskSTT(AIEngine):
         self.debug = self.cfg.get("debug", "debug", False)
         
         # VAD configuration
-        self.bypass_vad = self.cfg.get("bypass_vad", "bypass_vad", False)
+        self.bypass_vad = self.cfg.get("bypass_vad", "bypass_vad", True)
         self.vad_threshold = self.cfg.get("vad_threshold", "vad_threshold", 0.12)
         self.vad_min_speech_ms = self.cfg.get("vad_min_speech_ms", "vad_min_speech_ms", 40)
         self.vad_min_silence_ms = self.cfg.get("vad_min_silence_ms", "vad_min_silence_ms", 200)
