@@ -4,7 +4,7 @@ FROM python:3.10-slim
 WORKDIR /app
 
 # Install system dependencies including OPUS codec support and libsndfile for soundfile library
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends && apt-get install tcpdump \
     libopus-dev \
     libsndfile1 \
     gcc \
