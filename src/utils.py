@@ -28,6 +28,7 @@ from sipmessage import Address
 from deepgram_api import Deepgram
 from openai_api import OpenAI
 from deepgram_native_api import DeepgramNative
+from speech_session_vosk import VoskSTT
 # Try to import Azure, but don't fail if not available
 try:
     from azure_api import AzureAI
@@ -40,7 +41,8 @@ from config import Config
 # Initialize FLAVORS dictionary
 FLAVORS = {"deepgram": Deepgram,
            "openai": OpenAI,
-           "deepgram_native": DeepgramNative}
+           "deepgram_native": DeepgramNative,
+           "vosk":VoskSTT}
 
 # Add Azure if available
 if has_azure:
@@ -137,9 +139,6 @@ def get_ai_flavor(params):
 
 def get_ai(flavor, call, cfg):
     """ Returns an AI object """
-    if flavor == "vosk":
-        from speech_session_vosk import VoskSTT
-        return VoskSTT(call, cfg)
     return FLAVORS[flavor](call, cfg)
 
 # vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4
