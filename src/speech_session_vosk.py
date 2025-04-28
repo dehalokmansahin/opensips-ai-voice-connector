@@ -199,9 +199,13 @@ class VADProcessor:
             tuple: (is_processed, is_speech, buffer_bytes) - indicates if buffer was processed,
                   if speech was detected, and the processed buffer bytes
         """
+        logging.debug("init ")
+
         async with self._vad_buffer_locks:
             # Add to buffer
+            
             self._vad_buffer.extend(audio_bytes)
+            logging.debug(f"{self.session_id}VAD buffer: Added {len(audio_bytes)} bytes, current buffer size: {len(self._vad_buffer)} bytes")
             self._vad_buffer_size_samples += num_samples
             
             # Calculate buffer duration in ms
@@ -387,7 +391,7 @@ class VoskSTT(AIEngine):
     def _load_config(self):
         """Load configuration parameters from config"""
         # Connection parameters
-        self.vosk_server_url = self.cfg.get("url", "url", "ws://localhost:2700")
+        self.vosk_server_url = self.cfg.get("url", "url", "ws://10.175.10.50:2700")
         self.websocket_timeout = self.cfg.get("websocket_timeout", "websocket_timeout", 5.0)
         self.target_sample_rate = int(self.cfg.get("sample_rate", "sample_rate", 16000))
         self.channels = self.cfg.get("channels", "channels", 1)
@@ -590,7 +594,9 @@ class VoskSTT(AIEngine):
 
     async def send(self, audio):
         """Sends audio to Vosk"""
-
+        if not self.vosk_client.is_connected:
+             logging.warning(f"{self.session_id}WebSocket not connected, cannot send audio")
+             return
         try:
             await self._process_audio_data(audio)
         except Exception as e:
