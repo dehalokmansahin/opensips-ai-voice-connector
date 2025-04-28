@@ -60,7 +60,7 @@ async def main():
             "debug": True  # Enable debug for more verbose logging
         }
     }
-    waveform, sample_rate = torchaudio.load("C:/Cursor/opensips-ai-voice-connector/src/test.wav")
+    waveform, sample_rate = torchaudio.load("test.wav")
 
     # Transkript callback'lerini tanımla
     async def on_partial_transcript(text):
