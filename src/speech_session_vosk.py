@@ -199,7 +199,7 @@ class VADProcessor:
             tuple: (is_processed, is_speech, buffer_bytes) - indicates if buffer was processed,
                   if speech was detected, and the processed buffer bytes
         """
-        logging.debug("init ")
+        logging.debug(f"{self.session_id}VAD add_audio called with {len(audio_bytes)} bytes, {num_samples} init")
 
         async with self._vad_buffer_locks:
             # Add to buffer
@@ -637,9 +637,11 @@ class VoskSTT(AIEngine):
         """
         if self.bypass_vad:
             # In bypass mode, send directly to Vosk
+            logging.debug(f"{self.session_id}VAD buffer: Added {len(audio_bytes)} bytes, current buffer size: {len(self._vad_buffer)} init 2")
             await self.vosk_client.send_audio(audio_bytes)
         else:
             # Add to VAD buffer for speech detection
+            logging.debug(f"{self.session_id}VAD buffer: Added {len(audio_bytes)} bytes, current buffer size: {len(self._vad_buffer)} init 3")
             was_processed, is_speech, buffer_bytes = await self.vad_processor.add_audio(
                 audio_bytes, tensor.shape[0])
                 
