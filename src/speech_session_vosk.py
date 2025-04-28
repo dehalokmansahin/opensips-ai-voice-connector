@@ -374,8 +374,7 @@ class VoskSTT(AIEngine):
         
         # Task states
         self.receive_task = None
-        self.queue_processor_task = None
-        self._queue_processor_running = False
+
         
         # Closing state
         self._is_closing = False
@@ -498,9 +497,7 @@ class VoskSTT(AIEngine):
             # Start transcript receiver task
             self.receive_task = asyncio.create_task(self.receive_transcripts())
             
-            # Start queue processor task
-            self._queue_processor_running = True
-            self.queue_processor_task = asyncio.create_task(self._process_queue())
+
             
             logging.info(f"{self.session_id}Vosk STT motoru başarıyla başlatıldı")
             return True
@@ -513,9 +510,7 @@ class VoskSTT(AIEngine):
         logging.info(f"{self.session_id}Vosk STT motoru durduruluyor")
         
         try:
-            # Stop queue processor task
-            await self._stop_queue_processor()
-            
+
             # Send EOF if enabled
             await self._send_eof_if_enabled()
             
@@ -555,10 +550,7 @@ class VoskSTT(AIEngine):
                 return False
         return True
 
-    async def _stop_queue_processor(self):
-        """Stop the queue processor task"""
-        self._queue_processor_running = False
-        await self._manage_task(self.queue_processor_task)
+
 
     async def _cancel_receive_task(self):
         """Cancel the transcript receive task"""
@@ -598,33 +590,37 @@ class VoskSTT(AIEngine):
 
     async def send(self, audio):
         """Sends audio to Vosk"""
-        if not self.vosk_client.is_connected:
-            logging.warning(f"{self.session_id}WebSocket not connected, cannot send audio")
-            return
-            
+
         try:
-            if isinstance(audio, bytes):
-                # Process bytes audio
-                resampled_tensor, audio_bytes = self.audio_processor.process_bytes_audio(audio)
-                if resampled_tensor is None or audio_bytes is None:
-                    return
-                
-                await self._handle_processed_audio(resampled_tensor, audio_bytes)
-                    
-            elif isinstance(audio, torch.Tensor):
-                # Process tensor audio
-                processed_tensor, audio_bytes = self.audio_processor.process_tensor_audio(audio)
-                if processed_tensor is None or audio_bytes is None:
-                    return
-                
-                await self._handle_processed_audio(processed_tensor, audio_bytes)
-                
-            else:
-                logging.warning(f"{self.session_id}Unexpected audio type: {type(audio)}, skipping")
-                
+            await self._process_audio_data(audio)
         except Exception as e:
             logging.error(f"{self.session_id}Error sending audio to Vosk: {str(e)}")
             logging.error(f"{self.session_id}Exception details: {traceback.format_exc()}")
+
+    async def _process_audio_data(self, audio):
+        """Process audio data and send to Vosk if appropriate
+        
+        Args:
+            audio: Audio data to process (bytes or tensor)
+        """
+        if isinstance(audio, bytes):
+            # Process bytes audio
+            resampled_tensor, audio_bytes = self.audio_processor.process_bytes_audio(audio)
+            if resampled_tensor is None or audio_bytes is None:
+                return
+            
+            await self._handle_processed_audio(resampled_tensor, audio_bytes)
+                
+        elif isinstance(audio, torch.Tensor):
+            # Process tensor audio
+            processed_tensor, audio_bytes = self.audio_processor.process_tensor_audio(audio)
+            if processed_tensor is None or audio_bytes is None:
+                return
+            
+            await self._handle_processed_audio(processed_tensor, audio_bytes)
+            
+        else:
+            logging.warning(f"{self.session_id}Unexpected audio type: {type(audio)}, skipping")
 
     async def _handle_processed_audio(self, tensor, audio_bytes):
         """Handle processed audio
@@ -771,43 +767,6 @@ class VoskSTT(AIEngine):
         await asyncio.sleep(backoff_time)
         return False
 
-    async def _process_queue(self):
-        """RTP kuyruğundan ses verilerini işleyen metod."""
-        logging.info(f"{self.session_id}Queue processor started for VoskSTT")
-        
-        while self._queue_processor_running:
-            try:
-                # Get next audio chunk from queue
-                audio_chunk = self.queue.get_nowait()
-                
-                if self.debug:
-                    logging.debug(f"{self.session_id}Processing audio chunk from queue: {len(audio_chunk)} bytes")
-                
-                # Send audio chunk for processing
-                try:
-                    await self.send(audio_chunk)
-                except Exception as e:
-                    logging.error(f"{self.session_id}Error sending audio chunk from queue: {str(e)}")
-                    logging.error(f"{self.session_id}Exception details: {traceback.format_exc()}")
-                
-                # Mark task as done
-                self.queue.task_done()
-                
-            except Empty:
-                # If queue is empty, wait a bit and try again
-                await asyncio.sleep(0.01)  # Short sleep to reduce CPU usage
-                
-                # Exit loop if call terminated
-                if self.call.terminated or not self._queue_processor_running:
-                    logging.info(f"{self.session_id}Call terminated or processor stopped, ending queue processor")
-                    break
-            
-            except Exception as e:
-                logging.error(f"{self.session_id}Unexpected error in queue processor: {str(e)}")
-                logging.error(f"{self.session_id}Exception details: {traceback.format_exc()}")
-                await asyncio.sleep(0.1)  # Longer sleep on error
-        
-        logging.info(f"{self.session_id}Queue processor finished")
 
     async def close(self):
         """Closes the VoskSTT session"""
@@ -817,8 +776,6 @@ class VoskSTT(AIEngine):
             # Set closing flag to prevent reconnection attempts
             self._is_closing = True
             
-            # Stop all tasks and close connections in the right order
-            await self._stop_queue_processor()
             
             # Process any remaining audio in VAD buffer
             if not self.bypass_vad:
@@ -945,4 +902,3 @@ class VoskSTT(AIEngine):
             str: Son alınan final transkript metni
         """
         return self.transcript_handler.get_final_transcript()
-
