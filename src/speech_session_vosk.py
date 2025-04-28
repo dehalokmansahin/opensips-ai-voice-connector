@@ -18,7 +18,7 @@ import traceback
 class AudioProcessor:
     """Audio processing utilities for speech recognition"""
     
-    def __init__(self, target_sample_rate=16000, debug=False, session_id=""):
+    def __init__(self, target_sample_rate=16000, debug=True, session_id=""):
         self.target_sample_rate = target_sample_rate
         self.debug = debug
         self.session_id = session_id
@@ -603,6 +603,7 @@ class VoskSTT(AIEngine):
              logging.warning(f"{self.session_id}WebSocket not connected, cannot send audio")
              return
         try:
+            logging.debug("payload %s", audio)
             await self._process_audio_data(audio)
         except Exception as e:
             logging.error(f"{self.session_id}Error sending audio to Vosk: {str(e)}")
