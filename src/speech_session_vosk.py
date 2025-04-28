@@ -151,10 +151,13 @@ class AudioProcessor:
             torch.Tensor: Normalized tensor
         """
         audio_max = torch.max(torch.abs(tensor))
+        logging.debug(f"{self.session_id}Audio max level before normalization: {audio_max:.4f}") # Log eklendi
         
         # Only normalize very quiet audio
-        if audio_max < 0.005:
-            gain = min(0.2 / (audio_max + 1e-10), 5.0)
+        normalize_threshold = 0.01 # Eşik artırıldı (önceki: 0.005)
+        max_gain = 10.0 # Maksimum kazanç artırıldı (önceki: 5.0)
+        if audio_max < normalize_threshold and audio_max > 1e-9: # Sıfıra bölme hatasını önle
+            gain = min(0.2 / (audio_max + 1e-10), max_gain) 
             tensor = tensor * gain
             logging.debug(f"{self.session_id}Applied normalization with gain: {gain:.2f}")
         
