@@ -55,76 +55,59 @@ class AudioProcessor:
         if self.debug:
             logging.debug(f"{self.session_id}Raw input audio: {len(audio)} bytes")
         
-        # Decode PCMU to PCM
-        pcm16_samples = self.pcmu_decoder.decode(audio)
-        
+        # Decode PCMU to PCM float32 NumPy array
+        pcm32_samples_np = self.pcmu_decoder.decode(audio) # Returns np.ndarray(dtype=np.float32)
 
-        
-        # Ensure data is valid before conversion
-        if pcm16_samples is None or len(pcm16_samples) == 0:
+        if pcm32_samples_np is None or pcm32_samples_np.size == 0:
             logging.warning(f"{self.session_id}PCMU decoder returned empty result. Skipping processing.")
             return None, None
             
-        logging.debug(f"{self.session_id}Decoded PCM: {len(pcm16_samples)} bytes ({len(pcm16_samples)//2} samples)")
+        # DETAILED LOG 1: After decoding PCMU to float32 samples
+        # logging.debug(f"{self.session_id}Decoded PCM: {len(pcm16_samples)} bytes") # Old log
+        logging.debug(f"{self.session_id}Decoded to float32 PCM samples: {len(pcm32_samples_np)}")
+        
+        # Ensure data is valid before conversion - check size now
+        # if len(pcm16_samples) == 0:
+        #     logging.warning(f"{self.session_id}Empty PCM after conversion. Skipping.")
+        #     return None, None
         
         try:
-            # Convert to float tensor for resampling
-            audio_tensor = torch.frombuffer(bytearray(pcm16_samples), dtype=torch.int16).float() / 32768.0
-            logging.debug(f"{self.session_id}Converted to tensor: shape={audio_tensor.shape}, min={audio_tensor.min():.4f}, max={audio_tensor.max():.4f}")
+            # Convert float32 NumPy array directly to float32 PyTorch tensor
+            # No need for frombuffer or int16 conversion/scaling
+            # audio_tensor = torch.frombuffer(bytearray(pcm16_samples), dtype=torch.int16).float() / 32768.0 # Old way
+            audio_tensor = torch.from_numpy(pcm32_samples_np)
+            # DETAILED LOG 2: After converting NumPy array to tensor
+            # logging.debug(f"{self.session_id}Converted to 8kHz tensor: shape={audio_tensor.shape}, min={audio_tensor.min():.4f}, max={audio_tensor.max():.4f}") # Old log
+            logging.debug(f"{self.session_id}Converted NumPy to 8kHz tensor: shape={audio_tensor.shape}, dtype={audio_tensor.dtype}, min={audio_tensor.min():.4f}, max={audio_tensor.max():.4f}")
             
             # Clean tensor if needed
             audio_tensor = self._clean_tensor(audio_tensor)
             
-            # Normalize audio HERE before resampling
+            # Normalize audio
             audio_tensor = self._normalize_audio(audio_tensor)
             
-            # Resample to target rate
+            # Resample to target rate (e.g., 16kHz)
             resampled_tensor = self.resampler(audio_tensor.unsqueeze(0)).squeeze(0)
-            logging.debug(f"{self.session_id}Resampled tensor: shape={resampled_tensor.shape}, min={resampled_tensor.min():.4f}, max={resampled_tensor.max():.4f}")
+            # DETAILED LOG 3: After resampling to target rate
+            # logging.debug(f"{self.session_id}Resampled tensor: shape={resampled_tensor.shape}, min={resampled_tensor.min():.4f}, max={resampled_tensor.max():.4f}") # Old log
+            logging.debug(f"{self.session_id}Resampled tensor: shape={resampled_tensor.shape}, dtype={resampled_tensor.dtype}, min={resampled_tensor.min():.4f}, max={resampled_tensor.max():.4f}")
             
             # Check the resampled audio validity
             if resampled_tensor.shape[0] == 0:
                 logging.warning(f"{self.session_id}Resampling resulted in empty tensor. Skipping.")
                 return None, None
             
-            # Convert to audio bytes
+            # Convert final float32 tensor to 16-bit PCM bytes for Vosk
             audio_bytes = self.tensor_to_bytes(resampled_tensor)
+            
+            # DETAILED LOG 4: Final bytes length before returning
+            logging.debug(f"{self.session_id}Final processed audio bytes length: {len(audio_bytes)}")
             
             return resampled_tensor, audio_bytes
             
         except Exception as e:
             logging.error(f"{self.session_id}Error processing audio bytes: {str(e)}")
             logging.error(f"{self.session_id}Exception details: {traceback.format_exc()}")
-            return None, None
-    
-    def process_tensor_audio(self, audio):
-        """Process audio tensor directly
-        
-        Args:
-            audio: Audio tensor
-            
-        Returns:
-            tuple: (processed_tensor, audio_bytes) or (None, None) on error
-        """
-        try:
-            # Validate tensor
-            if audio.numel() == 0:
-                logging.warning(f"{self.session_id}Empty audio tensor received. Skipping.")
-                return None, None
-            
-            # Clean tensor if needed
-            audio = self._clean_tensor(audio)
-            
-            # Normalize audio
-            audio = self._normalize_audio(audio)
-            
-            # Convert to audio bytes
-            audio_bytes = self.tensor_to_bytes(audio)
-            
-            return audio, audio_bytes
-            
-        except Exception as e:
-            logging.error(f"{self.session_id}Error processing audio tensor: {str(e)}")
             return None, None
     
     def _clean_tensor(self, tensor):
@@ -151,13 +134,10 @@ class AudioProcessor:
             torch.Tensor: Normalized tensor
         """
         audio_max = torch.max(torch.abs(tensor))
-        logging.debug(f"{self.session_id}Audio max level before normalization: {audio_max:.4f}") # Log eklendi
         
         # Only normalize very quiet audio
-        normalize_threshold = 0.01 # Eşik artırıldı (önceki: 0.005)
-        max_gain = 10.0 # Maksimum kazanç artırıldı (önceki: 5.0)
-        if audio_max < normalize_threshold and audio_max > 1e-9: # Sıfıra bölme hatasını önle
-            gain = min(0.2 / (audio_max + 1e-10), max_gain) 
+        if audio_max < 0.005:
+            gain = min(0.2 / (audio_max + 1e-10), 5.0)
             tensor = tensor * gain
             logging.debug(f"{self.session_id}Applied normalization with gain: {gain:.2f}")
         
@@ -168,7 +148,7 @@ class VADProcessor:
     
     def __init__(self, vad_detector, target_sample_rate, audio_processor, 
                  vad_buffer_chunk_ms=750, speech_detection_threshold=3, 
-                 silence_detection_threshold=10, debug=False, session_id=""):
+                 silence_detection_threshold=10, debug=True, session_id=""):
         self.vad = vad_detector
         self.target_sample_rate = target_sample_rate
         self.audio_processor = audio_processor  # Add reference to audio processor
@@ -200,13 +180,9 @@ class VADProcessor:
             tuple: (is_processed, is_speech, buffer_bytes) - indicates if buffer was processed,
                   if speech was detected, and the processed buffer bytes
         """
-        logging.debug(f"{self.session_id}VAD add_audio called with {len(audio_bytes)} bytes, {num_samples} init")
-
         async with self._vad_buffer_locks:
             # Add to buffer
-            
             self._vad_buffer.extend(audio_bytes)
-            logging.debug(f"{self.session_id}VAD buffer: Added {len(audio_bytes)} bytes, current buffer size: {len(self._vad_buffer)} bytes")
             self._vad_buffer_size_samples += num_samples
             
             # Calculate buffer duration in ms
@@ -228,34 +204,28 @@ class VADProcessor:
         """
         buffer_bytes = bytes(self._vad_buffer)
         send_to_stt = False
-        processed_buffer_bytes = None
         
         try:
-            # Ensure buffer_bytes is treated as int16
-            if len(buffer_bytes) % 2 != 0:
-                 logging.warning(f"{self.session_id}VAD buffer has odd number of bytes ({len(buffer_bytes)}). Trimming last byte.")
-                 buffer_bytes = buffer_bytes[:-1]
-
-            if len(buffer_bytes) == 0:
-                logging.warning(f"{self.session_id}VAD buffer is empty after potential trim. Skipping VAD processing.")
-                is_speech = False
-            else:
-                # Convert buffer to tensor for VAD processing
-                audio_tensor = torch.frombuffer(bytearray(buffer_bytes), dtype=torch.int16).float() / 32768.0
-                
-                # Apply VAD
-                is_speech = self.vad.is_speech(audio_tensor)
+            # Convert buffer to tensor for VAD processing
+            audio_tensor = torch.frombuffer(bytearray(buffer_bytes), dtype=torch.int16).float() / 32768.0
+            
+            # Apply VAD
+            is_speech = self.vad.is_speech(audio_tensor)
             
             # Update speech state
             if is_speech:
                 self.consecutive_speech_packets += 1
                 self.consecutive_silence_packets = 0
+                
+                # If enough consecutive speech packets, activate speech mode
                 if self.consecutive_speech_packets >= self.speech_detection_threshold and not self.speech_active:
                     self.speech_active = True
                     logging.info(f"{self.session_id}Speech started after {self.consecutive_speech_packets} consecutive speech packets")
             else:
                 self.consecutive_silence_packets += 1
                 self.consecutive_speech_packets = 0
+                
+                # If enough consecutive silence packets, deactivate speech mode
                 if self.consecutive_silence_packets >= self.silence_detection_threshold and self.speech_active:
                     self.speech_active = False
                     logging.info(f"{self.session_id}Speech ended after {self.consecutive_silence_packets} consecutive silence packets")
@@ -265,18 +235,17 @@ class VADProcessor:
             
             if send_to_stt:
                 logging.info(f"{self.session_id}VAD: speech={is_speech}, active={self.speech_active}")
-                if len(buffer_bytes) > 0:
-                    processed_buffer_bytes = buffer_bytes
             else:
-                 logging.debug(f"{self.session_id}No speech detected or buffer empty in chunk, not sending to STT")
-
-            return send_to_stt, processed_buffer_bytes
+                logging.debug(f"{self.session_id}No speech detected in chunk, not sending to STT")
+            
+            return send_to_stt, buffer_bytes
             
         except Exception as e:
             logging.error(f"{self.session_id}Error processing VAD buffer: {str(e)}")
-            logging.error(f"{self.session_id}Traceback: {traceback.format_exc()}")
-            return False, None
+            # Return false to indicate no speech detected on error
+            return False, buffer_bytes
         finally:
+            # Clear buffer after processing
             self._vad_buffer.clear()
             self._vad_buffer_size_samples = 0
             self._last_buffer_flush_time = time.time()
@@ -386,7 +355,6 @@ class VoskSTT(AIEngine):
         
         # Task states
         self.receive_task = None
-
         
         # Closing state
         self._is_closing = False
@@ -399,21 +367,21 @@ class VoskSTT(AIEngine):
     def _load_config(self):
         """Load configuration parameters from config"""
         # Connection parameters
-        self.vosk_server_url = self.cfg.get("url", "url", "ws://10.175.10.50:2700")
+        self.vosk_server_url = self.cfg.get("url", "url", "ws://localhost:2700")
         self.websocket_timeout = self.cfg.get("websocket_timeout", "websocket_timeout", 5.0)
         self.target_sample_rate = int(self.cfg.get("sample_rate", "sample_rate", 16000))
         self.channels = self.cfg.get("channels", "channels", 1)
         self.send_eof = self.cfg.get("send_eof", "send_eof", True)
-        self.debug = self.cfg.get("debug", "debug", False)
+        self.debug = self.cfg.get("debug", "debug", True)
         
         # VAD configuration
-        self.bypass_vad = self.cfg.get("bypass_vad", "bypass_vad", True)
+        self.bypass_vad = self.cfg.get("bypass_vad", "bypass_vad", False)
         self.vad_threshold = self.cfg.get("vad_threshold", "vad_threshold", 0.12)
         self.vad_min_speech_ms = self.cfg.get("vad_min_speech_ms", "vad_min_speech_ms", 40)
         self.vad_min_silence_ms = self.cfg.get("vad_min_silence_ms", "vad_min_silence_ms", 200)
-        self.vad_buffer_chunk_ms = self.cfg.get("vad_buffer_chunk_ms", "vad_buffer_chunk_ms", 250)
+        self.vad_buffer_chunk_ms = self.cfg.get("vad_buffer_chunk_ms", "vad_buffer_chunk_ms", 750)
         self.vad_buffer_max_seconds = self.cfg.get("vad_buffer_max_seconds", "vad_buffer_max_seconds", 1.0)
-        self.speech_detection_threshold = self.cfg.get("speech_detection_threshold", "speech_detection_threshold", 1)
+        self.speech_detection_threshold = self.cfg.get("speech_detection_threshold", "speech_detection_threshold", 3)
         self.silence_detection_threshold = self.cfg.get("silence_detection_threshold", "silence_detection_threshold", 10)
 
     def _init_components(self, call):
@@ -424,7 +392,6 @@ class VoskSTT(AIEngine):
         """
         # Store call info
         self.call = call
-        self.queue = call.rtp
         self.client_addr = call.client_addr
         self.client_port = call.client_port
         
@@ -509,8 +476,6 @@ class VoskSTT(AIEngine):
             # Start transcript receiver task
             self.receive_task = asyncio.create_task(self.receive_transcripts())
             
-
-            
             logging.info(f"{self.session_id}Vosk STT motoru başarıyla başlatıldı")
             return True
         except Exception as e:
@@ -522,7 +487,6 @@ class VoskSTT(AIEngine):
         logging.info(f"{self.session_id}Vosk STT motoru durduruluyor")
         
         try:
-
             # Send EOF if enabled
             await self._send_eof_if_enabled()
             
@@ -561,8 +525,6 @@ class VoskSTT(AIEngine):
                     pass
                 return False
         return True
-
-
 
     async def _cancel_receive_task(self):
         """Cancel the transcript receive task"""
@@ -603,39 +565,24 @@ class VoskSTT(AIEngine):
     async def send(self, audio):
         """Sends audio to Vosk"""
         if not self.vosk_client.is_connected:
-             logging.warning(f"{self.session_id}WebSocket not connected, cannot send audio")
-             return
+            logging.warning(f"{self.session_id}WebSocket not connected, cannot send audio")
+            return
+            
         try:
-            logging.debug("payload %s", audio)
-            await self._process_audio_data(audio)
+            if isinstance(audio, bytes):
+                # Process bytes audio
+                resampled_tensor, audio_bytes = self.audio_processor.process_bytes_audio(audio)
+                if resampled_tensor is None or audio_bytes is None:
+                    return
+                
+                await self._handle_processed_audio(resampled_tensor, audio_bytes)
+            else:
+                # Log a warning if the input is not bytes, as this shouldn't happen
+                logging.warning(f"{self.session_id}Unexpected audio type received: {type(audio)}, expected bytes. Skipping.")
+                
         except Exception as e:
             logging.error(f"{self.session_id}Error sending audio to Vosk: {str(e)}")
             logging.error(f"{self.session_id}Exception details: {traceback.format_exc()}")
-
-    async def _process_audio_data(self, audio):
-        """Process audio data and send to Vosk if appropriate
-        
-        Args:
-            audio: Audio data to process (bytes or tensor)
-        """
-        if isinstance(audio, bytes):
-            # Process bytes audio
-            resampled_tensor, audio_bytes = self.audio_processor.process_bytes_audio(audio)
-            if resampled_tensor is None or audio_bytes is None:
-                return
-            
-            await self._handle_processed_audio(resampled_tensor, audio_bytes)
-                
-        elif isinstance(audio, torch.Tensor):
-            # Process tensor audio
-            processed_tensor, audio_bytes = self.audio_processor.process_tensor_audio(audio)
-            if processed_tensor is None or audio_bytes is None:
-                return
-            
-            await self._handle_processed_audio(processed_tensor, audio_bytes)
-            
-        else:
-            logging.warning(f"{self.session_id}Unexpected audio type: {type(audio)}, skipping")
 
     async def _handle_processed_audio(self, tensor, audio_bytes):
         """Handle processed audio
@@ -644,28 +591,26 @@ class VoskSTT(AIEngine):
             tensor: Processed audio tensor
             audio_bytes: Processed audio bytes
         """
-        if audio_bytes is None or len(audio_bytes) == 0:
-             logging.warning(f"{self.session_id}Skipping handling of empty processed audio bytes.")
-             return
-
+        # DETAILED LOG 5: Bytes entering _handle_processed_audio
+        logging.debug(f"{self.session_id}Handling processed audio: {len(audio_bytes)} bytes")
+        
         if self.bypass_vad:
             # In bypass mode, send directly to Vosk
-            logging.debug(f"{self.session_id}Bypassing VAD, sending {len(audio_bytes)} bytes directly.")
+            # DETAILED LOG 6: Bytes just before sending (VAD bypassed)
+            hex_preview = ' '.join([f'{b:02x}' for b in audio_bytes[:20]])
+            logging.debug(f"{self.session_id}Sending audio bytes directly (VAD bypassed): len={len(audio_bytes)}, start_hex={hex_preview}")
             await self.vosk_client.send_audio(audio_bytes)
         else:
             # Add to VAD buffer for speech detection
-            was_processed, is_speech, buffer_bytes_to_send = await self.vad_processor.add_audio(
+            was_processed, is_speech, buffer_bytes = await self.vad_processor.add_audio(
                 audio_bytes, tensor.shape[0])
                 
             # If buffer was processed and speech detected, send to Vosk
-            if was_processed and is_speech and buffer_bytes_to_send:
-                 if buffer_bytes_to_send and len(buffer_bytes_to_send) > 0:
-                    logging.debug(f"{self.session_id}Sending VAD buffer chunk: {len(buffer_bytes_to_send)} bytes")
-                    await self.vosk_client.send_audio(buffer_bytes_to_send)
-                 else:
-                    logging.debug(f"{self.session_id}VAD indicated speech, but buffer to send is empty.")
-            elif was_processed and not is_speech:
-                logging.debug(f"{self.session_id}VAD processed buffer, but no speech detected or buffer empty.")
+            if was_processed and is_speech and buffer_bytes:
+                # DETAILED LOG 7: Bytes just before sending (after VAD)
+                hex_preview_vad = ' '.join([f'{b:02x}' for b in buffer_bytes[:20]])
+                logging.debug(f"{self.session_id}Sending VAD buffer bytes: len={len(buffer_bytes)}, start_hex={hex_preview_vad}")
+                await self.vosk_client.send_audio(buffer_bytes)
 
     async def receive_transcripts(self):
         """Vosk'dan transcript alır ve callback fonksiyonlarını çağırır"""
@@ -793,7 +738,6 @@ class VoskSTT(AIEngine):
         await asyncio.sleep(backoff_time)
         return False
 
-
     async def close(self):
         """Closes the VoskSTT session"""
         logging.info(f"{self.session_id}Closing VoskSTT session")
@@ -801,7 +745,6 @@ class VoskSTT(AIEngine):
         try:
             # Set closing flag to prevent reconnection attempts
             self._is_closing = True
-            
             
             # Process any remaining audio in VAD buffer
             if not self.bypass_vad:
@@ -906,7 +849,7 @@ class VoskSTT(AIEngine):
                 # Wait briefly for response
                 wait_time = min(buffer_seconds * 0.4 + 0.2, 0.5)  # Max 0.5 seconds
                 logging.info(f"{self.session_id}Waiting {wait_time:.2f} seconds for final response...")
-                await asyncio.sleep(wait_time*2)
+                await asyncio.sleep(wait_time)
                 
                 # Use last partial as final
                 if last_partial and original_on_final and callable(original_on_final):
@@ -928,3 +871,4 @@ class VoskSTT(AIEngine):
             str: Son alınan final transkript metni
         """
         return self.transcript_handler.get_final_transcript()
+
