@@ -18,7 +18,7 @@ import traceback
 class AudioProcessor:
     """Audio processing utilities for speech recognition"""
     
-    def __init__(self, target_sample_rate=16000, debug=True, session_id=""):
+    def __init__(self, target_sample_rate=16000, debug=False, session_id=""):
         self.target_sample_rate = target_sample_rate
         self.debug = debug
         self.session_id = session_id
@@ -148,7 +148,7 @@ class VADProcessor:
     
     def __init__(self, vad_detector, target_sample_rate, audio_processor, 
                  vad_buffer_chunk_ms=750, speech_detection_threshold=3, 
-                 silence_detection_threshold=10, debug=True, session_id=""):
+                 silence_detection_threshold=10, debug=False, session_id=""):
         self.vad = vad_detector
         self.target_sample_rate = target_sample_rate
         self.audio_processor = audio_processor  # Add reference to audio processor
