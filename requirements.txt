@@ -11,4 +11,4 @@ scipy==1.15.2
 torch===2.7.0
 torchaudio==2.7.0
 silero-vad==5.1.2
-
+g711==1.6.5
