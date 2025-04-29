@@ -372,7 +372,7 @@ class VoskSTT(AIEngine):
         self.target_sample_rate = int(self.cfg.get("sample_rate", "sample_rate", 16000))
         self.channels = self.cfg.get("channels", "channels", 1)
         self.send_eof = self.cfg.get("send_eof", "send_eof", True)
-        self.debug = self.cfg.get("debug", "debug", True)
+        self.debug = self.cfg.get("debug", "debug", False)
         
         # VAD configuration
         self.bypass_vad = self.cfg.get("bypass_vad", "bypass_vad", False)
