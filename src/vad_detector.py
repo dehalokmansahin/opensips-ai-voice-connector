@@ -1,7 +1,6 @@
 import torch
 from silero_vad import load_silero_vad, get_speech_timestamps
 import logging
-import numpy as np
 
 class VADDetector:
     _model = None  # static model cache
@@ -65,9 +64,11 @@ class VADDetector:
             logging.debug(f"Detected timestamps: {timestamps}")
             
             # Alternatif VAD kontrolü - artık RMS yerine abs_max kullanıyoruz
-            if not timestamps and abs_max > 0.1:
-                logging.info(f"No speech detected by VAD, but high amplitude ({abs_max:.4f}). Treating as speech.")
-                return True
+            # --- Heuristic Disabled ---
+            # if not timestamps and abs_max > 0.1:
+            #     logging.info(f"No speech detected by VAD, but high amplitude ({abs_max:.4f}). Treating as speech.")
+            #     return True
+            # --- End Heuristic Disabled ---
                 
             return bool(timestamps)
             

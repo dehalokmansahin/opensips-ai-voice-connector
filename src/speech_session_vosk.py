@@ -291,6 +291,10 @@ class TranscriptHandler:
                 # Store last partial transcript
                 self.last_partial_transcript = partial_text
                 
+                # Log the partial transcript if it's not empty
+                if partial_text:
+                    logging.info(f"{self.session_id}Partial transcript: {partial_text}") 
+                
                 if partial_text and self.on_partial_transcript:
                     await self.on_partial_transcript(partial_text)
             
@@ -300,6 +304,10 @@ class TranscriptHandler:
                 # Store last final transcript
                 self.last_final_transcript = final_text
                 
+                # Log the final transcript if it's not empty
+                if final_text:
+                    logging.info(f"{self.session_id}FINAL transcript: {final_text}")
+                    
                 if final_text and self.on_final_transcript:
                     await self.on_final_transcript(final_text)
                     
@@ -376,13 +384,13 @@ class VoskSTT(AIEngine):
         
         # VAD configuration
         self.bypass_vad = self.cfg.get("bypass_vad", "bypass_vad", False)
-        self.vad_threshold = self.cfg.get("vad_threshold", "vad_threshold", 0.12)
+        self.vad_threshold = self.cfg.get("vad_threshold", "vad_threshold", 0.25)
         self.vad_min_speech_ms = self.cfg.get("vad_min_speech_ms", "vad_min_speech_ms", 40)
-        self.vad_min_silence_ms = self.cfg.get("vad_min_silence_ms", "vad_min_silence_ms", 200)
+        self.vad_min_silence_ms = self.cfg.get("vad_min_silence_ms", "vad_min_silence_ms", 500)
         self.vad_buffer_chunk_ms = self.cfg.get("vad_buffer_chunk_ms", "vad_buffer_chunk_ms", 750)
         self.vad_buffer_max_seconds = self.cfg.get("vad_buffer_max_seconds", "vad_buffer_max_seconds", 1.0)
         self.speech_detection_threshold = self.cfg.get("speech_detection_threshold", "speech_detection_threshold", 3)
-        self.silence_detection_threshold = self.cfg.get("silence_detection_threshold", "silence_detection_threshold", 10)
+        self.silence_detection_threshold = self.cfg.get("silence_detection_threshold", "silence_detection_threshold", 3)
 
     def _init_components(self, call):
         """Initialize required components
@@ -627,7 +635,12 @@ class VoskSTT(AIEngine):
                         logging.debug(f"{self.session_id}Vosk yanıtı alındı: {message}")
                     
                     if message is None:
-                        logging.warning(f"{self.session_id}Vosk'dan boş yanıt alındı")
+                        # This usually means a timeout occurred in receive_result, 
+                        # which is normal during periods of silence.
+                        # Log at DEBUG level instead of WARNING.
+                        logging.debug(f"{self.session_id}Timeout or no new message from Vosk (normal during silence).") 
+                        # logging.warning(f"{self.session_id}Vosk'dan boş yanıt alındı") # Old warning
+                        
                         # Check if the connection is still valid
                         if not self.vosk_client.is_connected:
                             logging.error(f"{self.session_id}WebSocket connection lost during transcript reception")

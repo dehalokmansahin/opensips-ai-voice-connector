@@ -1,14 +1,17 @@
 import asyncio
 import wave
-from speech_session_vosk import VoskSTT
+from src.speech_session_vosk import VoskSTT
 from aiortc.sdp import SessionDescription
-import torchaudio
 import numpy as np
-import torch
 import logging
 # Removed queue import as it's no longer used for input simulation
 # from queue import Queue 
 import g711 # Use g711 library
+import sounddevice as sd # Import sounddevice
+# Use standard queue for thread safety between sync callback and async task
+from queue import Queue as SyncQueue 
+# Remove signal import as it's not supported on Windows event loop
+# import signal 
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, 
@@ -40,6 +43,70 @@ class DummyCall:
         self.client_port = 4000
         self.terminated = False
 
+# --- Sounddevice Callback and Queue --- 
+# Use standard Queue for communication between sync callback and async task
+sync_audio_queue = SyncQueue()
+
+def sounddevice_callback(indata, frames, time, status):
+    """This is called (from a separate thread) for each audio block."""
+    if status:
+        logging.warning(f"Sounddevice status: {status}")
+    # Assuming indata is float32 mono 8kHz as requested from InputStream
+    # Ensure it's 1D for encode_ulaw
+    indata_1d = indata.flatten()
+    try:
+        pcmu_bytes = g711.encode_ulaw(indata_1d)
+        # Put data into the standard queue (thread-safe)
+        sync_audio_queue.put_nowait(pcmu_bytes)
+        # logging.debug(f"Queued {len(pcmu_bytes)} PCMU bytes from mic") # DEBUG - Can be noisy
+    except Exception as e:
+        logging.error(f"Error encoding mic data to PCMU: {e}", exc_info=True)
+
+async def process_audio_queue(stt: VoskSTT, call: DummyCall, sync_queue: SyncQueue):
+    """Reads from the standard queue and sends data to VoskSTT."""
+    logging.info("Audio queue processor started.")
+    loop = asyncio.get_running_loop()
+    while not call.terminated:
+        try:
+            # Use run_in_executor to wait for item from sync queue without blocking async loop
+            # Use a short timeout to prevent waiting forever if the stop signal isn't put
+            pcmu_bytes = await loop.run_in_executor(
+                None, # Use default executor (ThreadPoolExecutor)
+                lambda: sync_queue.get(timeout=0.1) # Blocking get with timeout
+            ) 
+            
+            if pcmu_bytes is None: # Signal to stop
+                logging.info("Stop signal received in audio queue.")
+                sync_queue.task_done() # Mark the None item as processed
+                break
+                
+            # logging.debug(f"Sending {len(pcmu_bytes)} PCMU bytes from queue to STT") # DEBUG - Can be noisy
+            await stt.send(pcmu_bytes)
+            sync_queue.task_done()
+        except asyncio.CancelledError:
+            logging.info("Audio queue processor cancelled.")
+            break
+        except queue.Empty: # Catch the timeout from queue.get
+            # Queue was empty, just continue waiting
+            await asyncio.sleep(0.01) # Small sleep to yield control
+            continue
+        except Exception as e:
+            logging.error(f"Error processing audio queue: {e}", exc_info=True)
+            # Avoid busy-looping on error
+            await asyncio.sleep(0.1)
+            
+    # Drain the queue in case the loop exited while items remained (e.g., due to call.terminated)
+    logging.info("Draining remaining items from sync queue...")
+    while True:
+        try:
+            sync_queue.get_nowait()
+            sync_queue.task_done()
+        except queue.Empty:
+            break
+            
+    logging.info("Audio queue processor finished.")
+
+# --- Main Function --- 
 async def main():
     call = DummyCall()
 
@@ -50,107 +117,146 @@ async def main():
             "max_retries": 3,
             "retry_delay": 2.0,
             "websocket_timeout": 30.0,
-            "bypass_vad": False, # Test VAD
+            "bypass_vad": False, 
             "vad_threshold": 0.12, 
             "vad_min_speech_ms": 40, 
-            "vad_min_silence_ms": 200,
-            "vad_buffer_chunk_ms": 750, # Use the VAD buffering
-            # Removed vad_buffer_max_seconds and vad_buffer_flush_threshold as they might be outdated/removed
+            "vad_min_silence_ms": 500, # Increased silence duration might help finalize transcripts
+            "vad_buffer_chunk_ms": 750, 
             "send_eof": True,
             "debug": True 
         }
     }
-    # Ensure the path to your test audio file is correct
-    audio_file_path = "C:/Cursor/opensips-ai-voice-connector/src/test.wav"
-    try:
-        waveform, sample_rate = torchaudio.load(audio_file_path)
-        logging.info(f"Loaded audio file: {audio_file_path}")
-    except Exception as e:
-        logging.error(f"Failed to load audio file {audio_file_path}: {e}")
-        return
+    # Remove WAV file loading
+    # audio_file_path = "C:/Cursor/opensips-ai-voice-connector/src/test.wav"
+    # try:
+    #     waveform, sample_rate = torchaudio.load(audio_file_path)
+    #     logging.info(f"Loaded audio file: {audio_file_path}")
+    # except Exception as e:
+    #     logging.error(f"Failed to load audio file {audio_file_path}: {e}")
+    #     return
 
-    # Transkript callback'lerini tanımla
-    async def on_partial_transcript(text):
-        logging.info(f"Partial transcript: {text}")
-
-    async def on_final_transcript(text):
-        logging.info(f"Final transcript: {text}")
+    # Transcript callbacks (optional but recommended)
+    # async def on_partial_transcript(text):
+    #     logging.info(f"Partial transcript: {text}")
+    # async def on_final_transcript(text):
+    #     logging.info(f"Final transcript: {text}")
 
     stt = VoskSTT(call, cfg)
-    stt.set_log_level(logging.INFO) # Set to INFO or DEBUG as needed
+    stt.set_log_level(logging.INFO) 
     
-    # Callback'leri ayarla
-    stt.transcript_handler.on_partial_transcript = on_partial_transcript
-    stt.transcript_handler.on_final_transcript = on_final_transcript
+    # Set callbacks if defined
+    # stt.transcript_handler.on_partial_transcript = on_partial_transcript
+    # stt.transcript_handler.on_final_transcript = on_final_transcript
     
-    # STT motorunu başlat
     await stt.start()
+    if not stt.vosk_client.is_connected:
+         logging.error("Failed to start Vosk STT session. Exiting.")
+         return
 
-    # --- Ses verisini hazırlama ve gönderme (8kHz PCMU bytes) ---
-    if waveform.size(0) > 1:
-        waveform = waveform.mean(dim=0, keepdim=True)
-        logging.info("Converted audio to mono")
+    # Start the queue processing task, passing the sync queue
+    queue_processor_task = asyncio.create_task(process_audio_queue(stt, call, sync_audio_queue))
 
-    target_input_sample_rate = 8000 # We need 8kHz input for the STT process initially
-    if sample_rate != target_input_sample_rate:
-        logging.info(f"Resampling from {sample_rate}Hz to {target_input_sample_rate}Hz")
-        resampler_8k = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=target_input_sample_rate)
-        waveform_8k = resampler_8k(waveform) # This is a float32 tensor
-        logging.info(f"Resampled to {target_input_sample_rate}Hz tensor shape: {waveform_8k.shape}")
-    else:
-        waveform_8k = waveform # Already a float32 tensor
-
-    if waveform_8k.dim() > 1 and waveform_8k.size(0) == 1:
-        waveform_8k = waveform_8k.squeeze(0)
-
-    # Convert the 8kHz float32 tensor directly to a NumPy array
-    # No need to convert to int16 first
-    pcm32_samples_np = waveform_8k.numpy()
-    logging.debug(f"Converted 8kHz tensor to float32 NumPy array, shape: {pcm32_samples_np.shape}")
-
-    # Encode float32 NumPy array to PCMU bytes using g711
-    try:
-        # g711.encode_ulaw expects a float32 NumPy array
-        pcmu_bytes = g711.encode_ulaw(pcm32_samples_np)
-        logging.info(f"Encoded float32 audio ({len(pcm32_samples_np)} samples) to {len(pcmu_bytes)} bytes of PCMU data (g711)")
-    except Exception as e:
-        logging.error(f"Failed to encode audio to PCMU using g711: {e}", exc_info=True)
-        await stt.close()
-        return
-
-    # Send 20ms chunks of PCMU bytes
-    chunk_duration_ms = 20 
-    chunk_size_bytes = int(target_input_sample_rate * (chunk_duration_ms / 1000.0)) # 160 bytes for 8kHz PCMU
-    logging.info(f"Using PCMU chunk size: {chunk_size_bytes} bytes ({chunk_duration_ms}ms)")
-
-    # Process audio in small chunks
-    num_bytes = len(pcmu_bytes)
-    for i in range(0, num_bytes, chunk_size_bytes):
-        chunk_bytes = pcmu_bytes[i:i + chunk_size_bytes]
-        
-        if len(chunk_bytes) > 0:
-            # Pad the last chunk if it's smaller than expected (using standard PCMU silence 0xFF)
-            if len(chunk_bytes) < chunk_size_bytes:
-                 padding_needed = chunk_size_bytes - len(chunk_bytes)
-                 chunk_bytes += bytes([0xFF] * padding_needed) 
-                 logging.debug(f"Padded last chunk with {padding_needed} bytes of silence")
-
-            logging.debug(f"Sending PCMU chunk: {len(chunk_bytes)} bytes")
-            await stt.send(chunk_bytes) 
-        else:
-            logging.warning(f"Skipping empty byte chunk at index {i}")
-            
-        await asyncio.sleep(chunk_duration_ms / 1000.0)
-
-    # --- Allow some time for processing the last chunks --- 
-    logging.info("Finished sending audio bytes. Waiting for final processing...")
+    # --- Setup Microphone Stream --- 
+    target_mic_samplerate = 8000
+    block_duration_ms = 20 # Process audio in 20ms chunks like RTP
+    mic_blocksize = int(target_mic_samplerate * (block_duration_ms / 1000.0))
     
-    # Wait a bit longer to ensure VAD buffer is processed and final transcript is received
-    await asyncio.sleep(2.0) 
+    stream = None
+    stop_event = asyncio.Event() # We can still use the event for other potential stops
 
-    # STT motorunu kapat
-    await stt.close()
-    logging.info("STT session closed.")
+    # Remove signal handler function
+    # def signal_handler():
+    #     logging.info("Stop signal received, shutting down.")
+    #     stop_event.set()
+
+    # Remove signal handler registration loop
+    # loop = asyncio.get_running_loop()
+    # for sig in (signal.SIGINT, signal.SIGTERM):
+    #     loop.add_signal_handler(sig, signal_handler)
+
+    # Wrap the main streaming part in try/except KeyboardInterrupt
+    try:
+        try:
+            logging.info(f"Starting microphone stream: {target_mic_samplerate} Hz, {mic_blocksize} frames/block")
+            # Ensure default device supports 8kHz mono float32
+            sd.check_input_settings(samplerate=target_mic_samplerate, channels=1, dtype='float32') # Check if supported
+            stream = sd.InputStream(
+                samplerate=target_mic_samplerate,
+                blocksize=mic_blocksize, 
+                channels=1, 
+                dtype='float32', 
+                callback=sounddevice_callback
+            )
+            stream.start()
+            logging.info("Microphone stream started. Press Ctrl+C to stop.")
+            
+            # Keep running indefinitely (or until KeyboardInterrupt)
+            # stop_event.wait() is not strictly needed for Ctrl+C but can be kept 
+            # if you want another way to signal stop programmatically.
+            # For simple Ctrl+C, an infinite loop or just waiting on the task works too.
+            # Let's wait on the queue processor task to keep the main coroutine alive.
+            # await stop_event.wait()
+            await queue_processor_task # Wait for the processor task (which runs until call.terminated)
+
+        except sd.PortAudioError as pae:
+             logging.error(f"PortAudio error: {pae}")
+             logging.error("Common causes: Sample rate not supported by device, or device unavailable.")
+             # Try to list devices for debugging
+             try:
+                 logging.info("Available audio devices:")
+                 logging.info(sd.query_devices())
+             except Exception:
+                 logging.error("Could not query audio devices.")
+        except Exception as e:
+            logging.error(f"Error during microphone streaming: {e}", exc_info=True)
+            
+    except KeyboardInterrupt:
+        logging.info("Ctrl+C pressed, initiating shutdown...")
+        # The finally block will handle the shutdown
+        pass # Exception is caught, proceed to finally
+        
+    finally:
+        logging.info("Shutdown sequence initiated...") # Added log
+        logging.info("Stopping microphone stream...")
+        if stream:
+            stream.stop()
+            stream.close()
+            logging.info("Microphone stream stopped.")
+        
+        # Signal the queue processor to stop and wait for it
+        logging.info("Stopping audio queue processor...")
+        call.terminated = True # Signal queue processor loop to exit
+        try:
+            # Put None as a sentinel value into the standard queue
+            # This doesn't need await or timeout as put() on sync queue is blocking 
+            # but should be fast if queue is not full (which it shouldn't be)
+            sync_audio_queue.put(None) 
+        except Exception as e:
+             logging.error(f"Error putting stop signal in sync queue: {e}")
+             
+        if queue_processor_task:
+            try:
+                await asyncio.wait_for(queue_processor_task, timeout=2.0)
+            except asyncio.TimeoutError:
+                logging.warning("Queue processor task did not finish promptly, cancelling.")
+                queue_processor_task.cancel()
+            except Exception as e:
+                 logging.error(f"Error waiting for queue processor task: {e}")
+
+        # Close STT session
+        logging.info("Closing STT session...")
+        await stt.close()
+        logging.info("STT session closed.")
+
+# Remove old file processing loop
+# num_bytes = len(pcmu_bytes)
+# for i in range(0, num_bytes, chunk_size_bytes):
+# ... (rest of loop) ...
 
 if __name__ == "__main__":
+    # Removed the outer try/except KeyboardInterrupt here, 
+    # it's handled within main() now.
+    # try:
     asyncio.run(main())
+    # except KeyboardInterrupt:
+    #     logging.info("Script interrupted by user.")
