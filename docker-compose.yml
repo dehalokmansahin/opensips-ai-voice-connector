@@ -9,6 +9,9 @@ services:
 
       # Gelen istekler için TCP port 8088'i host'a map'leyin
       - "8088:8088/tcp"
+      - "8089:8089/tcp"
+      # RTP portlarını UDP olarak map'le
+      - "35000-35003:35000-35003/udp"
       # Not: MI (8088) ve Event (35010) portları sadece diğer konteynerlerce
       # erişileceği için host'a maplenmesi genellikle GEREKMEZ.
       # Ancak, isteğiniz üzerine TCP 8088'i dışarıya açıyoruz.
@@ -37,7 +40,6 @@ services:
     ports:
       # Kubernetes tanımına göre portlar
       - "5060:5060/udp" # Standart SIP (UDP)
-      - "5060:5060/tcp" # SIP (TCP)
       - "8080:8080/udp" # SIP Alternatif (UDP)
       - "8088:8088/udp" # MI Datagram (UDP)
     volumes:
