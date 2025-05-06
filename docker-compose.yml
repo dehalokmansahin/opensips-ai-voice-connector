@@ -28,6 +28,7 @@ services:
     depends_on:
       - opensips
       - vosk-server # opensips-ai-voice-connector başlamadan önce rtpproxy ve vosk'un hazır olmasını bekle
+      - wyoming-piper
     restart: unless-stopped # Konteyner durursa yeniden başlatmayı dene
 
   # OpenSIPS Servisi
@@ -57,6 +58,16 @@ services:
     ports:
       # Vosk WebSocket portunu host'a map'leyin
       - "2700:2700"
+    networks:
+      - opensips_network
+    restart: unless-stopped
+
+  wyoming-piper:
+    image: rhasspy/wyoming-piper
+    container_name: wyoming-piper
+    command: --voice tr_TR-fahrettin-medium
+    ports:
+      - "10200:10200"
     networks:
       - opensips_network
     restart: unless-stopped

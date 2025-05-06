@@ -1,5 +1,5 @@
 src/__pycache__/*
 *\.swp
-*\.ini
+
 .venv
 docker/.env

@@ -18,10 +18,10 @@ As the development assistant, your primary focus is to help implement and refine
 
 -   **Continuous RTP Streaming:** Ensure continuous, bidirectional audio streaming within calls. The system must **simultaneously send TTS audio** to the user and **receive user audio**, enabling full-duplex communication. You will help manage asynchronous RTP handling so that speaking and listening occur in parallel, implementing proper concurrency (e.g., separate asyncio tasks for send and receive).
 
--   **Vosk STT Integration (`stt_vosk.py`):** Assist with integrating the Vosk speech-to-text engine via WebSocket. This involves sending the incoming audio stream (captured from RTP) to a Vosk server and processing transcription results (including partial and final transcripts). You’ll ensure the WebSocket client is robust (handling connections, errors, and reconnections), and that the system properly uses Vosk’s output (e.g., detecting end-of-speech from final transcripts combined with VAD silence detection) to determine when the user has finished speaking.
+-   **Vosk STT Integration ** Assist with integrating the Vosk speech-to-text engine via WebSocket. This involves sending the incoming audio stream (captured from RTP) to a Vosk server and processing transcription results (including partial and final transcripts). You’ll ensure the WebSocket client is robust (handling connections, errors, and reconnections), and that the system properly uses Vosk’s output (e.g., detecting end-of-speech from final transcripts combined with VAD silence detection) to determine when the user has finished speaking.
 
 
--   **Piper TTS Integration (`tts_piper.py`):** Support the integration of the Piper text-to-speech engine, likely through a **custom WebSocket wrapper service** (since Piper itself doesn't inherently provide one). The assistant will ensure that text prompts are sent to the Piper wrapper service and that the resulting audio is streamed back and injected into the outgoing RTP stream. You’ll guide the developer in handling audio format compatibility (e.g., ensuring sample rates like 8kHz for G.711 calls and encoding match the call’s requirements) and in structuring TTS output (encouraging streaming from the wrapper and chunking long responses if necessary to minimize latency).
+-   **Piper TTS Integration:** Support the integration of the Piper text-to-speech engine, likely through a http . The assistant will ensure that text prompts are sent to the Piper wrapper service and that the resulting audio is streamed back and injected into the outgoing RTP stream. You’ll guide the developer in handling audio format compatibility (e.g., ensuring sample rates like 8kHz for G.711 calls and encoding match the call’s requirements) and in structuring TTS output (encouraging streaming from the wrapper and chunking long responses if necessary to minimize latency).
 
 
 
@@ -45,7 +45,7 @@ The **barge-in** functionality is critical... Implementing this requires tight i
 
 -    VAD Monitoring: Continuously monitor incoming audio...
 -    State Management: Define clear **states**...
--   **Interrupting TTS Output:** On detecting barge-in (a transition from `SPEAKING` state based on VAD), the assistant should help devise a mechanism to immediately stop or cleanly fade out the ongoing TTS audio stream being sent via RTP. This involves signaling the TTS component (`tts_piper.py`) to halt synthesis/streaming and potentially clearing any buffered outgoing audio. Simultaneously, the system must discard any partial STT results that might have arisen from the TTS audio bleeding into the input and ensure the STT component (`stt_vosk.py`) is ready to process the new user utterance. This achieves the transition to effectively capture user speech promptly.
+-   **Interrupting TTS Output:** On detecting barge-in (a transition from `SPEAKING` state based on VAD), the assistant should help devise a mechanism to immediately stop or cleanly fade out the ongoing TTS audio stream being sent via RTP. This involves signaling the TTS component to halt synthesis/streaming and potentially clearing any buffered outgoing audio. Simultaneously, the system must discard any partial STT results that might have arisen from the TTS audio bleeding into the input and ensure the STT component  is ready to process the new user utterance. This achieves the transition to effectively capture user speech promptly.
 STT results (from the AI's own voice) and reset the STT state is a critical detail for correct barge-in implementation. Rephrasing avoids the external quote.
 
 -    Debounce and False Positives: VAD can sometimes trigger...
@@ -54,7 +54,7 @@ STT results (from the AI's own voice) and reset the STT state is a critical deta
 
 
 ## Integration with Vosk Speech-to-Text (STT)
-The OAVC’s STT component uses **Vosk**... accessed through a WebSocket API (handled by `stt_vosk.py`). The assistant should guide the developer...
+The OAVC’s STT component uses **Vosk**... accessed through a WebSocket API . The assistant should guide the developer...
 
 -    WebSocket Client Handling: Establish a persistent WebSocket connection...
 -   **Audio Formatting:** Confirm the audio format alignment. Telephony audio via SIP often uses G.711 codec, resulting in 8 kHz mono PCM data. Ensure the Vosk server is configured with an appropriate 8 kHz model (Vosk offers models trained for different sample rates). If a mismatch exists (e.g., only a 16 kHz Vosk model is available), resampling within OAVC will be necessary before sending audio to Vosk. The assistant should guide this decision. Minimal audio preprocessing is advised, but using VAD to gate audio (avoid sending pure silence) to Vosk can optimize resource usage on the Vosk server.
@@ -68,13 +68,13 @@ The OAVC’s STT component uses **Vosk**... accessed through a WebSocket API (ha
 
 
 ## Integration with Piper Text-to-Speech (TTS)
-The system uses **Piper TTS**... via a custom WebSocket wrapper (`tts_piper.py`). The assistant should assist...
+The system uses **Piper TTS**... via a custom WebSocket wrapper . The assistant should assist...
 
 -    TTS Request/Response Flow: Guide the developer to send text...
 -   **Audio Format and Quality:** Verify that the audio generated by Piper (via the wrapper) matches the call's requirements. For standard SIP calls (e.g., G.711), 8 kHz mono, 16-bit PCM is typically needed. Configure the Piper wrapper or Piper itself (if possible via command-line flags or config) to generate audio in this format directly. If Piper can only produce a different sample rate (e.g., 16 kHz or 22.05 kHz), OAVC must resample the audio received from the wrapper *before* encoding and sending it as RTP. The assistant should guide the implementation of this resampling step if required.
 
 
--   **Streamed vs. Whole Audio:** Strongly encourage designing the Piper WebSocket wrapper to support **streaming audio output**. Piper's command-line interface or library functions often allow producing audio chunk-by-chunk. The wrapper should leverage this, sending binary audio chunks over the WebSocket as soon as they are generated. OAVC (`tts_piper.py`) should then consume these chunks immediately for RTP transmission, minimizing perceived latency ("time to first sound"). If streaming proves impossible, the assistant should highlight the latency impact and suggest breaking long text responses into smaller segments to synthesize and send sequentially.
+-   **Streamed vs. Whole Audio:** Strongly encourage designing the Piper WebSocket wrapper to support **streaming audio output**. Piper's command-line interface or library functions often allow producing audio chunk-by-chunk. The wrapper should leverage this, sending binary audio chunks over the WebSocket as soon as they are generated. OAVC  should then consume these chunks immediately for RTP transmission, minimizing perceived latency ("time to first sound"). If streaming proves impossible, the assistant should highlight the latency impact and suggest breaking long text responses into smaller segments to synthesize and send sequentially.
 
 -    Performance Considerations: Piper TTS, being offline, uses CPU...
 -    Error Handling: If Piper fails to synthesize...

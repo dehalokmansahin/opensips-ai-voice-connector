@@ -14,6 +14,13 @@ import time
 from pcmu_decoder import PCMUDecoder
 import websockets
 import traceback
+import audioop  # For mu-law encoding
+import random  # For simulated responses
+
+# Wyoming client libraries for TTS
+from wyoming.client import AsyncTcpClient
+from wyoming.tts import Synthesize, SynthesizeVoice
+from wyoming.audio import AudioChunk, AudioStop
 
 class AudioProcessor:
     """Audio processing utilities for speech recognition"""
@@ -309,7 +316,8 @@ class TranscriptHandler:
                     logging.info(f"{self.session_id}FINAL transcript: {final_text}")
                     
                 if final_text and self.on_final_transcript:
-                    await self.on_final_transcript(final_text)
+                    # Use asyncio.create_task to avoid blocking transcript receiver
+                    asyncio.create_task(self.on_final_transcript(final_text))
                     
             return True
                 
@@ -354,7 +362,7 @@ class VoskSTT(AIEngine):
         # Session ID olarak B2B Key'i kullan
         self.b2b_key = call.b2b_key if hasattr(call, 'b2b_key') else None
         self.session_id = f"[Session:{self.b2b_key}] " if self.b2b_key else ""
-        
+        self.queue = call.rtp
         # Load configuration
         self._load_config()
         
@@ -363,6 +371,7 @@ class VoskSTT(AIEngine):
         
         # Task states
         self.receive_task = None
+        self.tts_task = None  # New: Task for handling TTS processing
         
         # Closing state
         self._is_closing = False
@@ -374,7 +383,9 @@ class VoskSTT(AIEngine):
 
     def _load_config(self):
         """Load configuration parameters from config"""
-        # Connection parameters
+        # --- STT Configuration ---
+
+            
         self.vosk_server_url = self.cfg.get("url", "url", "ws://localhost:2700")
         self.websocket_timeout = self.cfg.get("websocket_timeout", "websocket_timeout", 5.0)
         self.target_sample_rate = int(self.cfg.get("sample_rate", "sample_rate", 16000))
@@ -384,13 +395,24 @@ class VoskSTT(AIEngine):
         
         # VAD configuration
         self.bypass_vad = self.cfg.get("bypass_vad", "bypass_vad", False)
-        self.vad_threshold = self.cfg.get("vad_threshold", "vad_threshold", 0.25)
+        self.vad_threshold = self.cfg.get("vad_threshold", "vad_threshold", 0.50)
         self.vad_min_speech_ms = self.cfg.get("vad_min_speech_ms", "vad_min_speech_ms", 40)
         self.vad_min_silence_ms = self.cfg.get("vad_min_silence_ms", "vad_min_silence_ms", 500)
         self.vad_buffer_chunk_ms = self.cfg.get("vad_buffer_chunk_ms", "vad_buffer_chunk_ms", 750)
         self.vad_buffer_max_seconds = self.cfg.get("vad_buffer_max_seconds", "vad_buffer_max_seconds", 1.0)
         self.speech_detection_threshold = self.cfg.get("speech_detection_threshold", "speech_detection_threshold", 3)
         self.silence_detection_threshold = self.cfg.get("silence_detection_threshold", "silence_detection_threshold", 3)
+
+
+            
+        self.tts_server_host = self.cfg.get( "host", "TTS_HOST", "localhost")
+        self.tts_server_port = int(self.cfg.get( "port", "TTS_PORT", 10200))
+        self.tts_voice = self.cfg.get( "voice", "TTS_VOICE", "tr_TR-fahrettin-medium")
+        self.tts_target_output_rate = 8000  # Target rate for RTP queue is always 8000Hz (PCMU requirement)
+        # We'll determine actual input rate from the first AudioChunk received from Piper
+        
+        logging.info(f"{self.session_id}Vosk URL: {self.vosk_server_url}, Target STT Rate: {self.target_sample_rate}")
+        logging.info(f"{self.session_id}TTS Host: {self.tts_server_host}:{self.tts_server_port}, Voice: {self.tts_voice}")
 
     def _init_components(self, call):
         """Initialize required components
@@ -442,6 +464,20 @@ class VoskSTT(AIEngine):
         
         # Initialize Vosk client
         self.vosk_client = VoskClient(self.vosk_server_url, timeout=self.websocket_timeout)
+        
+        # --- TTS Setup ---
+        # Set up the TTS client (Wyoming Piper client)
+        logging.info(f"{self.session_id}Initializing Wyoming TTS client for {self.tts_server_host}:{self.tts_server_port}")
+        self.tts_client = AsyncTcpClient(self.tts_server_host, self.tts_server_port)
+        # TTS resampler to be initialized when first TTS chunk arrives
+        self.tts_resampler = None
+        self.tts_input_rate = None  # Will be determined from first TTS chunk
+        # Lock to prevent concurrent TTS processing
+        self.tts_processing_lock = asyncio.Lock()
+        
+        # --- Set Transcript Callback ---
+        # When final transcript is received, trigger TTS
+        self.transcript_handler.on_final_transcript = self._handle_final_transcript
 
     def _setup_logging(self):
         """Set up logging configuration"""
@@ -753,46 +789,56 @@ class VoskSTT(AIEngine):
 
     async def close(self):
         """Closes the VoskSTT session"""
-        logging.info(f"{self.session_id}Closing VoskSTT session")
+        if self._is_closing:
+            logging.info(f"{self.session_id}Close already in progress.")
+            return
+        logging.info(f"{self.session_id}Closing VoskSTT+TTS session")
         
-        try:
-            # Set closing flag to prevent reconnection attempts
-            self._is_closing = True
-            
-            # Process any remaining audio in VAD buffer
-            if not self.bypass_vad:
-                try:
-                    await self._process_final_vad_buffer()
-                except Exception as e:
-                    logging.error(f"{self.session_id}Error processing final VAD buffer: {e}")
-            
-            # Use last partial as final if no final transcript
-            self._finalize_transcript()
-            
-            # Send EOF and close connection
-            if self.vosk_client.is_connected:
-                try:
-                    await self._send_eof_if_enabled()
-                    
-                    # Make sure EOF is processed before closing
+        # Set closing flag to prevent reconnection attempts
+        self._is_closing = True
+        
+        # 1. Cancel ongoing TTS tasks if any
+        if hasattr(self, 'tts_task') and self.tts_task and not self.tts_task.done():
+            self.tts_task.cancel()
+            logging.info(f"{self.session_id}Cancelling active TTS task.")
+        
+        # 2. Process any remaining audio in VAD buffer
+        if not self.bypass_vad:
+            try:
+                await self._process_final_vad_buffer()
+            except Exception as e:
+                logging.error(f"{self.session_id}Error processing final VAD buffer: {e}")
+        
+        # 3. Use last partial as final if no final transcript
+        self._finalize_transcript()
+        
+        # 4. Send EOF and close Vosk connection
+        if self.vosk_client.is_connected:
+            try:
+                if self.send_eof:
+                    logging.debug(f"{self.session_id}Sending EOF to Vosk")
+                    await self.vosk_client.send(json.dumps({"eof": 1}))
+                    # Give server time to process EOF
                     await asyncio.sleep(0.2)
-                except Exception as e:
-                    logging.error(f"{self.session_id}Error sending EOF: {e}")
-            
-            # Cancel receive task
-            await self._cancel_receive_task()
-            
-            # Close WebSocket connection
-            if self.vosk_client.is_connected:
-                try:
-                    await self.vosk_client.disconnect()
-                except Exception as e:
-                    logging.error(f"{self.session_id}Error disconnecting from Vosk: {e}")
-        except Exception as e:
-            logging.error(f"{self.session_id}Error during close: {e}")
-            logging.error(f"{self.session_id}Traceback: {traceback.format_exc()}")
+                await self.vosk_client.disconnect()
+                logging.info(f"{self.session_id}Disconnected from Vosk")
+            except Exception as e:
+                logging.error(f"{self.session_id}Error disconnecting from Vosk: {e}")
         
-        logging.info(f"{self.session_id}VoskSTT session closed successfully")
+        # 5. Cancel Vosk receive task
+        if self.receive_task and not self.receive_task.done():
+            self.receive_task.cancel()
+            try:
+                await self.receive_task
+            except asyncio.CancelledError:
+                logging.info(f"{self.session_id}Vosk receive task cancelled")
+            except Exception as e:
+                logging.error(f"{self.session_id}Error cancelling Vosk receive task: {e}")
+        
+        # 6. TTS client is managed by AsyncTcpClient context manager 
+        # No explicit close needed as it's handled automatically
+
+        logging.info(f"{self.session_id}VoskSTT+TTS session closed successfully")
 
     def _finalize_transcript(self):
         """Ensure we have a final transcript (use partial if no final available)"""
@@ -884,4 +930,185 @@ class VoskSTT(AIEngine):
             str: Son alınan final transkript metni
         """
         return self.transcript_handler.get_final_transcript()
+
+    async def _handle_final_transcript(self, final_text):
+        """Handles final transcript: Gets LLM response, sends to TTS, converts, queues audio."""
+        # Prevent multiple TTS requests running concurrently
+        async with self.tts_processing_lock:
+            logging.info(f"{self.session_id}Final transcript for TTS: '{final_text}'")
+
+            # 1. Get LLM Response (Simulated)
+            # PLACEHOLDER: Replace with actual LLM call
+            turkish_sentences = [
+                "Merhaba, size nasıl yardımcı olabilirim? Bu konuşma sistemimiz sayesinde isteklerinizi sesli olarak iletebilirsiniz. Ben sizin sorularınızı yanıtlamak, bilgi vermek ve çeşitli işlemlerinizi gerçekleştirmek için buradayım. Herhangi bir konuda yardıma ihtiyacınız olursa lütfen belirtin. Size en iyi şekilde yardımcı olmak için elimden geleni yapacağım. Sesli asistanınız olarak size hizmet vermekten mutluluk duyuyorum.", 
+                "Lütfen isteğinizi belirtin. Sorularınızı mümkün olduğunca açık ve net bir şekilde ifade ederseniz size daha doğru ve hızlı bir şekilde yardımcı olabilirim. Detaylı bilgiye ihtiyacım olursa ek sorular sorabilirim. İhtiyacınızı tam olarak anlayabilmem için gerekli tüm detayları paylaşmanız önemlidir. Karmaşık konularda adım adım ilerlememiz gerekebilir. Hangi konuda yardıma ihtiyacınız olduğunu lütfen anlatın.",
+                "Anlıyorum, isteğiniz işleniyor. Bu işlem birkaç saniye sürebilir, lütfen sabırla bekleyin. Sisteme erişim sağlanıyor ve gerekli bilgiler toplanıyor. Bilgileriniz güvenli bir şekilde işleniyor ve işlem süreci devam ediyor. İşlem tamamlandığında size hemen bilgi vereceğim. Eğer ek bilgiye ihtiyacımız olursa, sizinle tekrar iletişime geçeceğim. Bu süreçte başka bir sorunuz veya isteğiniz olursa lütfen belirtin.", 
+                "Bir saniye lütfen, kontrol ediyorum. Talebiniz doğrultusunda sistem kayıtlarına erişiyor ve gerekli bilgileri topluyorum. Bu işlem biraz zaman alabilir, sistem yanıt verene kadar lütfen bekleyin. Veritabanımızda arama yapılıyor ve ilgili bilgiler toplanıyor. Arama algoritması en güncel ve doğru bilgileri bulmak için çalışıyor. Sorgulama işlemi tamamlanmak üzere, sonuçları hemen sizinle paylaşacağım.",
+                "İşleminiz başarıyla tamamlandı. Talebiniz sistem tarafından onaylandı ve gerekli tüm adımlar yerine getirildi. Herhangi bir sorun veya hata tespit edilmedi. İşleminize dair tüm detaylar kayıt altına alındı ve sistem güncellemesi gerçekleştirildi. Değişiklikler şu andan itibaren aktif ve geçerlidir. İsterseniz işleminizle ilgili detaylı bir rapor sunabilirim. İşlem sonucu memnun kaldıysanız, size başka konularda da yardımcı olabilirim.", 
+                "Başka bir isteğiniz var mı? Size farklı bir konuda da yardımcı olmaktan memnuniyet duyarım. Ek sorularınız veya bilgi almak istediğiniz başka konular varsa lütfen belirtin. Önceki işleminizle ilgili herhangi bir ek bilgiye ihtiyacınız varsa, detaylandırmaktan çekinmeyin. Sistemimizin sunduğu diğer hizmetler hakkında bilgi almak isterseniz bunu da sağlayabilirim. Her türlü talebiniz için buradayım ve size yardımcı olmak için hazırım. Lütfen nasıl yardımcı olabileceğimi belirtin.",
+                "Üzgünüm, isteğinizi anlayamadım. Kullandığınız ifade veya soru formatı sistemimiz tarafından doğru şekilde işlenemedi. Farklı bir şekilde ifade etmeyi veya daha açık bir dille talep oluşturmayı deneyebilirsiniz. Bazı özel terimler veya teknik ifadeler bazen zorluk yaratabilir, bu durumda daha genel terimler kullanmanız daha iyi olabilir. Konuşma tanıma sistemi bazen arka plan gürültüsünden veya ses kalitesinden etkilenebilir. Talebinizi daha net ve yavaş bir şekilde tekrarlamanız yardımcı olabilir.", 
+                "Tekrar deneyebilir misiniz? Son talebiniz ses tanıma sistemimiz tarafından tam olarak algılanamadı veya anlaşılamadı. Lütfen daha yüksek sesle ve net bir şekilde konuşmayı deneyiniz. Bulunduğunuz ortamda ses kalitesini etkileyebilecek gürültüler varsa, daha sessiz bir ortama geçmek faydalı olabilir. Bazen belirli cümle yapıları veya terimler sistemimiz için zorlayıcı olabilir, bu durumda talebinizi daha basit bir dille ifade etmeyi deneyebilirsiniz. Birkaç kelime ile kısa ve öz bir şekilde ne istediğinizi belirtmek de yardımcı olabilir.",
+                "Yardımcı olabileceğim başka bir konu var mı? Bugün sizin için başka hangi işlemleri gerçekleştirebilirim? Sistemimiz birçok farklı konuda hizmet sunmaktadır ve sizin için daha fazla bilgi sağlamaktan veya farklı konularda yardımcı olmaktan memnuniyet duyarım. Hesap işlemleri, bilgi sorgulama, randevu oluşturma veya iptal etme gibi çeşitli hizmetlerimizden faydalanabilirsiniz. Ayrıca ürünlerimiz ve hizmetlerimiz hakkında detaylı bilgi almak isterseniz, bu konuda da size kapsamlı bilgi sunabilirim. İhtiyaçlarınız doğrultusunda size en iyi şekilde yardımcı olmak için buradayım.", 
+                "Görüşmek üzere, iyi günler! Bugün bizi tercih ettiğiniz ve hizmetimizden yararlandığınız için teşekkür ederiz. Umarım tüm sorularınıza tatmin edici yanıtlar alabilmişsinizdir. Tekrar görüşmek dileğiyle, size güzel ve verimli bir gün diliyorum. Herhangi bir sorunuz veya ihtiyacınız olduğunda tekrar bizi aramanız yeterli olacaktır. Sizinle tekrar görüşmeyi umuyoruz. Her zaman hizmetinizdeyiz. Bizden tekrar yardım almak istediğinizde çağrı merkezimizi arayabilir veya web sitemiz üzerinden bizimle iletişime geçebilirsiniz. Kendinize iyi bakın!",
+            ]
+            llm_response_text = random.choice(turkish_sentences)
+            logging.info(f"{self.session_id}Simulated LLM response: '{llm_response_text}'")
+
+            # --- Drain RTP queue before playing TTS ---
+            # Avoid playing TTS over residual user speech or previous TTS fragments
+            q_size = self.queue.qsize()
+            if q_size > 0:
+                logging.info(f"{self.session_id}Draining {q_size} packets from RTP queue before TTS playback.")
+                while not self.queue.empty():
+                    try:
+                        self.queue.get_nowait()
+                    except Empty:
+                        break
+            # --- End Drain ---
+
+            # 2. Send text to TTS Service and process audio stream
+            # Use the Wyoming client instance
+            tts_success = False
+            try:
+                logging.debug(f"{self.session_id}Connecting to TTS: {self.tts_server_host}:{self.tts_server_port}")
+                # Connect using the client instance as an async context manager
+                async with self.tts_client as connected_client:
+                    if connected_client is None:
+                        logging.error(f"{self.session_id}Failed to connect to TTS server at {self.tts_server_host}:{self.tts_server_port}")
+                        # Will use fallback after this block
+                    else:
+                        logging.info(f"{self.session_id}Connected to TTS. Synthesizing: '{llm_response_text}'")
+                        voice = SynthesizeVoice(name=self.tts_voice)
+                        synth_event = Synthesize(text=llm_response_text, voice=voice)
+                        await connected_client.write_event(synth_event.event())
+                        logging.debug(f"{self.session_id}Synthesize request sent. Waiting for audio events...")
+
+                        # Reset resampler for this TTS stream
+                        self.tts_resampler = None
+                        self.tts_input_rate = None
+                        cumulative_pcmu_bytes = bytearray() # Accumulate PCMU bytes
+
+                        # Process audio events
+                        while True:
+                            event = await connected_client.read_event()
+                            if event is None:
+                                logging.warning(f"{self.session_id}TTS connection closed unexpectedly.")
+                                break
+                            if AudioStop.is_type(event.type):
+                                logging.info(f"{self.session_id}TTS audio stream finished.")
+                                tts_success = True  # Mark as successful
+                                break
+                            if AudioChunk.is_type(event.type):
+                                chunk = AudioChunk.from_event(event)
+                                logging.debug(f"{self.session_id}Received TTS AudioChunk: Rate={chunk.rate}, Width={chunk.width}, Channels={chunk.channels}, Length={len(chunk.audio)} bytes")
+
+                                # --- Initialize Resampler on first chunk ---
+                                if self.tts_resampler is None:
+                                    if chunk.width != 2 or chunk.channels != 1:
+                                        logging.error(f"{self.session_id}Unsupported TTS audio format: Width={chunk.width}, Channels={chunk.channels}. Expected 16-bit mono.")
+                                        break # Stop processing this TTS request
+                                    self.tts_input_rate = chunk.rate
+                                    if self.tts_input_rate != self.tts_target_output_rate:
+                                        logging.info(f"{self.session_id}Initializing TTS resampler: {self.tts_input_rate} Hz -> {self.tts_target_output_rate} Hz")
+                                        self.tts_resampler = torchaudio.transforms.Resample(
+                                            orig_freq=self.tts_input_rate,
+                                            new_freq=self.tts_target_output_rate
+                                        )
+                                    else:
+                                        logging.info(f"{self.session_id}TTS output rate matches target rate ({self.tts_target_output_rate} Hz). No resampling needed.")
+
+                                # --- Process the audio chunk ---
+                                try:
+                                    # a. Bytes (S16LE) to Tensor (Float32)
+                                    input_tensor = torch.frombuffer(bytearray(chunk.audio), dtype=torch.int16).float() / 32768.0
+
+                                    # b. Resample if needed
+                                    if self.tts_resampler:
+                                        resampled_tensor = self.tts_resampler(input_tensor.unsqueeze(0)).squeeze(0)
+                                    else:
+                                        resampled_tensor = input_tensor # No resampling needed
+
+                                    # c. Tensor (Float32) back to S16LE bytes
+                                    resampled_tensor_clamped = torch.clamp(resampled_tensor, -1.0, 1.0)
+                                    pcm_s16le_bytes = (resampled_tensor_clamped * 32768.0).to(torch.int16).numpy().tobytes()
+
+                                    # d. Encode S16LE to PCMU
+                                    pcmu_chunk_bytes = audioop.lin2ulaw(pcm_s16le_bytes, 2)
+                                    cumulative_pcmu_bytes.extend(pcmu_chunk_bytes)
+
+                                    # e. Queue chunked PCMU data
+                                    chunk_size = 160 # 20ms PCMU
+                                    while len(cumulative_pcmu_bytes) >= chunk_size:
+                                        rtp_payload = cumulative_pcmu_bytes[:chunk_size]
+                                        self.queue.put_nowait(bytes(rtp_payload)) # Ensure it's bytes
+                                        logging.debug(f"{self.session_id}Queued {len(rtp_payload)} bytes of TTS audio for RTP.")
+                                        # Remove the queued part from the accumulator
+                                        cumulative_pcmu_bytes = cumulative_pcmu_bytes[chunk_size:]
+
+                                except Exception as audio_proc_e:
+                                    logging.error(f"{self.session_id}Error processing TTS audio chunk: {audio_proc_e}", exc_info=True)
+                                    # Continue processing other chunks? Or break? Let's break.
+                                    break
+
+                        # Handle any remaining bytes in the accumulator (pad and queue)
+                        if cumulative_pcmu_bytes:
+                            logging.debug(f"{self.session_id}Processing remaining {len(cumulative_pcmu_bytes)} TTS PCMU bytes.")
+                            final_payload = bytes(cumulative_pcmu_bytes).ljust(chunk_size, b'\xff') # Pad with PCMU silence
+                            self.queue.put_nowait(final_payload)
+                            logging.debug(f"{self.session_id}Queued final padded {len(final_payload)} bytes of TTS audio.")
+
+            except ConnectionRefusedError:
+                 logging.error(f"{self.session_id}TTS connection refused. Is the Wyoming Piper server running at {self.tts_server_host}:{self.tts_server_port}?")
+            except asyncio.TimeoutError:
+                 logging.error(f"{self.session_id}Timeout connecting to TTS server.")
+            except Exception as tts_e:
+                logging.error(f"{self.session_id}Error during TTS processing: {tts_e}", exc_info=True)
+                
+            # Fallback: If TTS failed, generate some dummy audio
+            if not tts_success:
+                logging.info(f"{self.session_id}TTS failed or not available, generating fallback audio tones.")
+                await self._generate_fallback_tts_audio(len(llm_response_text))
+                
+    async def _generate_fallback_tts_audio(self, text_length):
+        """Generate fallback TTS audio when TTS server is unavailable
+        
+        Args:
+            text_length: Length of text to simulate audio duration
+        """
+        # Calculate duration based on text length
+        words = max(1, text_length // 5)  # Rough estimate of words
+        duration_ms = words * 300  # ~300ms per word
+        samples_needed = duration_ms * 8  # 8 samples per ms at 8kHz
+        
+        # Generate a simple sine wave tone
+        chunk_size = 160  # 20ms at 8kHz
+        num_chunks = (samples_needed + chunk_size - 1) // chunk_size
+        
+        logging.info(f"{self.session_id}Generating {duration_ms}ms of fallback audio ({num_chunks} chunks)")
+        
+        # Generate tone (middle A - 440Hz)
+        frequency = 440.0
+        sample_rate = 8000
+        
+        for i in range(num_chunks):
+            # Generate each chunk
+            t = np.arange(i * chunk_size, (i + 1) * chunk_size) / sample_rate
+            samples = 0.5 * np.sin(2 * np.pi * frequency * t)
+            
+            # Convert to float32
+            float32_samples = samples.astype(np.float32)
+            
+            # Encode to PCMU
+            pcmu_data = audioop.lin2ulaw(
+                (float32_samples * 32767).astype(np.int16).tobytes(), 
+                2
+            )
+            
+            # Queue the audio
+            self.queue.put_nowait(pcmu_data)
+            
+            # Small delay to avoid overwhelming the queue
+            await asyncio.sleep(0.01)
+            
+        logging.info(f"{self.session_id}Fallback audio generation complete.")
 
