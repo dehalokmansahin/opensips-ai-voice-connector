@@ -176,6 +176,33 @@ class VADProcessor:
         self.consecutive_silence_packets = 0
         self.speech_active = False
     
+    def reset_vad_state(self, preserve_buffer=False):
+        """Reset VAD state between requests
+        
+        Args:
+            preserve_buffer: If True, preserve the current buffer contents;
+                            if False (default), clear the buffer
+                            
+        Returns:
+            None
+        """
+        # Reset speech detection state counters
+        self.consecutive_speech_packets = 0
+        self.consecutive_silence_packets = 0
+        
+        # Reset speech activity flag
+        was_active = self.speech_active
+        self.speech_active = False
+        
+        # Optionally clear buffer (not using lock since this method should be called 
+        # when no audio processing is active)
+        if not preserve_buffer:
+            self._vad_buffer.clear()
+            self._vad_buffer_size_samples = 0
+            self._last_buffer_flush_time = time.time()
+            
+        logging.info(f"{self.session_id}VAD state reset. Previous active state: {was_active}")
+
     async def add_audio(self, audio_bytes, num_samples):
         """Add audio to VAD buffer and process if needed
         
@@ -233,6 +260,7 @@ class VADProcessor:
                 self.consecutive_speech_packets = 0
                 
                 # If enough consecutive silence packets, deactivate speech mode
+                logging.info(f"{self.session_id}VAD CHECK: consecutive_silence_packets={self.consecutive_silence_packets}, silence_detection_threshold={self.silence_detection_threshold}, speech_active={self.speech_active}")
                 if self.consecutive_silence_packets >= self.silence_detection_threshold and self.speech_active:
                     self.speech_active = False
                     logging.info(f"{self.session_id}Speech ended after {self.consecutive_silence_packets} consecutive silence packets")
@@ -395,13 +423,13 @@ class VoskSTT(AIEngine):
         
         # VAD configuration
         self.bypass_vad = self.cfg.get("bypass_vad", "bypass_vad", False)
-        self.vad_threshold = self.cfg.get("vad_threshold", "vad_threshold", 0.50)
-        self.vad_min_speech_ms = self.cfg.get("vad_min_speech_ms", "vad_min_speech_ms", 40)
-        self.vad_min_silence_ms = self.cfg.get("vad_min_silence_ms", "vad_min_silence_ms", 500)
-        self.vad_buffer_chunk_ms = self.cfg.get("vad_buffer_chunk_ms", "vad_buffer_chunk_ms", 750)
-        self.vad_buffer_max_seconds = self.cfg.get("vad_buffer_max_seconds", "vad_buffer_max_seconds", 1.0)
-        self.speech_detection_threshold = self.cfg.get("speech_detection_threshold", "speech_detection_threshold", 3)
-        self.silence_detection_threshold = self.cfg.get("silence_detection_threshold", "silence_detection_threshold", 3)
+        self.vad_threshold = self.cfg.get("vad_threshold", "vad_threshold", 0.25)
+        self.vad_min_speech_ms = self.cfg.get("vad_min_speech_ms", "vad_min_speech_ms", 300)
+        self.vad_min_silence_ms = self.cfg.get("vad_min_silence_ms", "vad_min_silence_ms", 450)
+        self.vad_buffer_chunk_ms = self.cfg.get("vad_buffer_chunk_ms", "vad_buffer_chunk_ms", 500)
+        self.vad_buffer_max_seconds = self.cfg.get("vad_buffer_max_seconds", "vad_buffer_max_seconds", 2.0)
+        self.speech_detection_threshold = self.cfg.get("speech_detection_threshold", "speech_detection_threshold", 1)
+        self.silence_detection_threshold = self.cfg.get("silence_detection_threshold", "silence_detection_threshold", 2)
 
 
             
@@ -936,7 +964,7 @@ class VoskSTT(AIEngine):
         # Prevent multiple TTS requests running concurrently
         async with self.tts_processing_lock:
             logging.info(f"{self.session_id}Final transcript for TTS: '{final_text}'")
-
+            
             # 1. Get LLM Response (Simulated)
             # PLACEHOLDER: Replace with actual LLM call
             turkish_sentences = [
@@ -953,6 +981,11 @@ class VoskSTT(AIEngine):
             ]
             llm_response_text = random.choice(turkish_sentences)
             logging.info(f"{self.session_id}Simulated LLM response: '{llm_response_text}'")
+
+            # NOW reset VAD state AFTER getting LLM response but BEFORE TTS processing
+            if not self.bypass_vad:
+                self.vad_processor.reset_vad_state(preserve_buffer=False)
+                logging.info(f"{self.session_id}VAD state reset after LLM response, before TTS processing")
 
             # --- Drain RTP queue before playing TTS ---
             # Avoid playing TTS over residual user speech or previous TTS fragments
@@ -1111,4 +1144,36 @@ class VoskSTT(AIEngine):
             await asyncio.sleep(0.01)
             
         logging.info(f"{self.session_id}Fallback audio generation complete.")
+
+    async def prepare_for_new_utterance(self):
+        """Reset all state data for a new utterance.
+        
+        Call this when a new conversation turn begins to clean up any lingering state.
+        This is particularly useful when performing multiple interactions in the same session.
+        """
+        logging.info(f"{self.session_id}Preparing system for new utterance cycle")
+        
+        # Reset transcript handler state
+        self.transcript_handler.last_partial_transcript = ""
+        self.transcript_handler.last_final_transcript = ""
+        
+        # Reset VAD state (but preserve bypass_vad setting)
+        if not self.bypass_vad:
+            self.vad_processor.reset_vad_state(preserve_buffer=False)
+        else:
+            # If VAD is bypassed, we still reset state but keep speech_active=True
+            self.vad_processor.reset_vad_state(preserve_buffer=False)
+            self.vad_processor.speech_active = True
+            
+        # Clean RTP queue to remove any lingering audio
+        q_size = self.queue.qsize()
+        if q_size > 0:
+            logging.info(f"{self.session_id}Draining {q_size} packets from RTP queue before new utterance")
+            while not self.queue.empty():
+                try:
+                    self.queue.get_nowait()
+                except Empty:
+                    break
+                    
+        logging.info(f"{self.session_id}System prepared for a new utterance cycle")
 
