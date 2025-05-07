@@ -424,9 +424,9 @@ class VoskSTT(AIEngine):
         # VAD configuration
         self.bypass_vad = self.cfg.get("bypass_vad", "bypass_vad", False)
         self.vad_threshold = self.cfg.get("vad_threshold", "vad_threshold", 0.25)
-        self.vad_min_speech_ms = self.cfg.get("vad_min_speech_ms", "vad_min_speech_ms", 300)
+        self.vad_min_speech_ms = self.cfg.get("vad_min_speech_ms", "vad_min_speech_ms", 350)
         self.vad_min_silence_ms = self.cfg.get("vad_min_silence_ms", "vad_min_silence_ms", 450)
-        self.vad_buffer_chunk_ms = self.cfg.get("vad_buffer_chunk_ms", "vad_buffer_chunk_ms", 500)
+        self.vad_buffer_chunk_ms = self.cfg.get("vad_buffer_chunk_ms", "vad_buffer_chunk_ms", 600)
         self.vad_buffer_max_seconds = self.cfg.get("vad_buffer_max_seconds", "vad_buffer_max_seconds", 2.0)
         self.speech_detection_threshold = self.cfg.get("speech_detection_threshold", "speech_detection_threshold", 1)
         self.silence_detection_threshold = self.cfg.get("silence_detection_threshold", "silence_detection_threshold", 2)
