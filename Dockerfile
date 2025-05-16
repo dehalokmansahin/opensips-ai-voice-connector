@@ -12,6 +12,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     python3-dev \
     && apt-get clean \
+    iproute2 \
+    net-tools \
+    procps \
+    iputils-ping \
+    curl \    
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first to leverage Docker cache
