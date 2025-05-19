@@ -192,7 +192,7 @@ async def main():
             },
             "piper_tts": {  # Nested piper_tts config
                 "host": "localhost",
-                "port": 10200,  # Wyoming Piper default port
+                "port": 8000,  # Wyoming Piper default port
                 "voice": "tr_TR-fahrettin-medium"  # Adjust to match your available voice
             },
             "debug": False

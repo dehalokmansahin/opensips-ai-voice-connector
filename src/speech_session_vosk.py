@@ -16,11 +16,12 @@ import websockets
 import traceback
 import audioop  # For mu-law encoding
 import random  # For simulated responses
+from piper_client import PiperClient  # Import the new Piper client
 
-# Wyoming client libraries for TTS
-from wyoming.client import AsyncTcpClient
-from wyoming.tts import Synthesize, SynthesizeVoice
-from wyoming.audio import AudioChunk, AudioStop
+# Wyoming client libraries for TTS are replaced with websockets
+# from wyoming.client import AsyncTcpClient
+# from wyoming.tts import Synthesize, SynthesizeVoice
+# from wyoming.audio import AudioChunk, AudioStop
 
 class AudioProcessor:
     """Audio processing utilities for speech recognition"""
@@ -433,11 +434,11 @@ class VoskSTT(AIEngine):
 
 
             
-        self.tts_server_host = self.cfg.get( "host", "TTS_HOST", "localhost")
-        self.tts_server_port = int(self.cfg.get( "port", "TTS_PORT", 10200))
-        self.tts_voice = self.cfg.get( "voice", "TTS_VOICE", "tr_TR-fahrettin-medium")
+        self.tts_server_host = self.cfg.get("host", "TTS_HOST", "localhost")
+        self.tts_server_port = int(self.cfg.get("port", "TTS_PORT", 8000))
+        self.tts_voice = self.cfg.get("voice", "TTS_VOICE", "tr_TR-fahrettin-medium")
         self.tts_target_output_rate = 8000  # Target rate for RTP queue is always 8000Hz (PCMU requirement)
-        # We'll determine actual input rate from the first AudioChunk received from Piper
+        # We'll determine actual input rate from the first audio chunk received from Piper
         
         logging.info(f"{self.session_id}Vosk URL: {self.vosk_server_url}, Target STT Rate: {self.target_sample_rate}")
         logging.info(f"{self.session_id}TTS Host: {self.tts_server_host}:{self.tts_server_port}, Voice: {self.tts_voice}")
@@ -494,12 +495,11 @@ class VoskSTT(AIEngine):
         self.vosk_client = VoskClient(self.vosk_server_url, timeout=self.websocket_timeout)
         
         # --- TTS Setup ---
-        # Set up the TTS client (Wyoming Piper client)
-        logging.info(f"{self.session_id}Initializing Wyoming TTS client for {self.tts_server_host}:{self.tts_server_port}")
-        self.tts_client = AsyncTcpClient(self.tts_server_host, self.tts_server_port)
+        # No WebSocket URL setup needed, PiperClient handles this
+        logging.info(f"{self.session_id}Initializing Piper TTS client for {self.tts_server_host}:{self.tts_server_port}")
         # TTS resampler to be initialized when first TTS chunk arrives
         self.tts_resampler = None
-        self.tts_input_rate = None  # Will be determined from first TTS chunk
+        self.tts_input_rate = 22050  # Default Piper sample rate is 22050Hz
         # Lock to prevent concurrent TTS processing
         self.tts_processing_lock = asyncio.Lock()
         
@@ -863,9 +863,8 @@ class VoskSTT(AIEngine):
             except Exception as e:
                 logging.error(f"{self.session_id}Error cancelling Vosk receive task: {e}")
         
-        # 6. TTS client is managed by AsyncTcpClient context manager 
-        # No explicit close needed as it's handled automatically
-
+        # 6. TTS client uses websockets context manager, no explicit closing needed
+        
         logging.info(f"{self.session_id}VoskSTT+TTS session closed successfully")
 
     def _finalize_transcript(self):
@@ -999,181 +998,110 @@ class VoskSTT(AIEngine):
                         break
             # --- End Drain ---
 
-            # 2. Send text to TTS Service and process audio stream
-            # Use the Wyoming client instance
+            # 2. Connect to TTS service and process audio stream using PiperClient
             tts_success = False
             try:
-                logging.debug(f"{self.session_id}Connecting to TTS: {self.tts_server_host}:{self.tts_server_port}")
-                # Connect using the client instance as an async context manager
-                async with self.tts_client as connected_client:
-                    if connected_client is None:
-                        logging.error(f"{self.session_id}Failed to connect to TTS server at {self.tts_server_host}:{self.tts_server_port}")
-                        # Will use fallback after this block
-                    else:
-                        logging.info(f"{self.session_id}Connected to TTS. Synthesizing: '{llm_response_text}'")
-                        voice = SynthesizeVoice(name=self.tts_voice)
-                        synth_event = Synthesize(text=llm_response_text, voice=voice)
-                        await connected_client.write_event(synth_event.event())
-                        logging.debug(f"{self.session_id}Synthesize request sent. Waiting for audio events...")
-
-                        # Reset resampler for this TTS stream
-                        self.tts_resampler = None
-                        self.tts_input_rate = None
-                        cumulative_pcmu_bytes = bytearray() # Accumulate PCMU bytes
-
-                        # Process audio events
-                        while True:
-                            event = await connected_client.read_event()
-                            if event is None:
-                                logging.warning(f"{self.session_id}TTS connection closed unexpectedly.")
-                                break
-                            if AudioStop.is_type(event.type):
-                                logging.info(f"{self.session_id}TTS audio stream finished.")
-                                tts_success = True  # Mark as successful
-                                break
-                            if AudioChunk.is_type(event.type):
-                                chunk = AudioChunk.from_event(event)
-                                logging.debug(f"{self.session_id}Received TTS AudioChunk: Rate={chunk.rate}, Width={chunk.width}, Channels={chunk.channels}, Length={len(chunk.audio)} bytes")
-
-                                # --- Initialize Resampler on first chunk ---
-                                if self.tts_resampler is None:
-                                    if chunk.width != 2 or chunk.channels != 1:
-                                        logging.error(f"{self.session_id}Unsupported TTS audio format: Width={chunk.width}, Channels={chunk.channels}. Expected 16-bit mono.")
-                                        break # Stop processing this TTS request
-                                    self.tts_input_rate = chunk.rate
-                                    if self.tts_input_rate != self.tts_target_output_rate:
-                                        logging.info(f"{self.session_id}Initializing TTS resampler: {self.tts_input_rate} Hz -> {self.tts_target_output_rate} Hz")
-                                        self.tts_resampler = torchaudio.transforms.Resample(
-                                            orig_freq=self.tts_input_rate,
-                                            new_freq=self.tts_target_output_rate
-                                        )
-                                    else:
-                                        logging.info(f"{self.session_id}TTS output rate matches target rate ({self.tts_target_output_rate} Hz). No resampling needed.")
-
-                                # --- Process the audio chunk ---
-                                try:
-                                    # a. Bytes (S16LE) to Tensor (Float32)
-                                    input_tensor = torch.frombuffer(bytearray(chunk.audio), dtype=torch.int16).float() / 32768.0
-
-                                    # b. Resample if needed
-                                    if self.tts_resampler:
-                                        resampled_tensor = self.tts_resampler(input_tensor.unsqueeze(0)).squeeze(0)
-                                    else:
-                                        resampled_tensor = input_tensor # No resampling needed
-
-                                    # c. Tensor (Float32) back to S16LE bytes
-                                    resampled_tensor_clamped = torch.clamp(resampled_tensor, -1.0, 1.0)
-                                    pcm_s16le_bytes = (resampled_tensor_clamped * 32768.0).to(torch.int16).numpy().tobytes()
-
-                                    # d. Encode S16LE to PCMU
-                                    pcmu_chunk_bytes = audioop.lin2ulaw(pcm_s16le_bytes, 2)
-                                    cumulative_pcmu_bytes.extend(pcmu_chunk_bytes)
-
-                                    # e. Queue chunked PCMU data
-                                    chunk_size = 160 # 20ms PCMU
-                                    while len(cumulative_pcmu_bytes) >= chunk_size:
-                                        rtp_payload = cumulative_pcmu_bytes[:chunk_size]
-                                        self.queue.put_nowait(bytes(rtp_payload)) # Ensure it's bytes
-                                        logging.debug(f"{self.session_id}Queued {len(rtp_payload)} bytes of TTS audio for RTP.")
-                                        # Remove the queued part from the accumulator
-                                        cumulative_pcmu_bytes = cumulative_pcmu_bytes[chunk_size:]
-
-                                except Exception as audio_proc_e:
-                                    logging.error(f"{self.session_id}Error processing TTS audio chunk: {audio_proc_e}", exc_info=True)
-                                    # Continue processing other chunks? Or break? Let's break.
-                                    break
-
-                        # Handle any remaining bytes in the accumulator (pad and queue)
-                        if cumulative_pcmu_bytes:
-                            logging.debug(f"{self.session_id}Processing remaining {len(cumulative_pcmu_bytes)} TTS PCMU bytes.")
-                            final_payload = bytes(cumulative_pcmu_bytes).ljust(chunk_size, b'\xff') # Pad with PCMU silence
-                            self.queue.put_nowait(final_payload)
-                            logging.debug(f"{self.session_id}Queued final padded {len(final_payload)} bytes of TTS audio.")
-
-            except ConnectionRefusedError:
-                 logging.error(f"{self.session_id}TTS connection refused. Is the Wyoming Piper server running at {self.tts_server_host}:{self.tts_server_port}?")
-            except asyncio.TimeoutError:
-                 logging.error(f"{self.session_id}Timeout connecting to TTS server.")
-            except Exception as tts_e:
-                logging.error(f"{self.session_id}Error during TTS processing: {tts_e}", exc_info=True)
+                # Create Piper client instance
+                piper_client = PiperClient(
+                    server_host=self.tts_server_host,
+                    server_port=self.tts_server_port,
+                    session_id=self.session_id
+                )
                 
-            # Fallback: If TTS failed, generate some dummy audio
-            if not tts_success:
-                logging.info(f"{self.session_id}TTS failed or not available, generating fallback audio tones.")
-                await self._generate_fallback_tts_audio(len(llm_response_text))
+                # Set up audio handling callback
+                cumulative_pcmu_bytes = bytearray()
+                chunk_size = 160  # 20ms at 8kHz
                 
-    async def _generate_fallback_tts_audio(self, text_length):
-        """Generate fallback TTS audio when TTS server is unavailable
-        
-        Args:
-            text_length: Length of text to simulate audio duration
-        """
-        # Calculate duration based on text length
-        words = max(1, text_length // 5)  # Rough estimate of words
-        duration_ms = words * 300  # ~300ms per word
-        samples_needed = duration_ms * 8  # 8 samples per ms at 8kHz
-        
-        # Generate a simple sine wave tone
-        chunk_size = 160  # 20ms at 8kHz
-        num_chunks = (samples_needed + chunk_size - 1) // chunk_size
-        
-        logging.info(f"{self.session_id}Generating {duration_ms}ms of fallback audio ({num_chunks} chunks)")
-        
-        # Generate tone (middle A - 440Hz)
-        frequency = 440.0
-        sample_rate = 8000
-        
-        for i in range(num_chunks):
-            # Generate each chunk
-            t = np.arange(i * chunk_size, (i + 1) * chunk_size) / sample_rate
-            samples = 0.5 * np.sin(2 * np.pi * frequency * t)
-            
-            # Convert to float32
-            float32_samples = samples.astype(np.float32)
-            
-            # Encode to PCMU
-            pcmu_data = audioop.lin2ulaw(
-                (float32_samples * 32767).astype(np.int16).tobytes(), 
-                2
-            )
-            
-            # Queue the audio
-            self.queue.put_nowait(pcmu_data)
-            
-            # Small delay to avoid overwhelming the queue
-            await asyncio.sleep(0.01)
-            
-        logging.info(f"{self.session_id}Fallback audio generation complete.")
-
-    async def prepare_for_new_utterance(self):
-        """Reset all state data for a new utterance.
-        
-        Call this when a new conversation turn begins to clean up any lingering state.
-        This is particularly useful when performing multiple interactions in the same session.
-        """
-        logging.info(f"{self.session_id}Preparing system for new utterance cycle")
-        
-        # Reset transcript handler state
-        self.transcript_handler.last_partial_transcript = ""
-        self.transcript_handler.last_final_transcript = ""
-        
-        # Reset VAD state (but preserve bypass_vad setting)
-        if not self.bypass_vad:
-            self.vad_processor.reset_vad_state(preserve_buffer=False)
-        else:
-            # If VAD is bypassed, we still reset state but keep speech_active=True
-            self.vad_processor.reset_vad_state(preserve_buffer=False)
-            self.vad_processor.speech_active = True
-            
-        # Clean RTP queue to remove any lingering audio
-        q_size = self.queue.qsize()
-        if q_size > 0:
-            logging.info(f"{self.session_id}Draining {q_size} packets from RTP queue before new utterance")
-            while not self.queue.empty():
-                try:
-                    self.queue.get_nowait()
-                except Empty:
-                    break
+                # Flag to track first audio chunk for resampler initialization
+                first_audio_chunk = True
+                
+                # Audio handling callback - MAKE THIS ASYNC
+                async def on_audio(audio_bytes):
+                    nonlocal cumulative_pcmu_bytes, first_audio_chunk
                     
-        logging.info(f"{self.session_id}System prepared for a new utterance cycle")
+                    try:
+                        # Initialize resampler on first audio chunk if needed
+                        if first_audio_chunk:
+                            first_audio_chunk = False
+                            
+                            # Create resampler if needed
+                            if self.tts_resampler is None and self.tts_input_rate != self.tts_target_output_rate:
+                                logging.info(f"{self.session_id}Initializing TTS resampler: {self.tts_input_rate}Hz -> {self.tts_target_output_rate}Hz")
+                                self.tts_resampler = torchaudio.transforms.Resample(
+                                    orig_freq=self.tts_input_rate,
+                                    new_freq=self.tts_target_output_rate
+                                )
+                            else:
+                                logging.info(f"{self.session_id}TTS output rate matches target rate ({self.tts_target_output_rate}Hz). No resampling needed.")
+                        
+                        # Process audio chunk
+                        # a. Convert bytes to tensor (S16LE PCM to float32 tensor)
+                        input_tensor = torch.frombuffer(bytearray(audio_bytes), dtype=torch.int16).float() / 32768.0
+                        
+                        # b. Resample if needed
+                        if self.tts_resampler:
+                            resampled_tensor = self.tts_resampler(input_tensor.unsqueeze(0)).squeeze(0)
+                        else:
+                            resampled_tensor = input_tensor  # No resampling needed
+                        
+                        # c. Convert tensor back to S16LE PCM bytes
+                        resampled_tensor_clamped = torch.clamp(resampled_tensor, -1.0, 1.0)
+                        pcm_s16le_bytes = (resampled_tensor_clamped * 32768.0).to(torch.int16).numpy().tobytes()
+                        
+                        # d. Convert S16LE PCM to PCMU (μ-law)
+                        pcmu_chunk_bytes = audioop.lin2ulaw(pcm_s16le_bytes, 2)
+                        cumulative_pcmu_bytes.extend(pcmu_chunk_bytes)
+                        
+                        # e. Queue audio in RTP-sized chunks (160 bytes = 20ms at 8kHz)
+                        while len(cumulative_pcmu_bytes) >= chunk_size:
+                            rtp_payload = cumulative_pcmu_bytes[:chunk_size]
+                            self.queue.put_nowait(bytes(rtp_payload))
+                            logging.debug(f"{self.session_id}Queued {len(rtp_payload)} bytes of TTS audio for RTP.")
+                            # Remove queued data from buffer
+                            cumulative_pcmu_bytes = cumulative_pcmu_bytes[chunk_size:]
+                            
+                            # Yield control occasionally to allow other tasks to run
+                            await asyncio.sleep(0)
+                            
+                    except Exception as audio_e:
+                        logging.error(f"{self.session_id}Error processing TTS audio: {audio_e}", exc_info=True)
+                
+                # Status callbacks - Make these async too
+                async def on_start(data):
+                    logging.info(f"{self.session_id}TTS stream starting: {data.get('message')}")
+                    
+                async def on_end(data):
+                    nonlocal tts_success
+                    tts_success = True
+                    logging.info(f"{self.session_id}TTS stream complete: {data.get('message')}")
+                    
+                async def on_error(data):
+                    logging.error(f"{self.session_id}TTS error: {data.get('message')}")
+                
+                # Execute the full TTS workflow - connect, synthesize, and process
+                if await piper_client.connect():
+                    if await piper_client.synthesize(llm_response_text, voice=self.tts_voice):
+                        await piper_client.process_stream(
+                            on_start=on_start,
+                            on_audio=on_audio,
+                            on_end=on_end,
+                            on_error=on_error
+                        )
+                    
+                    # Ensure client is properly closed
+                    await piper_client.close()
+                
+                # Handle any remaining audio bytes (padding to full chunk if needed)
+                if cumulative_pcmu_bytes:
+                    logging.debug(f"{self.session_id}Processing remaining {len(cumulative_pcmu_bytes)} TTS PCMU bytes.")
+                    if len(cumulative_pcmu_bytes) < chunk_size:
+                        # Pad with PCMU silence (0xFF)
+                        final_payload = bytes(cumulative_pcmu_bytes).ljust(chunk_size, b'\xff')
+                    else:
+                        final_payload = bytes(cumulative_pcmu_bytes)
+                    self.queue.put_nowait(final_payload)
+                    logging.debug(f"{self.session_id}Queued final {len(final_payload)} bytes of TTS audio.")
+                
+            except Exception as e:
+                logging.error(f"{self.session_id}Error during TTS processing: {e}", exc_info=True)
 
