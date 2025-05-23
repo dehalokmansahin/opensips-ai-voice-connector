@@ -29,6 +29,8 @@ import datetime
 from queue import Queue, Empty
 from aiortc.sdp import SessionDescription
 from config import Config
+from src.opensips_connector import OpenSIPSConnector # Assuming path is correct
+from src.call_manager import CallManager # Assuming path is correct
 
 from rtp import decode_rtp_packet, generate_rtp_packet
 from utils import get_ai
@@ -48,12 +50,14 @@ class Call():  # pylint: disable=too-many-instance-attributes
     """ Class that handles a call """
     # pylint: disable=too-many-arguments, too-many-positional-arguments
     def __init__(self,
-                 b2b_key,
-                 mi_conn,
-                 sdp: SessionDescription,
-                 flavor: str,
+                 key, # Renamed b2b_key to key to match CallManager
+                 params, # Added params from CallManager
                  to: str,
-                 cfg):
+                 cfg,
+                 flavor: str,
+                 sdp_body: str, # Changed sdp to sdp_body (string)
+                 opensips_connector: OpenSIPSConnector,
+                 call_manager: CallManager):
         host_ip = rtp_cfg.get('bind_ip', 'RTP_BIND_IP', '0.0.0.0')
         try:
             hostname = socket.gethostbyname(socket.gethostname())
@@ -61,8 +65,16 @@ class Call():  # pylint: disable=too-many-instance-attributes
             hostname = "127.0.0.1"
         rtp_ip = rtp_cfg.get('ip', 'RTP_IP', hostname)
 
-        self.b2b_key = b2b_key
-        self.mi_conn = mi_conn
+        self.b2b_key = key # Use key
+        self.opensips_connector = opensips_connector
+        self.call_manager = call_manager
+        
+        # Parse the string sdp_body to an sdp object
+        # remove rtcp line, since the parser throws an error on it (as done in original engine.py)
+        sdp_str_cleaned = "\n".join([line for line in sdp_body.splitlines()
+                                     if not line.startswith("a=rtcp:")])
+        sdp = SessionDescription.parse(sdp_str_cleaned)
+
 
         if sdp.media[0].host:
             self.client_addr = sdp.media[0].host
@@ -231,11 +243,18 @@ class Call():  # pylint: disable=too-many-instance-attributes
         available_ports.add(free_port)
         self.stop_event.set()
         await self.ai.close()
+        if self.call_manager: # Ensure call_manager is set
+            self.call_manager.remove_call(self.b2b_key)
 
     def terminate(self):
         """ Terminates the call """
         logging.info("Terminating call %s", self.b2b_key)
-        self.mi_conn.execute("ua_session_terminate", {"key": self.b2b_key})
+        # Using opensips_connector.mi_conn directly as specified.
+        # If OpenSIPSConnector had a wrapper like `terminate_session(key)`, that would be cleaner.
+        try:
+            self.opensips_connector.mi_conn.execute("ua_session_terminate", {"key": self.b2b_key})
+        except Exception as e: # Catch potential exceptions from mi_conn.execute
+            logging.error(f"Error terminating call {self.b2b_key} via MI: {e}")
         asyncio.create_task(self.close())
 
 # vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4

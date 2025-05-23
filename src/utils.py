@@ -93,50 +93,6 @@ def get_user(params):
 def _dialplan_match(regex, string):
     """ Checks if a regex matches the string """
     pattern = re.compile(regex)
-    return pattern.match(string)
-
-
-def get_ai_flavor_default(user):
-    """ Returns the default algorithm for AI choosing """
-    # remove disabled engines
-    keys = [k for k, _ in FLAVORS.items() if
-            not Config.get(k).getboolean("disabled",
-                                         f"{k.upper()}_DISABLE",
-                                         False)]
-    if user in keys:
-        return user
-    hash_index = hash(user) % len(keys)
-    return keys[hash_index]
-
-
-def get_ai_flavor(params):
-    """ Returns the AI flavor to be used """
-
-    user = get_user(params)
-    if not user:
-        raise UnknownSIPUser("cannot parse username")
-
-    # first, get the sections in order and check if they have a dialplan
-    flavor = None
-    for flavor in Config.sections():
-        if flavor not in FLAVORS:
-            continue
-        if Config.get(flavor).getboolean("disabled",
-                                         f"{flavor.upper()}_DISABLE",
-                                         False):
-            continue
-        dialplans = Config.get(flavor).get("match")
-        if not dialplans:
-            continue
-        if isinstance(dialplans, list):
-            for dialplan in dialplans:
-                if _dialplan_match(dialplan, user):
-                    return flavor
-        elif _dialplan_match(dialplans, user):
-            return flavor
-    return get_ai_flavor_default(user)
-
-
 def get_ai(flavor, call, cfg):
     """ Returns an AI object """
     return FLAVORS[flavor](call, cfg)
