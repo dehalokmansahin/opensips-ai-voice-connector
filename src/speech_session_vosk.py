@@ -1,45 +1,62 @@
 """
-Provides the `SmartSpeech` class, an AIEngine implementation for speech-to-text (STT)
-and text-to-speech (TTS) integration using Vosk for STT and a Piper client for TTS.
+Module for full-duplex speech interaction using Vosk for Speech-to-Text (STT)
+and Piper for Text-to-Speech (TTS).
 
-The module includes several helper classes:
-- `AudioProcessor`: Handles raw audio processing, decoding, and resampling.
-- `VADProcessor`: Manages Voice Activity Detection.
-- `TranscriptHandler`: Processes and manages partial and final STT transcripts.
-- `TTSProcessor`: Manages TTS audio generation and queuing.
+This module provides `SmartSpeech`, an AIEngine implementation that integrates
+Vosk and Piper services. It handles real-time audio processing, voice activity
+detection (VAD), STT transcription, and TTS response generation. The system is
+designed for applications like voice assistants or interactive voice response
+systems.
 
-The `SmartSpeech` class orchestrates these components to provide a full-duplex
-voice conversation experience.
+Key Components:
+- `SmartSpeech`: The main class orchestrating the STT/TTS pipeline. It manages
+                 the overall session, user interaction flow, and communication
+                 with external STT/TTS services.
+- `AudioProcessor`: Processes raw incoming audio (expected in PCMU format) into a
+                    format suitable for STT (16kHz, 16-bit PCM mono). This includes
+                    decoding, resampling, normalization, and noise reduction.
+- `VADProcessor`: Buffers processed audio and applies Voice Activity Detection
+                  to identify speech segments, controlling when audio is sent to
+                  the STT engine.
+- `TranscriptHandler`: Manages partial and final transcripts received from the
+                       STT service, providing the most current recognized text.
+- `TTSProcessor`: Generates speech audio from text using a Piper TTS client,
+                  processes this audio (e.g., resampling to the desired output rate),
+                  and queues it for playback. Handles barge-in to interrupt TTS
+                  when user speech is detected.
+
+The system is designed to be asynchronous, leveraging `asyncio` for concurrent
+operations such as receiving user audio, streaming to STT, receiving transcripts,
+and generating/playing TTS audio.
 """
-from codec import get_codecs, PCMU, UnsupportedCodec
-from vad_detector import VADDetector
-from config import Config
-import torch
-# import numpy as np # Not directly used in this file, but numpy arrays are passed from pcmu_decoder
-import asyncio
-from ai import AIEngine
-from queue import Empty, Queue
-import json
-import logging
-from typing import Callable, Awaitable 
-from vosk_client import VoskClient
-import torchaudio
-import time
-from pcmu_decoder import PCMUDecoder
-import websockets
-import traceback # Used for logging exception details
-import audioop  # For mu-law encoding
-import random  # For simulated responses
-from piper_client import PiperClient
+from codec import get_codecs, PCMU, UnsupportedCodec # For SDP parsing and codec handling
+from vad_detector import VADDetector # Silero VAD wrapper
+from config import Config # For application configuration
+import torch # For tensor operations, primarily in audio processing
+import asyncio # For asynchronous programming
+from ai import AIEngine # Base class for AI engine implementations
+from queue import Empty, Queue # For synchronous queue (rtp_queue for TTS output)
+import json # For STT message parsing (Vosk primarily)
+import logging # For application logging
+from typing import Callable, Awaitable, Optional, Tuple # For type hinting
+from vosk_client import VoskClient # Client for Vosk STT server
+import torchaudio # For audio resampling and transformations
+import time # For timing VAD buffer flushes, etc.
+from pcmu_decoder import PCMUDecoder # For decoding PCMU audio
+import websockets # For Vosk WebSocket communication (used by VoskClient)
+# import traceback # Unused: logging with exc_info=True is generally preferred
+import audioop  # For mu-law encoding/decoding if needed (TTS output to PCMU)
+import random  # For simulated LLM responses (placeholder)
+from piper_client import PiperClient # Client for Piper TTS server
 
 class AudioProcessor:
     """
-    Handles audio processing tasks such as decoding, resampling, normalization,
-    and format conversion for speech recognition.
+    Handles audio processing for speech recognition.
 
-    The primary input is expected to be PCMU encoded audio bytes, which are
-    processed into a format suitable for speech-to-text (STT) engines
-    (typically 16kHz, 16-bit PCM).
+    This class takes raw audio bytes (expected in PCMU format, 8kHz),
+    decodes them, performs cleaning (NaN/Inf removal), normalization,
+    resampling to a target sample rate (e.g., 16kHz for STT), and
+    converts the audio to both a PyTorch tensor and 16-bit PCM byte format.
     """
     
     def __init__(self, target_sample_rate: int = 16000, debug: bool = False, session_id: str = ""):
@@ -47,40 +64,42 @@ class AudioProcessor:
         Initializes the AudioProcessor.
 
         Args:
-            target_sample_rate: The desired sample rate for the output audio (e.g., 16000 Hz).
-            debug: If True, enables detailed debug logging.
-            session_id: An identifier for the current session, used for logging.
+            target_sample_rate: The desired sample rate for the output audio, typically 16000 Hz for STT.
+            debug: If True, enables detailed debug logging for audio processing steps.
+            session_id: An identifier for the current session, used for contextual logging.
         """
-        self.target_sample_rate = target_sample_rate
-        self.debug = debug
-        self.session_id = session_id
+        self.target_sample_rate: int = target_sample_rate
+        self.debug: bool = debug
+        self.session_id: str = session_id
         
-        # Decoder for PCMU (G.711 mu-law) audio
-        self.pcmu_decoder = PCMUDecoder()
-        
-        # Resampler to convert from 8kHz (PCMU native rate) to the target sample rate
-        self.resampler = torchaudio.transforms.Resample(orig_freq=8000, new_freq=self.target_sample_rate)
-    
+        self.pcmu_decoder: PCMUDecoder = PCMUDecoder()
+        self.resampler: torchaudio.transforms.Resample = torchaudio.transforms.Resample(
+            orig_freq=8000,  # PCMU is typically 8kHz
+            new_freq=self.target_sample_rate
+        )
+        logging.info(f"{self.session_id}AudioProcessor initialized for target sample rate {self.target_sample_rate}Hz.")
+
     def tensor_to_bytes(self, tensor: torch.Tensor) -> bytes:
         """
-        Converts a float32 audio tensor to 16-bit PCM bytes.
+        Converts a float32 audio tensor to 16-bit PCM bytes (little-endian).
 
-        The input tensor is expected to be in the range [-1.0, 1.0].
-        The tensor is clamped to this range, then scaled to int16 range
-        [-32768, 32767] and converted to bytes.
+        The input tensor is expected to contain audio samples in the range [-1.0, 1.0].
+        Values outside this range will be clamped. The tensor is then scaled to the
+        int16 range [-32768, 32767] and converted to raw bytes.
 
         Args:
-            tensor: A PyTorch float32 audio tensor.
+            tensor: A PyTorch float32 audio tensor (1D).
             
         Returns:
-            bytes: Audio data as 16-bit PCM bytes.
+            Audio data as a byte string in 16-bit PCM format.
         """
-        # Clamp tensor values to the valid range [-1.0, 1.0]
-        processed_tensor = torch.clamp(tensor, -1.0, 1.0)
-        # Scale to int16 range and convert to bytes
-        return (processed_tensor * 32768.0).to(torch.int16).numpy().tobytes()
+        # Ensure tensor values are within the expected float range [-1.0, 1.0]
+        clamped_tensor = torch.clamp(tensor, -1.0, 1.0)
+        # Scale to int16 range, convert type, then to bytes
+        # Note: .numpy().tobytes() uses the system's native endianness, usually little-endian.
+        return (clamped_tensor * 32767.0).to(torch.int16).numpy().tobytes() # Max int16 is 32767
     
-    def process_bytes_audio(self, audio: bytes) -> tuple[torch.Tensor | None, bytes | None]:
+    def process_bytes_audio(self, audio: bytes) -> Tuple[Optional[torch.Tensor], Optional[bytes]]:
         """
         Processes raw PCMU audio bytes into a resampled float32 tensor and 16-bit PCM bytes.
 
@@ -199,53 +218,73 @@ class AudioProcessor:
 
 class VADProcessor:
     """
-    Manages Voice Activity Detection (VAD) by buffering incoming audio,
-    processing it in chunks, and determining speech segments.
+    Manages Voice Activity Detection (VAD) state and audio buffering.
+
+    This class buffers incoming audio chunks (already processed into 16-bit PCM)
+    and, once a configurable buffer duration is reached, passes the complete
+    buffer to an underlying `VADDetector` instance (e.g., Silero VAD).
+    It maintains a state (`speech_active`) based on consecutive speech/silence
+    determinations from the VAD detector, implementing thresholds for speech
+    start and end detection. This helps in smoothing out VAD decisions and
+    controlling when audio is forwarded to the STT engine.
     """
     
     def __init__(self, 
                  vad_detector: VADDetector, 
                  target_sample_rate: int, 
-                 audio_processor: AudioProcessor, 
                  vad_buffer_chunk_ms: int = 750, 
-                 speech_detection_threshold: int = 3, 
-                 silence_detection_threshold: int = 10, 
+                 speech_detection_threshold: int = 1, # Default changed from 3 in original to 1
+                 silence_detection_threshold: int = 1, # Default changed from 10 in original to 1
                  debug: bool = False, 
                  session_id: str = ""):
         """
         Initializes the VADProcessor.
 
         Args:
-            vad_detector: An instance of VADDetector for speech detection.
+            vad_detector: An instance of a VAD detector (e.g., `VADDetector` wrapping Silero).
             target_sample_rate: The sample rate of the audio being processed (e.g., 16000 Hz).
-            audio_processor: Reference to the AudioProcessor instance. (Currently unused directly but kept for API consistency)
-            vad_buffer_chunk_ms: Duration of audio (in ms) to buffer before VAD processing.
-            speech_detection_threshold: Number of consecutive speech chunks to trigger `speech_active`.
-            silence_detection_threshold: Number of consecutive silence chunks to deactivate `speech_active`.
-            debug: If True, enables detailed debug logging.
-            session_id: An identifier for the current session, used for logging.
+                                This is used to calculate buffer duration in milliseconds.
+            vad_buffer_chunk_ms: Duration of audio (in ms) to buffer before passing to `vad_detector`.
+            speech_detection_threshold: Number of consecutive `vad_detector` speech chunks
+                                        required to trigger the `speech_active` state.
+            silence_detection_threshold: Number of consecutive `vad_detector` silence chunks
+                                         required to deactivate the `speech_active` state.
+            debug: If True, enables detailed debug logging for VAD processing.
+            session_id: An identifier for the current session, used for contextual logging.
         """
         self.vad: VADDetector = vad_detector
         self.target_sample_rate: int = target_sample_rate
-        self.audio_processor: AudioProcessor = audio_processor 
         self.vad_buffer_chunk_ms: int = vad_buffer_chunk_ms
         self.speech_detection_threshold: int = speech_detection_threshold
         self.silence_detection_threshold: int = silence_detection_threshold
         self.debug: bool = debug
         self.session_id: str = session_id
         
-        self._vad_buffer: bytearray = bytearray()
-        self._vad_buffer_size_samples: int = 0
-        self._last_buffer_flush_time: float = time.time()
-        self._vad_buffer_locks: asyncio.Lock = asyncio.Lock()
+        self._vad_buffer: bytearray = bytearray()  # Buffer for storing incoming audio bytes
+        self._vad_buffer_size_samples: int = 0     # Current size of the buffer in audio samples
+        self._last_buffer_flush_time: float = time.time() # Timestamp of the last buffer processing
+        self._vad_buffer_locks: asyncio.Lock = asyncio.Lock() # Lock for concurrent access to buffer
         
-        self.consecutive_speech_packets: int = 0
-        self.consecutive_silence_packets: int = 0
-        self.speech_active: bool = False 
+        self.consecutive_speech_packets: int = 0 # Counter for consecutive speech chunks
+        self.consecutive_silence_packets: int = 0 # Counter for consecutive silence chunks
+        self.speech_active: bool = False  # Overall VAD state: True if speech is ongoing
+        
+        logging.info(
+            f"{self.session_id}VADProcessor initialized: "
+            f"ChunkMs={self.vad_buffer_chunk_ms}, SpeechThresh={self.speech_detection_threshold}, "
+            f"SilenceThresh={self.silence_detection_threshold}"
+        )
     
     def reset_vad_state(self, preserve_buffer: bool = False) -> None:
         """
-        Resets the VAD state, clearing speech/silence counters and optionally the audio buffer.
+        Resets the VAD state machine.
+
+        Clears speech/silence counters and deactivates `speech_active` state.
+        Optionally preserves or clears the internal audio buffer.
+
+        Args:
+            preserve_buffer: If True, the existing audio in `_vad_buffer` is kept.
+                             If False (default), the buffer is cleared.
         """
         if self.debug:
             logging.debug(f"{self.session_id}Resetting VAD state. Preserve buffer: {preserve_buffer}")
@@ -254,177 +293,299 @@ class VADProcessor:
         self.consecutive_silence_packets = 0
         
         was_active = self.speech_active
-        self.speech_active = False 
+        self.speech_active = False # Deactivate speech state
         
         if not preserve_buffer:
             self._vad_buffer.clear()
             self._vad_buffer_size_samples = 0
             self._last_buffer_flush_time = time.time() 
             if self.debug:
-                logging.debug(f"{self.session_id}VAD buffer cleared.")
+                logging.debug(f"{self.session_id}VAD audio buffer cleared.")
             
-        logging.info(f"{self.session_id}VAD state reset. Speech was {'active' if was_active else 'inactive'}. Buffer {'preserved' if preserve_buffer else 'cleared'}.")
+        logging.info(
+            f"{self.session_id}VAD state reset. Speech was previously "
+            f"{'active' if was_active else 'inactive'}. "
+            f"Buffer {'preserved' if preserve_buffer else 'cleared'}."
+        )
 
-    async def add_audio(self, audio_bytes: bytes, num_samples: int) -> tuple[bool, bool, bytes | None]:
+    async def add_audio(self, audio_bytes: bytes, num_samples: int) -> Tuple[bool, bool, Optional[bytes]]:
         """
-        Adds audio data to the VAD buffer and processes it if chunk size is reached.
+        Adds audio data to the internal buffer and processes it for VAD if the buffer reaches `vad_buffer_chunk_ms`.
+
+        Args:
+            audio_bytes: The raw audio data (16-bit PCM bytes) to add to the buffer.
+            num_samples: The number of audio samples represented by `audio_bytes`.
+
+        Returns:
+            A tuple (was_processed, is_speech, processed_buffer_bytes):
+            - `was_processed` (bool): True if a full buffer chunk was processed for VAD, False otherwise.
+            - `is_speech` (bool): If `was_processed` is True, this indicates if the processed chunk
+                                  (or overall VAD state) determined speech. Otherwise, it's False.
+            - `processed_buffer_bytes` (Optional[bytes]): If `was_processed` is True, this contains
+                                                          the audio bytes of the processed chunk.
+                                                          Otherwise, it's None.
         """
         async with self._vad_buffer_locks: 
             self._vad_buffer.extend(audio_bytes)
             self._vad_buffer_size_samples += num_samples
             
-            buffer_ms = (self._vad_buffer_size_samples / self.target_sample_rate) * 1000
+            # Calculate current buffer duration in milliseconds
+            buffer_duration_ms = (self._vad_buffer_size_samples / self.target_sample_rate) * 1000
             
-            if buffer_ms >= self.vad_buffer_chunk_ms:
+            # If buffer duration meets or exceeds the configured chunk size, process it
+            if buffer_duration_ms >= self.vad_buffer_chunk_ms:
                 if self.debug:
-                    logging.debug(f"{self.session_id}VAD buffer reached {buffer_ms:.2f}ms (threshold {self.vad_buffer_chunk_ms}ms), processing for VAD.")
-                is_speech, processed_buffer_bytes = await self._process_buffer()
-                return True, is_speech, processed_buffer_bytes 
+                    logging.debug(
+                        f"{self.session_id}VAD buffer reached {buffer_duration_ms:.2f}ms "
+                        f"(threshold {self.vad_buffer_chunk_ms}ms), processing for VAD."
+                    )
+                # Process the buffered audio for VAD
+                is_speech_decision, processed_chunk_bytes = await self._process_buffer()
+                return True, is_speech_decision, processed_chunk_bytes # Buffer was processed
                 
-            return False, False, None 
+            return False, False, None # Buffer not yet full enough to process
     
-    async def _process_buffer(self) -> tuple[bool, bytes]:
+    async def _process_buffer(self) -> Tuple[bool, bytes]:
         """
-        Processes the current VAD buffer to detect speech and updates VAD state.
+        Internal method to process the current VAD buffer using the `VADDetector`.
+        
+        This method converts the buffered 16-bit PCM bytes to a float tensor,
+        gets a speech decision from `self.vad.is_speech()`, updates the VAD state machine
+        (`consecutive_speech_packets`, `consecutive_silence_packets`, `speech_active`),
+        and determines if the chunk should be sent to STT.
+        The buffer is cleared after processing.
+
         Assumes `_vad_buffer_locks` is held by the caller.
+
+        Returns:
+            A tuple (send_to_stt, buffer_bytes):
+            - `send_to_stt` (bool): True if this chunk should be sent to the STT engine.
+            - `buffer_bytes` (bytes): The actual audio bytes from the processed buffer.
         """
-        buffer_bytes = bytes(self._vad_buffer)
-        send_to_stt = False 
+        current_chunk_bytes = bytes(self._vad_buffer) # Copy buffer for processing
+        send_chunk_to_stt: bool = False 
         
         try:
-            audio_tensor = torch.frombuffer(bytearray(buffer_bytes), dtype=torch.int16).float() / 32768.0
-            is_speech_in_chunk = self.vad.is_speech(audio_tensor)
+            # Convert 16-bit PCM byte buffer to a float32 tensor for VAD model
+            # Normalization: int16 range is [-32768, 32767]. Dividing by 32768.0 maps it to [-1.0, 1.0).
+            audio_tensor = torch.frombuffer(bytearray(current_chunk_bytes), dtype=torch.int16).float() / 32768.0
+            
+            # Get speech detection result for the current chunk from the VAD detector
+            is_speech_in_current_chunk = self.vad.is_speech(audio_tensor)
             
             if self.debug:
-                logging.debug(f"{self.session_id}VAD processing chunk: speech_detected_in_chunk={is_speech_in_chunk}, current_speech_active={self.speech_active}")
+                logging.debug(
+                    f"{self.session_id}VAD processing chunk: "
+                    f"is_speech_in_chunk={is_speech_in_current_chunk}, "
+                    f"current_speech_active={self.speech_active}"
+                )
 
-            if is_speech_in_chunk:
+            # Update consecutive speech/silence counters based on current chunk's VAD result
+            if is_speech_in_current_chunk:
                 self.consecutive_speech_packets += 1
                 self.consecutive_silence_packets = 0 
             else:
                 self.consecutive_silence_packets += 1
                 self.consecutive_speech_packets = 0 
             
-            if is_speech_in_chunk:
+            # Update overall `speech_active` state based on thresholds
+            if is_speech_in_current_chunk:
+                # If speech is detected in the chunk and we've met the threshold, activate speech state
                 if self.consecutive_speech_packets >= self.speech_detection_threshold and not self.speech_active:
                     self.speech_active = True
-                    logging.info(f"{self.session_id}Speech started (VAD active) after {self.consecutive_speech_packets} consecutive speech chunk(s).")
-            else:
-                if self.debug and self.speech_active : 
-                     logging.debug(f"{self.session_id}VAD CHECK (speech_active=true): consecutive_silence_packets={self.consecutive_silence_packets}, silence_detection_threshold={self.silence_detection_threshold}")
+                    logging.info(
+                        f"{self.session_id}Speech started (VAD active) after "
+                        f"{self.consecutive_speech_packets} consecutive speech chunk(s)."
+                    )
+            else: # Current chunk is silent
+                # If silence is detected and we've met the threshold while speech was active, deactivate
+                if self.debug and self.speech_active: 
+                     logging.debug(
+                         f"{self.session_id}VAD silence check (speech_active=true): "
+                         f"consecutive_silence_packets={self.consecutive_silence_packets}, "
+                         f"silence_detection_threshold={self.silence_detection_threshold}"
+                     )
                 if self.consecutive_silence_packets >= self.silence_detection_threshold and self.speech_active:
                     self.speech_active = False
-                    logging.info(f"{self.session_id}Speech ended (VAD inactive) after {self.consecutive_silence_packets} consecutive silence chunk(s).")
+                    logging.info(
+                        f"{self.session_id}Speech ended (VAD inactive) after "
+                        f"{self.consecutive_silence_packets} consecutive silence chunk(s)."
+                    )
             
-            send_to_stt = is_speech_in_chunk or self.speech_active
+            # Determine if this chunk should be sent to STT:
+            # Send if the current chunk itself contains speech, OR if speech is already generally active
+            # (e.g., to capture trailing audio after speech ends but before silence threshold is fully met).
+            send_chunk_to_stt = is_speech_in_current_chunk or self.speech_active
             
             if self.debug:
-                if send_to_stt:
-                    logging.debug(f"{self.session_id}VAD decision: Send to STT (chunk_speech={is_speech_in_chunk}, overall_speech_active={self.speech_active})")
-                else:
-                    logging.debug(f"{self.session_id}VAD decision: Do not send to STT (chunk_speech={is_speech_in_chunk}, overall_speech_active={self.speech_active})")
+                log_msg = "Send to STT" if send_chunk_to_stt else "Do not send to STT"
+                logging.debug(
+                    f"{self.session_id}VAD decision: {log_msg} "
+                    f"(chunk_speech={is_speech_in_current_chunk}, overall_speech_active={self.speech_active})"
+                )
             
-            return send_to_stt, buffer_bytes
+            return send_chunk_to_stt, current_chunk_bytes
             
         except Exception as e:
             logging.error(f"{self.session_id}Error processing VAD buffer: {str(e)}", exc_info=True)
-            return False, buffer_bytes 
+            # Fallback: don't send to STT on error, but return the buffer bytes
+            return False, current_chunk_bytes 
         finally:
+            # Always clear the buffer and reset sample count after processing (or attempting to)
             self._vad_buffer.clear()
             self._vad_buffer_size_samples = 0
             self._last_buffer_flush_time = time.time()
             if self.debug:
-                logging.debug(f"{self.session_id}VAD buffer cleared after processing.")
+                logging.debug(f"{self.session_id}VAD buffer cleared after processing attempt.")
     
-    async def process_final_buffer(self) -> tuple[bool, bytes | None]:
+    async def process_final_buffer(self) -> Tuple[bool, Optional[bytes]]:
         """
-        Processes any remaining audio in the VAD buffer, typically at stream end.
+        Processes any remaining audio in the VAD buffer.
+        
+        This is typically called at the end of an audio stream to ensure any
+        lingering audio data is processed for VAD.
+
+        Returns:
+            A tuple (is_speech, processed_buffer_bytes):
+            - `is_speech` (bool): True if the final processed chunk (or overall VAD state)
+                                  determined speech. False if no data or no speech.
+            - `processed_buffer_bytes` (Optional[bytes]): The audio bytes of the final
+                                                          processed chunk, or None if no data.
         """
         async with self._vad_buffer_locks: 
             if len(self._vad_buffer) > 0:
-                buffer_seconds = self._vad_buffer_size_samples / self.target_sample_rate
                 if self.debug:
-                    logging.debug(f"{self.session_id}Processing remaining VAD buffer: {buffer_seconds:.2f} seconds ({self._vad_buffer_size_samples} samples).")
-                is_speech, buffer_bytes = await self._process_buffer()
-                return is_speech, buffer_bytes
+                    buffer_duration_ms = (self._vad_buffer_size_samples / self.target_sample_rate) * 1000
+                    logging.debug(
+                        f"{self.session_id}Processing remaining VAD buffer: "
+                        f"{buffer_duration_ms:.2f} ms ({self._vad_buffer_size_samples} samples)."
+                    )
+                # Process the remaining audio in the buffer
+                is_speech_decision, processed_chunk_bytes = await self._process_buffer()
+                return is_speech_decision, processed_chunk_bytes
             
         if self.debug:
             logging.debug(f"{self.session_id}No remaining VAD buffer to process.")
-        return False, None 
+        return False, None # No buffer to process
 
 class TranscriptHandler:
     """
-    Manages the processing of transcript messages from an STT service.
+    Manages STT (Speech-to-Text) transcript data.
+
+    This class stores the last partial and final transcripts received from the
+    STT service. It provides callbacks (`on_partial_transcript`, `on_final_transcript`)
+    that can be set by other components to react to transcript updates.
+    It also offers a method to retrieve the most definitive available transcript.
     """
     
     def __init__(self, session_id: str = ""):
         """
         Initializes the TranscriptHandler.
+
         Args:
-            session_id: Identifier for logging.
+            session_id: An identifier for the current session, used for contextual logging.
         """
         self.last_partial_transcript: str = ""
         self.last_final_transcript: str = ""
-        self.on_partial_transcript: Callable[[str], Awaitable[None]] | None = None
-        self.on_final_transcript: Callable[[str], Awaitable[None]] | None = None
+        # Callbacks for transcript updates:
+        self.on_partial_transcript: Optional[Callable[[str], Awaitable[None]]] = None
+        self.on_final_transcript: Optional[Callable[[str], Awaitable[None]]] = None
         self.session_id: str = session_id
+        logging.info(f"{self.session_id}TranscriptHandler initialized.")
     
     async def handle_message(self, message: str) -> bool:
         """
-        Processes an incoming STT message (JSON string).
-        Updates transcript states and triggers callbacks.
+        Processes an incoming message (JSON string) from the STT service.
+
+        Parses the message, updates `last_partial_transcript` and/or
+        `last_final_transcript`, and triggers the respective callbacks if set.
+
+        Args:
+            message: The JSON message string from the STT service.
+                     Expected to contain 'partial' or 'text' (final) fields.
+
+        Returns:
+            True if the message was successfully processed, False otherwise
+            (e.g., JSON decode error).
         """
         try:
-            response = json.loads(message)
+            response = json.loads(message) # Parse the JSON message
             
+            # Handle partial transcript
             if "partial" in response:
-                partial_text = response.get("partial", "") 
-                self.last_partial_transcript = partial_text
-                if partial_text:
-                    logging.info(f"{self.session_id}Partial transcript: {partial_text}") 
-                if partial_text and self.on_partial_transcript:
-                    await self.on_partial_transcript(partial_text)
+                partial_text = response.get("partial", "").strip() # Get partial text, strip whitespace
+                if partial_text != self.last_partial_transcript: # Update only if changed
+                    self.last_partial_transcript = partial_text
+                    if partial_text: # Log non-empty partials
+                        logging.info(f"{self.session_id}Partial transcript: \"{partial_text}\"")
+                    if self.on_partial_transcript and partial_text: # Trigger callback if set and text exists
+                        await self.on_partial_transcript(partial_text)
             
+            # Handle final transcript
             if "text" in response:
-                final_text = response.get("text", "") 
-                self.last_final_transcript = final_text
-                if final_text:
-                    logging.info(f"{self.session_id}FINAL transcript: {final_text}")
-                if final_text and self.on_final_transcript:
-                    asyncio.create_task(self.on_final_transcript(final_text))
+                final_text = response.get("text", "").strip() # Get final text, strip whitespace
+                if final_text: # Process only if final text is non-empty
+                    self.last_final_transcript = final_text
+                    # It's common for final results to also update the last partial,
+                    # ensuring consistency if no further partials arrive.
+                    if final_text != self.last_partial_transcript:
+                        self.last_partial_transcript = final_text 
+
+                    logging.info(f"{self.session_id}Final transcript: \"{final_text}\"")
+                    if self.on_final_transcript: # Trigger callback if set
+                        # Run final transcript callback as a separate task to avoid blocking
+                        # the message handling loop if the callback is slow.
+                        asyncio.create_task(self.on_final_transcript(final_text))
                     
-            return True 
+            return True # Message processed successfully
                 
         except json.JSONDecodeError:
-            logging.error(f"{self.session_id}Invalid JSON response: {message}")
+            logging.error(f"{self.session_id}Invalid JSON response from STT: {message[:100]}...")
             return False
         except Exception as e:
-            logging.error(f"{self.session_id}Error processing transcript: {str(e)}", exc_info=True)
+            logging.error(f"{self.session_id}Error processing STT transcript message: {str(e)}", exc_info=True)
             return False
     
     def get_final_transcript(self) -> str:
         """
-        Retrieves the most definitive transcript, with fallback logic.
+        Retrieves the most definitive transcript available.
+
+        It prioritizes the last final transcript. If no final transcript is
+        available, it falls back to the last partial transcript. If neither is
+        available, it returns an empty string.
+
+        Returns:
+            The most definitive transcript string.
         """
         if self.last_final_transcript:
-            if self.session_id and logging.getLogger().isEnabledFor(logging.DEBUG): 
-                 logging.debug(f"{self.session_id}Returning final transcript: {self.last_final_transcript[:50]}...")
+            if self.debug_logging_enabled(): 
+                 logging.debug(f"{self.session_id}Returning final transcript: \"{self.last_final_transcript[:70]}...\"")
             return self.last_final_transcript
         elif self.last_partial_transcript:
-            if self.session_id and logging.getLogger().isEnabledFor(logging.DEBUG):
-                logging.debug(f"{self.session_id}No final transcript available, returning partial: {self.last_partial_transcript[:50]}...")
+            if self.debug_logging_enabled():
+                logging.debug(f"{self.session_id}No final transcript, returning partial: \"{self.last_partial_transcript[:70]}...\"")
             return self.last_partial_transcript
         else:
-            if self.session_id and logging.getLogger().isEnabledFor(logging.DEBUG):
-                logging.debug(f"{self.session_id}No transcript available, returning empty string")
+            if self.debug_logging_enabled():
+                logging.debug(f"{self.session_id}No transcript (final or partial) available, returning empty string.")
             return ""
+
+    def debug_logging_enabled(self) -> bool:
+        """Helper to check if DEBUG level logging is enabled for the current logger."""
+        return logging.getLogger().isEnabledFor(logging.DEBUG)
 
 class TTSProcessor:
     """
     Handles Text-to-Speech (TTS) audio generation, processing, and queuing.
+
+    This class interfaces with a Piper TTS client to synthesize speech from text.
+    It manages the TTS audio stream, resamples it to the desired output rate
+    (e.g., 8kHz for RTP/PCMU), converts it to PCMU format, and queues the
+    resulting audio packets into an RTP queue for playback. It also supports
+    interruption (barge-in) to stop TTS playback when user speech is detected.
     """
     def __init__(self, 
-                 rtp_queue: Queue,
+                 rtp_queue: Queue, # Note: This is stdlib queue.Queue, not asyncio.Queue
                  tts_server_host: str, 
                  tts_server_port: int, 
                  tts_voice: str,
@@ -433,199 +594,333 @@ class TTSProcessor:
                  debug: bool = False):
         """
         Initializes the TTSProcessor.
-        """
-        self.rtp_queue = rtp_queue
-        self.tts_server_host = tts_server_host
-        self.tts_server_port = tts_server_port
-        self.tts_voice = tts_voice
-        self.tts_target_output_rate = tts_target_output_rate
-        self.session_id = session_id
-        self.debug = debug
 
-        self.tts_resampler: torchaudio.transforms.Resample | None = None
+        Args:
+            rtp_queue: The queue where processed TTS audio packets (PCMU) will be placed.
+            tts_server_host: Hostname or IP address of the Piper TTS server.
+            tts_server_port: Port number of the Piper TTS server.
+            tts_voice: The voice to be used for TTS generation (specific to Piper server).
+            tts_target_output_rate: The target sample rate for the output audio (e.g., 8000 Hz for PCMU).
+            session_id: An identifier for the current session, used for contextual logging.
+            debug: If True, enables detailed debug logging for TTS processing.
+        """
+        self.rtp_queue: Queue = rtp_queue # Synchronous queue for RTP audio packets
+        self.tts_server_host: str = tts_server_host
+        self.tts_server_port: int = tts_server_port
+        self.tts_voice: str = tts_voice
+        self.tts_target_output_rate: int = tts_target_output_rate # e.g., 8000 Hz for PCMU
+        self.session_id: str = session_id
+        self.debug: bool = debug
+
+        self.tts_resampler: Optional[torchaudio.transforms.Resample] = None
+        # Piper default output is 22050 Hz, 16-bit mono PCM
         self.tts_input_rate: int = 22050 
-        self.tts_processing_lock = asyncio.Lock()
+        self.tts_processing_lock: asyncio.Lock = asyncio.Lock() # Ensures one TTS generation at a time
+        self._interrupt_event: asyncio.Event = asyncio.Event() # For barge-in support
 
-    async def generate_and_queue_tts_audio(self, text_to_speak: str):
+        logging.info(
+            f"{self.session_id}TTSProcessor initialized: Voice='{self.tts_voice}', "
+            f"TargetRate={self.tts_target_output_rate}Hz, PiperHost={self.tts_server_host}:{self.tts_server_port}"
+        )
+
+    def interrupt(self) -> None:
         """
-        Generates TTS audio, processes it, and queues it for playback.
+        Signals this TTSProcessor to stop its current playback and clears the RTP audio queue.
+        
+        This method is thread-safe as `asyncio.Event.set()` is thread-safe and
+        `queue.Queue.get_nowait()` is used for draining.
         """
+        if self.debug:
+            logging.debug(f"{self.session_id}TTSProcessor: Interrupt signal received.")
+        self._interrupt_event.set() # Signal any ongoing generation to stop
+        
+        # Drain the RTP queue of any pending TTS packets
+        drained_count = 0
+        while not self.rtp_queue.empty():
+            try:
+                self.rtp_queue.get_nowait() # Non-blocking get
+                drained_count += 1
+            except Empty: # Should not happen if rtp_queue.empty() is false, but good practice
+                break 
+        if drained_count > 0 and self.debug:
+            logging.debug(f"{self.session_id}TTSProcessor: Drained {drained_count} packets from RTP queue during interruption.")
+
+    async def generate_and_queue_tts_audio(self, text_to_speak: str) -> None:
+        """
+        Generates TTS audio from `text_to_speak`, processes it, and queues it into `rtp_queue`.
+
+        The process involves:
+        1. Connecting to the Piper TTS server.
+        2. Synthesizing speech for the given text.
+        3. Receiving audio chunks from Piper.
+        4. For each chunk: resampling (if necessary), converting to PCMU, and packetizing.
+        5. Putting packets into the `rtp_queue`.
+        This method can be interrupted by calling `self.interrupt()`.
+
+        Args:
+            text_to_speak: The text string to be synthesized into speech.
+        """
+        self._interrupt_event.clear() # Clear interruption flag at the start of a new generation
+
+        # Ensure only one TTS generation process runs at a time for this instance
         async with self.tts_processing_lock:
             if self.debug:
-                logging.debug(f"{self.session_id}TTSProcessor: generating audio for text: '{text_to_speak[:50]}...'")
+                logging.debug(f"{self.session_id}TTSProcessor: Generating audio for text: \"{text_to_speak[:70]}...\"")
+            
+            # Check if an interruption was signaled right before acquiring the lock or starting
+            if self._interrupt_event.is_set():
+                logging.info(f"{self.session_id}TTSProcessor: TTS generation cancelled at entry due to prior interrupt signal.")
+                return
 
-            q_size = self.rtp_queue.qsize()
-            if q_size > 0:
-                logging.info(f"{self.session_id}TTSProcessor: Draining {q_size} packets from RTP queue before TTS playback.")
+            # Drain RTP queue of any old TTS audio from a previous, possibly un-cancelled, run.
+            # This is a safeguard. Normal interruption should handle queue draining.
+            if not self.rtp_queue.empty():
+                q_size = self.rtp_queue.qsize()
+                logging.info(f"{self.session_id}TTSProcessor: Draining {q_size} stale packets from RTP queue before new TTS playback.")
                 while not self.rtp_queue.empty():
-                    try:
-                        self.rtp_queue.get_nowait() 
-                    except Empty:
-                        break 
+                    try: self.rtp_queue.get_nowait()
+                    except Empty: break
             
             tts_success = False
+            piper_client: Optional[PiperClient] = None # Ensure defined for finally block
+            
             try:
+                # Check for interruption again after initial queue drain and before connecting to Piper
+                if self._interrupt_event.is_set():
+                    logging.info(f"{self.session_id}TTSProcessor: TTS generation cancelled before Piper connection due to interrupt.")
+                    return
+
                 piper_client = PiperClient(
                     server_host=self.tts_server_host,
                     server_port=self.tts_server_port,
-                    session_id=self.session_id
+                    session_id=self.session_id # Pass session ID for Piper client logging
                 )
                 
-                cumulative_pcmu_bytes = bytearray()
-                chunk_size = 160 
-                first_audio_chunk = True
+                cumulative_pcmu_bytes = bytearray() # Buffer for PCMU bytes before packetization
+                rtp_chunk_size_bytes = 160 # Standard for G.711 PCMU in 20ms RTP packets
+                first_audio_chunk_received = True # Flag to initialize resampler on first audio chunk
                 
-                async def on_audio(audio_bytes: bytes):
-                    nonlocal cumulative_pcmu_bytes, first_audio_chunk
+                # Define the callback for handling audio chunks from PiperClient
+                async def on_audio_chunk_received(audio_bytes_from_piper: bytes):
+                    nonlocal cumulative_pcmu_bytes, first_audio_chunk_received
+                    
+                    # If interruption is signaled, stop processing and raise CancelledError
+                    # This will be caught by the main try/except block around piper_client.process_stream
+                    if self._interrupt_event.is_set():
+                        logging.info(f"{self.session_id}TTSProcessor: Interruption detected in on_audio callback.")
+                        raise asyncio.CancelledError("TTS interrupted by user (on_audio_chunk_received)")
+
                     try:
-                        if first_audio_chunk:
-                            first_audio_chunk = False
+                        # Initialize resampler on the first audio chunk if sample rates differ
+                        if first_audio_chunk_received:
+                            first_audio_chunk_received = False
                             if self.tts_input_rate != self.tts_target_output_rate:
-                                if self.debug:
+                                if self.debug: 
                                     logging.debug(f"{self.session_id}TTSProcessor: Initializing TTS resampler: {self.tts_input_rate}Hz -> {self.tts_target_output_rate}Hz")
                                 self.tts_resampler = torchaudio.transforms.Resample(
-                                    orig_freq=self.tts_input_rate,
+                                    orig_freq=self.tts_input_rate, 
                                     new_freq=self.tts_target_output_rate
                                 )
                             elif self.debug:
-                                logging.debug(f"{self.session_id}TTSProcessor: TTS output rate matches target rate ({self.tts_target_output_rate}Hz). No resampling needed.")
+                                logging.debug(f"{self.session_id}TTSProcessor: TTS input rate matches target output rate ({self.tts_target_output_rate}Hz). No resampling needed.")
                         
-                        input_tensor = torch.frombuffer(bytearray(audio_bytes), dtype=torch.int16).float() / 32768.0
+                        # Process the audio chunk: bytes (s16le) -> tensor -> resample (optional) -> clamp -> bytes (s16le) -> PCMU
+                        input_tensor = torch.frombuffer(bytearray(audio_bytes_from_piper), dtype=torch.int16).float() / 32768.0
                         
-                        if self.tts_resampler:
-                            resampled_tensor = self.tts_resampler(input_tensor.unsqueeze(0)).squeeze(0)
-                        else:
-                            resampled_tensor = input_tensor
+                        processed_tensor = self.tts_resampler(input_tensor.unsqueeze(0)).squeeze(0) if self.tts_resampler else input_tensor
+                        clamped_tensor = torch.clamp(processed_tensor, -1.0, 1.0)
+                        # Convert float tensor back to 16-bit PCM bytes
+                        pcm_s16le_bytes = (clamped_tensor * 32767.0).to(torch.int16).numpy().tobytes()
                         
-                        resampled_tensor_clamped = torch.clamp(resampled_tensor, -1.0, 1.0)
-                        pcm_s16le_bytes = (resampled_tensor_clamped * 32768.0).to(torch.int16).numpy().tobytes()
-                        
-                        pcmu_chunk_bytes = audioop.lin2ulaw(pcm_s16le_bytes, 2) 
+                        # Convert 16-bit linear PCM to PCMU (mu-law)
+                        pcmu_chunk_bytes = audioop.lin2ulaw(pcm_s16le_bytes, 2) # 2 is for 16-bit width
                         cumulative_pcmu_bytes.extend(pcmu_chunk_bytes)
                         
-                        while len(cumulative_pcmu_bytes) >= chunk_size:
-                            rtp_payload = cumulative_pcmu_bytes[:chunk_size]
-                            self.rtp_queue.put_nowait(bytes(rtp_payload))
-                            if self.debug:
-                                logging.debug(f"{self.session_id}TTSProcessor: Queued {len(rtp_payload)} bytes of TTS audio for RTP.")
-                            cumulative_pcmu_bytes = cumulative_pcmu_bytes[chunk_size:]
-                            await asyncio.sleep(0) 
+                        # Packetize PCMU bytes into RTP chunk sizes and queue them
+                        while len(cumulative_pcmu_bytes) >= rtp_chunk_size_bytes:
+                            if self._interrupt_event.is_set(): # Check before putting into queue
+                                logging.info(f"{self.session_id}TTSProcessor: Interruption detected before queueing RTP chunk.")
+                                raise asyncio.CancelledError("TTS interrupted by user (before RTP queueing)")
                             
-                    except Exception as audio_e:
-                        logging.error(f"{self.session_id}TTSProcessor: Error processing TTS audio chunk: {audio_e}", exc_info=True)
+                            rtp_payload = cumulative_pcmu_bytes[:rtp_chunk_size_bytes]
+                            self.rtp_queue.put_nowait(bytes(rtp_payload)) # Add to synchronous queue
+                            if self.debug: 
+                                logging.debug(f"{self.session_id}TTSProcessor: Queued {len(rtp_payload)} bytes of TTS audio for RTP.")
+                            cumulative_pcmu_bytes = cumulative_pcmu_bytes[rtp_chunk_size_bytes:]
+                            await asyncio.sleep(0.001) # Briefly yield control to allow other tasks to run
+                            
+                    except asyncio.CancelledError: # Propagate cancellation if it originated here or above
+                        raise
+                    except Exception as audio_processing_error:
+                        logging.error(f"{self.session_id}TTSProcessor: Error processing TTS audio chunk: {audio_processing_error}", exc_info=True)
                 
-                async def on_start(data):
-                    logging.info(f"{self.session_id}TTSProcessor: TTS stream starting: {data.get('message')}")
-                    
-                async def on_end(data):
-                    nonlocal tts_success
-                    tts_success = True
-                    logging.info(f"{self.session_id}TTSProcessor: TTS stream complete: {data.get('message')}")
-                    
-                async def on_error(data):
-                    logging.error(f"{self.session_id}TTSProcessor: TTS error from Piper: {data.get('message')}")
+                # Define simple callbacks for PiperClient stream events
+                async def on_stream_start(data): logging.info(f"{self.session_id}TTSProcessor: Piper TTS stream starting: {data.get('message')}")
+                async def on_stream_end(data): nonlocal tts_success; tts_success = True; logging.info(f"{self.session_id}TTSProcessor: Piper TTS stream complete: {data.get('message')}")
+                async def on_stream_error(data): logging.error(f"{self.session_id}TTSProcessor: Error from Piper TTS stream: {data.get('message')}")
                 
+                # Connect to Piper server
                 if await piper_client.connect():
-                    if await piper_client.synthesize(text_to_speak, voice=self.tts_voice):
-                        await piper_client.process_stream(
-                            on_start=on_start,
-                            on_audio=on_audio,
-                            on_end=on_end,
-                            on_error=on_error
-                        )
-                    await piper_client.close()
+                    # Check for interruption before making the synthesis call
+                    if self._interrupt_event.is_set():
+                        logging.info(f"{self.session_id}TTSProcessor: TTS generation cancelled before Piper synthesize call due to interrupt.")
+                        # No need to return here, finally block will close piper_client
+                    else:
+                        # Start synthesis and process the audio stream
+                        if await piper_client.synthesize(text_to_speak, voice=self.tts_voice):
+                            await piper_client.process_stream(
+                                on_start=on_stream_start,
+                                on_audio=on_audio_chunk_received,
+                                on_end=on_stream_end,
+                                on_error=on_stream_error
+                            )
                 
-                if cumulative_pcmu_bytes: 
-                    if self.debug:
-                        logging.debug(f"{self.session_id}TTSProcessor: Processing remaining {len(cumulative_pcmu_bytes)} TTS PCMU bytes.")
-                    final_payload = bytes(cumulative_pcmu_bytes).ljust(chunk_size, b'\xff') 
+                # After stream processing, handle any remaining bytes in cumulative_pcmu_bytes
+                if not self._interrupt_event.is_set() and cumulative_pcmu_bytes: 
+                    if self.debug: 
+                        logging.debug(f"{self.session_id}TTSProcessor: Processing {len(cumulative_pcmu_bytes)} remaining TTS PCMU bytes.")
+                    # Pad the final payload if it's smaller than rtp_chunk_size_bytes
+                    # Using silence byte 0xFF for PCMU
+                    final_payload = bytes(cumulative_pcmu_bytes).ljust(rtp_chunk_size_bytes, b'\xff') 
                     self.rtp_queue.put_nowait(final_payload)
-                    if self.debug:
-                        logging.debug(f"{self.session_id}TTSProcessor: Queued final {len(final_payload)} bytes of TTS audio.")
+                    if self.debug: 
+                        logging.debug(f"{self.session_id}TTSProcessor: Queued final {len(final_payload)} bytes of TTS audio (padded).")
                 
-                if tts_success:
-                    logging.info(f"{self.session_id}TTSProcessor: Successfully generated and queued audio for: '{text_to_speak[:50]}...'")
-                else:
-                    logging.warning(f"{self.session_id}TTSProcessor: TTS generation did not complete successfully for: '{text_to_speak[:50]}...'")
-
-            except Exception as e:
-                logging.error(f"{self.session_id}TTSProcessor: Error during TTS processing: {e}", exc_info=True)
+                # Log success or failure based on tts_success flag and interrupt status
+                if tts_success and not self._interrupt_event.is_set():
+                    logging.info(f"{self.session_id}TTSProcessor: Successfully generated and queued audio for: \"{text_to_speak[:70]}...\"")
+                elif self._interrupt_event.is_set():
+                    logging.info(f"{self.session_id}TTSProcessor: TTS generation for \"{text_to_speak[:70]}...\" was interrupted.")
+                    tts_success = False # Ensure correct state if interrupted
+                else: # Not interrupted, but tts_success is False (e.g., Piper connection or synthesis error)
+                    logging.warning(f"{self.session_id}TTSProcessor: TTS generation did not complete successfully for: \"{text_to_speak[:70]}...\"")
+            
+            except asyncio.CancelledError: # Catch cancellation of the generate_and_queue_tts_audio task itself
+                logging.info(f"{self.session_id}TTSProcessor: TTS generation task was cancelled (likely by SmartSpeech barge-in).")
+                tts_success = False
+                self._interrupt_event.set() # Ensure event is set if task is cancelled externally
+            except Exception as e: # Catch any other unexpected errors during TTS processing
+                logging.error(f"{self.session_id}TTSProcessor: Unexpected error during TTS processing: {e}", exc_info=True)
+                tts_success = False # Ensure correct state on error
+            finally:
+                # Always ensure Piper client is closed if it was initialized and connected
+                if piper_client and piper_client.is_connected:
+                    await piper_client.close()
+                if self._interrupt_event.is_set():
+                     logging.info(f"{self.session_id}TTSProcessor: TTS processing finished. Interruption signal was active.")
 
 class SmartSpeech(AIEngine):
     """
-    AIEngine implementation integrating Vosk for STT and Piper for TTS.
-    Orchestrates audio processing, VAD, STT transcription, and TTS response.
+    Orchestrates full-duplex speech interaction using Vosk for STT and Piper for TTS.
+
+    This class, derived from `AIEngine`, manages the entire lifecycle of a speech
+    session. It initializes and coordinates helper classes for audio input processing
+    (`AudioProcessor`), voice activity detection (`VADProcessor`), STT transcript
+    handling (`TranscriptHandler`), and TTS audio generation/playback (`TTSProcessor`).
+
+    Key functionalities include:
+    - Starting and stopping the STT engine (Vosk client connection).
+    - Processing incoming audio packets: PCMU decoding, resampling, VAD.
+    - Sending audio to Vosk based on VAD decisions.
+    - Receiving and handling partial and final transcripts from Vosk.
+    - Managing TTS generation in response to final transcripts (simulated LLM interaction).
+    - Implementing barge-in: interrupting TTS playback when user speech is detected.
+    - Handling session closure and resource cleanup.
     """
     
-    def __init__(self, call, cfg):
+    def __init__(self, call: Any, cfg: Config): # Type for 'call' can be more specific if known
         """
-        Initializes the SmartSpeech engine.
-        """
-        self.cfg = Config.get("vosk", cfg)
-        
-        self.b2b_key = call.b2b_key if hasattr(call, 'b2b_key') else None
-        self.session_id = f"[Session:{self.b2b_key}] " if self.b2b_key else ""
-        self.queue: Queue = call.rtp 
-        self._load_config()
-        self._init_components(call)
-        
-        self.receive_task = None
-        self.tts_task = None  
-        self._is_closing = False
-        self._setup_logging()
-        
-        logging.info(f"{self.session_id}SmartSpeech initialized. bypass_vad = {self.bypass_vad}")
+        Initializes the SmartSpeech engine for a given call.
 
-    def _load_config(self):
-        """Loads STT and TTS configurations."""
-        self.vosk_server_url = self.cfg.get("url", "url", "ws://localhost:2700")
-        self.websocket_timeout = self.cfg.get("websocket_timeout", "websocket_timeout", 5.0)
-        self.target_sample_rate = int(self.cfg.get("sample_rate", "sample_rate", 16000))
-        self.channels = self.cfg.get("channels", "channels", 1)
-        self.send_eof = self.cfg.get("send_eof", "send_eof", True)
-        self.debug = self.cfg.get("debug", "debug", False)
+        Args:
+            call: The call object, expected to have attributes like `b2b_key` (optional),
+                  `rtp` (the output RTP queue for TTS audio), `sdp` (for codec negotiation),
+                  and `client_addr`/`client_port` for logging.
+            cfg: The application configuration object.
+        """
+        self.cfg: Config = Config.get("vosk", cfg) # Get Vosk-specific configuration
         
-        self.bypass_vad = self.cfg.get("bypass_vad", "bypass_vad", False)
-        self.vad_threshold = self.cfg.get("vad_threshold", "vad_threshold", 0.25)
-        self.vad_min_speech_ms = self.cfg.get("vad_min_speech_ms", "vad_min_speech_ms", 350)
-        self.vad_min_silence_ms = self.cfg.get("vad_min_silence_ms", "vad_min_silence_ms", 450)
-        self.vad_buffer_chunk_ms = self.cfg.get("vad_buffer_chunk_ms", "vad_buffer_chunk_ms", 600)
-        self.vad_buffer_max_seconds = self.cfg.get("vad_buffer_max_seconds", "vad_buffer_max_seconds", 2.0)
-        self.speech_detection_threshold = self.cfg.get("speech_detection_threshold", "speech_detection_threshold", 1)
-        self.silence_detection_threshold = self.cfg.get("silence_detection_threshold", "silence_detection_threshold", 2)
+        # Session identification for logging
+        self.b2b_key: Optional[str] = call.b2b_key if hasattr(call, 'b2b_key') else None
+        self.session_id: str = f"[Session:{self.b2b_key}] " if self.b2b_key else "[Session:Unknown] "
+        
+        self.queue: Queue = call.rtp # RTP queue for outgoing TTS audio (PCMU packets)
+        
+        self._load_config()      # Load specific parameters from config
+        self._init_components(call) # Initialize helper components
+        
+        self.receive_task: Optional[asyncio.Task] = None # Task for receiving Vosk transcripts
+        self.tts_task: Optional[asyncio.Task] = None     # Task for TTS generation
+        self._is_closing: bool = False                   # Flag to indicate session closure is in progress
+        
+        self._setup_logging() # Configure logging level based on settings
+        
+        logging.info(f"{self.session_id}SmartSpeech engine initialized. VAD Bypass: {self.bypass_vad}")
+
+    def _load_config(self) -> None:
+        """Loads STT, VAD, and TTS configurations from the application config."""
+        # Vosk STT Server settings
+        self.vosk_server_url: str = self.cfg.get("url", "url", "ws://localhost:2700")
+        self.websocket_timeout: float = self.cfg.get("websocket_timeout", "websocket_timeout", 5.0)
+        self.target_sample_rate: int = int(self.cfg.get("sample_rate", "sample_rate", 16000)) # For STT
+        self.channels: int = self.cfg.get("channels", "channels", 1) # Audio channels for STT
+        self.send_eof: bool = self.cfg.get("send_eof", "send_eof", True) # Send EOF to Vosk
+        self.debug: bool = self.cfg.get("debug", "debug", False) # General debug flag for this session
+        
+        # VAD settings
+        self.bypass_vad: bool = self.cfg.get("bypass_vad", "bypass_vad", False)
+        self.vad_threshold: float = self.cfg.get("vad_threshold", "vad_threshold", 0.25)
+        self.vad_min_speech_ms: int = self.cfg.get("vad_min_speech_ms", "vad_min_speech_ms", 150)
+        self.vad_min_silence_ms: int = self.cfg.get("vad_min_silence_ms", "vad_min_silence_ms", 450)
+        self.vad_buffer_chunk_ms: int = self.cfg.get("vad_buffer_chunk_ms", "vad_buffer_chunk_ms", 600)
+        # self.vad_buffer_max_seconds: float = self.cfg.get("vad_buffer_max_seconds", "vad_buffer_max_seconds", 2.0) # Currently unused
+        self.speech_detection_threshold: int = self.cfg.get("speech_detection_threshold", "speech_detection_threshold", 1)
+        self.silence_detection_threshold: int = self.cfg.get("silence_detection_threshold", "silence_detection_threshold", 1)
             
-        self.tts_server_host_cfg = self.cfg.get("host", "TTS_HOST", "localhost")
-        self.tts_server_port_cfg = int(self.cfg.get("port", "TTS_PORT", 8000))
-        self.tts_voice_cfg = self.cfg.get("voice", "TTS_VOICE", "tr_TR-fahrettin-medium")
-        self.tts_target_output_rate_cfg = 8000  
+        # Piper TTS Server settings
+        self.tts_server_host_cfg: str = self.cfg.get("host", "TTS_HOST", "localhost")
+        self.tts_server_port_cfg: int = int(self.cfg.get("port", "TTS_PORT", 8000))
+        self.tts_voice_cfg: str = self.cfg.get("voice", "TTS_VOICE", "tr_TR-fahrettin-medium")
+        self.tts_target_output_rate_cfg: int = 8000  # TTS output target rate (e.g., for PCMU)
         
-        logging.info(f"{self.session_id}Vosk URL: {self.vosk_server_url}, Target STT Rate: {self.target_sample_rate}")
-        logging.info(f"{self.session_id}TTS Config: Host={self.tts_server_host_cfg}:{self.tts_server_port_cfg}, Voice={self.tts_voice_cfg}, TargetRate={self.tts_target_output_rate_cfg}")
+        logging.info(f"{self.session_id}Vosk STT URL: {self.vosk_server_url}, Target STT Rate: {self.target_sample_rate}Hz")
+        logging.info(
+            f"{self.session_id}TTS Config: Host={self.tts_server_host_cfg}:{self.tts_server_port_cfg}, "
+            f"Voice={self.tts_voice_cfg}, Target Output Rate={self.tts_target_output_rate_cfg}Hz"
+        )
+        logging.info(
+            f"{self.session_id}VAD Config: Bypass={self.bypass_vad}, Threshold={self.vad_threshold}, "
+            f"MinSpeechMs={self.vad_min_speech_ms}, MinSilenceMs={self.vad_min_silence_ms}, "
+            f"BufferChunkMs={self.vad_buffer_chunk_ms}, SpeechDetectThresh={self.speech_detection_threshold}, "
+            f"SilenceDetectThresh={self.silence_detection_threshold}"
+        )
 
-    def _init_components(self, call):
-        """Initializes various processing components."""
-        self.call = call
-        self.client_addr = call.client_addr
-        self.client_port = call.client_port
-        self.codec = self.choose_codec(call.sdp)
+    def _init_components(self, call: Any) -> None:
+        """Initializes all processing components (Audio, VAD, Transcript, TTS, Vosk client)."""
+        self.call: Any = call # Store call object
+        self.client_addr: Tuple[str, int] = call.client_addr
+        self.client_port: int = call.client_port # For logging purposes
+        self.codec: PCMU = self.choose_codec(call.sdp) # Determine audio codec from SDP
         
-        self.audio_processor = AudioProcessor(
+        # Audio Processor for input audio (PCMU -> PCM for STT)
+        self.audio_processor: AudioProcessor = AudioProcessor(
             target_sample_rate=self.target_sample_rate,
             debug=self.debug,
             session_id=self.session_id
         )
         
-        vad_detector = VADDetector(
-            sample_rate=self.target_sample_rate,
+        # VAD Detector instance (e.g., Silero VAD)
+        vad_detector_instance = VADDetector(
+            sample_rate=self.target_sample_rate, # VAD model operates on resampled audio
             threshold=self.vad_threshold,
             min_speech_duration_ms=self.vad_min_speech_ms,
             min_silence_duration_ms=self.vad_min_silence_ms
         )
         
-        self.vad_processor = VADProcessor(
-            vad_detector=vad_detector,
+        # VAD Processor to manage VAD state and buffering
+        self.vad_processor: VADProcessor = VADProcessor(
+            vad_detector=vad_detector_instance,
             target_sample_rate=self.target_sample_rate,
-            audio_processor=self.audio_processor,
             vad_buffer_chunk_ms=self.vad_buffer_chunk_ms,
             speech_detection_threshold=self.speech_detection_threshold,
             silence_detection_threshold=self.silence_detection_threshold,
@@ -633,14 +928,20 @@ class SmartSpeech(AIEngine):
             session_id=self.session_id
         )
         
+        # If VAD is bypassed, VADProcessor is always in "speech active" mode
         if self.bypass_vad:
             self.vad_processor.speech_active = True
+            logging.info(f"{self.session_id}VAD is bypassed. All audio will be sent to STT.")
         
-        self.transcript_handler = TranscriptHandler(session_id=self.session_id)
-        self.vosk_client = VoskClient(self.vosk_server_url, timeout=self.websocket_timeout)
+        # Transcript Handler to manage STT results
+        self.transcript_handler: TranscriptHandler = TranscriptHandler(session_id=self.session_id)
         
-        self.tts_processor = TTSProcessor(
-            rtp_queue=self.queue,
+        # Vosk Client for STT communication
+        self.vosk_client: VoskClient = VoskClient(self.vosk_server_url, timeout=self.websocket_timeout)
+        
+        # TTS Processor for generating speech output
+        self.tts_processor: TTSProcessor = TTSProcessor(
+            rtp_queue=self.queue, # Output queue for TTS audio packets
             tts_server_host=self.tts_server_host_cfg,
             tts_server_port=self.tts_server_port_cfg,
             tts_voice=self.tts_voice_cfg,
@@ -649,121 +950,205 @@ class SmartSpeech(AIEngine):
             debug=self.debug
         )
         
+        # Set the callback in TranscriptHandler for when a final transcript is ready
         self.transcript_handler.on_final_transcript = self._handle_final_transcript
+        logging.info(f"{self.session_id}All SmartSpeech components initialized.")
 
-    def _setup_logging(self):
-        """Sets up basic logging configuration."""
-        logging.basicConfig(level=logging.INFO)
+    def _setup_logging(self) -> None:
+        """Configures the logging level for the session based on the debug flag."""
+        # Note: BasicConfig should ideally be called once at application startup.
+        # If called multiple times, it might not behave as expected unless `force=True` (Python 3.8+)
+        # is used, or if handlers are manually managed.
+        # For simplicity here, we assume it's okay or handled by a higher-level logger setup.
+        # logging.basicConfig(level=logging.INFO) # Avoid re-calling basicConfig if already set
         if self.debug:
-            logging.getLogger().setLevel(logging.DEBUG)
-            logging.debug(f"{self.session_id}Debug logging enabled")
+            logging.getLogger().setLevel(logging.DEBUG) # Set global log level to DEBUG if self.debug is true
+            logging.debug(f"{self.session_id}Debug logging enabled for SmartSpeech session.")
+        else:
+            # If not debug, ensure global level isn't stuck at DEBUG from a previous session
+            # This depends on how logging is managed globally. A dedicated logger per session might be better.
+            # For now, this assumes a shared root logger.
+            pass # logging.getLogger().setLevel(logging.INFO) # Or set to a configured default
 
-    def choose_codec(self, sdp):
-        """Chooses PCMU codec from SDP."""
+    def choose_codec(self, sdp: str) -> PCMU: # Assuming PCMU is the only supported/chosen one
+        """
+        Chooses a supported audio codec from the SDP offer.
+
+        Currently, it iterates through codecs in the SDP and selects the first
+        instance of PCMU (payload type 0).
+
+        Args:
+            sdp: The Session Description Protocol (SDP) string from the call.
+
+        Returns:
+            A PCMU codec object if found.
+
+        Raises:
+            UnsupportedCodec: If PCMU (payload type 0) is not found in the SDP.
+        """
         codecs = get_codecs(sdp)
         for c in codecs:
-            if c.payloadType == 0: 
-                return PCMU(c)
-        raise UnsupportedCodec("No supported codec (PCMU) found in SDP.")
+            if c.payloadType == 0: # PCMU typically has payload type 0
+                logging.info(f"{self.session_id}PCMU codec selected based on SDP.")
+                return PCMU(c) # Return an instance of PCMU codec wrapper
+        raise UnsupportedCodec(f"{self.session_id}No supported codec (PCMU/0) found in SDP.")
 
-    async def start(self):
-        """Starts the STT engine and connects to the Vosk server."""
+    async def start(self) -> bool:
+        """
+        Starts the SmartSpeech engine for the session.
+
+        This involves connecting to the Vosk STT server, sending initial configuration,
+        and starting the task to receive transcripts.
+
+        Returns:
+            True if successfully started, False otherwise (e.g., connection to Vosk failed).
+        """
         logging.info(f"{self.session_id}SmartSpeech engine starting...")
+        self._is_closing = False # Reset closing flag on start
         
         try:
-            self._is_closing = False
-            await self.vosk_client.connect()
-            config = {
-                "config": {
-                    "sample_rate": self.target_sample_rate,
-                    "num_channels": self.channels
-                }
-            }
-            await self.vosk_client.send(config)
-            self.receive_task = asyncio.create_task(self.receive_transcripts())
-            logging.info(f"{self.session_id}SmartSpeech engine started successfully.")
+            # Connect to Vosk server
+            if not await self.vosk_client.connect():
+                logging.error(f"{self.session_id}Failed to connect to Vosk server. Cannot start SmartSpeech engine.")
+                return False
+            
+            # Send initial configuration to Vosk (e.g., sample rate)
+            vosk_config = { "config": { "sample_rate": self.target_sample_rate, "num_channels": self.channels } }
+            if not await self.vosk_client.send(vosk_config):
+                logging.error(f"{self.session_id}Failed to send initial config to Vosk. Disconnecting.")
+                await self.vosk_client.disconnect()
+                return False
+                
+            # Start the background task to receive and process transcripts from Vosk
+            self.receive_task = asyncio.create_task(self.receive_transcripts(), name=f"VoskReceive-{self.session_id}")
+            logging.info(f"{self.session_id}SmartSpeech engine started successfully. Listening for transcripts.")
             return True
+            
         except Exception as e:
-            logging.error(f"{self.session_id}Error starting SmartSpeech engine: {e}", exc_info=True)
+            logging.error(f"{self.session_id}Error during SmartSpeech engine start: {e}", exc_info=True)
+            if self.vosk_client and self.vosk_client.is_connected:
+                await self.vosk_client.disconnect() # Attempt cleanup
             return False
     
-    async def stop(self):
-        """Stops the STT engine and closes connections."""
-        logging.info(f"{self.session_id}Stopping SmartSpeech engine.")
+    async def stop(self) -> bool:
+        """
+        Stops the SmartSpeech engine components related to STT.
+
+        This method sends an EOF signal to the Vosk server (if enabled and connected),
+        disconnects from the Vosk server, and cancels the transcript receiving task.
+        It's primarily for STT shutdown, while `close` handles full session cleanup.
+
+        Returns:
+            True if STT components were stopped successfully, False otherwise.
+        """
+        logging.info(f"{self.session_id}Stopping SmartSpeech STT components.")
         
         try:
+            # Send EOF to Vosk server to finalize transcription if connected and enabled
             await self._send_eof_if_enabled()
+            
+            # Disconnect from Vosk server if connected
             if self.vosk_client.is_connected:
                 try:
                     await self.vosk_client.disconnect()
-                    logging.info(f"{self.session_id}Disconnected from Vosk server during stop.")
+                    logging.info(f"{self.session_id}Disconnected from Vosk server during stop sequence.")
                 except Exception as e_disconnect:
                     logging.error(f"{self.session_id}Error disconnecting Vosk client during stop: {e_disconnect}", exc_info=True)
             
+            # Cancel the transcript receiving task
             await self._cancel_receive_task() 
-            logging.info(f"{self.session_id}SmartSpeech engine stopped successfully.")
+            
+            logging.info(f"{self.session_id}SmartSpeech STT components stopped successfully.")
             return True
         except Exception as e:
-            logging.error(f"{self.session_id}Error stopping SmartSpeech engine: {e}", exc_info=True)
+            logging.error(f"{self.session_id}Error stopping SmartSpeech STT components: {e}", exc_info=True)
             return False
 
-    async def _manage_task(self, task, timeout=2.0):
-        """Manages an asyncio task with timeout and cancellation."""
-        task_name = getattr(task, 'get_name', lambda: "Unknown Task")() 
-        if task and not task.done():
-            try:
-                await asyncio.wait_for(task, timeout=timeout)
-                return True
-            except asyncio.TimeoutError:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-                logging.warning(f"{self.session_id}Task {task_name} was cancelled due to timeout.")
-                return False
-            except Exception as e_wait:
-                logging.error(f"{self.session_id}Unexpected error managing task {task_name}: {e_wait}", exc_info=True)
-                if not task.done():
-                    task.cancel()
-                    try:
-                        await task 
-                    except asyncio.CancelledError:
-                        pass 
-                    except Exception as e_final_cancel:
-                        logging.error(f"{self.session_id}Error during final cancellation of task {task_name}: {e_final_cancel}", exc_info=True)
-                return False
-        return True
+    async def _manage_task(self, task: Optional[asyncio.Task], timeout: float = 2.0) -> bool:
+        """
+        Manages an asyncio task with timeout, cancellation, and logging.
 
-    async def _cancel_receive_task(self):
-        """Cancels the transcript receive task."""
+        Args:
+            task: The asyncio.Task to manage.
+            timeout: How long to wait for the task to complete before cancelling.
+
+        Returns:
+            True if the task completed (or was already done), False if it timed out or an error occurred.
+        """
+        if not task or task.done():
+            return True # Nothing to manage or already completed
+
+        task_name = task.get_name() if hasattr(task, 'get_name') else "Unnamed Task"
+        try:
+            await asyncio.wait_for(task, timeout=timeout)
+            return True # Task completed within timeout
+        except asyncio.TimeoutError:
+            logging.warning(f"{self.session_id}Task '{task_name}' timed out after {timeout}s. Cancelling.")
+            task.cancel()
+            try:
+                await task # Await cancellation
+            except asyncio.CancelledError:
+                logging.info(f"{self.session_id}Task '{task_name}' was successfully cancelled after timeout.")
+            except Exception as e_cancel:
+                logging.error(f"{self.session_id}Error awaiting cancellation of task '{task_name}': {e_cancel}", exc_info=True)
+            return False
+        except asyncio.CancelledError: # If the task was cancelled by something else before wait_for
+            logging.info(f"{self.session_id}Task '{task_name}' was already cancelled externally.")
+            # Ensure it's fully awaited if it was cancelled but not yet awaited by the canceller
+            if not task.done(): # Should be done if CancelledError was raised from await task
+                 try: await task
+                 except asyncio.CancelledError: pass # Expected
+            return True # Treat as "managed"
+        except Exception as e_wait:
+            logging.error(f"{self.session_id}Unexpected error managing task '{task_name}': {e_wait}", exc_info=True)
+            if not task.done(): # If an unexpected error didn't terminate it, try to cancel
+                task.cancel()
+                try: await task
+                except asyncio.CancelledError: pass 
+                except Exception as e_final_cancel:
+                    logging.error(f"{self.session_id}Error during final cancellation attempt of task '{task_name}': {e_final_cancel}", exc_info=True)
+            return False
+
+    async def _cancel_receive_task(self) -> None:
+        """Cancels and awaits the Vosk transcript receiving task (`self.receive_task`)."""
         if self.receive_task:
             if self.debug:
-                logging.debug(f"{self.session_id}Cancelling receive_task.")
+                logging.debug(f"{self.session_id}Cancelling Vosk transcript receive_task.")
             if not await self._manage_task(self.receive_task, timeout=1.0): 
-                logging.warning(f"{self.session_id}Receive task did not complete cleanly after cancellation request.")
-            self.receive_task = None 
+                logging.warning(f"{self.session_id}Vosk receive_task did not complete cleanly after cancellation request.")
+            self.receive_task = None # Clear the task reference
         elif self.debug:
-            logging.debug(f"{self.session_id}Receive_task is None, no cancellation needed.")
+            logging.debug(f"{self.session_id}Vosk receive_task is None, no cancellation needed.")
 
-    async def _send_eof_if_enabled(self):
-        """Sends EOF to Vosk if enabled and connected."""
-        if self.send_eof and self.vosk_client.is_connected:
+    async def _send_eof_if_enabled(self) -> None:
+        """Sends an EOF signal to the Vosk server if `self.send_eof` is True and connected."""
+        if self.send_eof and self.vosk_client and self.vosk_client.is_connected:
             try:
-                logging.debug(f"{self.session_id}Sending EOF to Vosk server.")
-                await self.vosk_client.send(json.dumps({"eof": 1}))
-                await asyncio.sleep(0.1) 
-            except Exception as e:
+                logging.debug(f"{self.session_id}Sending EOF signal to Vosk server.")
+                await self.vosk_client.send_eof() # VoskClient's send_eof already handles the JSON part
+            except Exception as e: # Catch exceptions from VoskClient.send_eof or underlying websocket
                 logging.error(f"{self.session_id}Error sending EOF to Vosk: {e}", exc_info=True)
 
-    async def send(self, audio: bytes):
-        """Processes and sends audio to Vosk, via VAD if enabled."""
+    async def send(self, audio: bytes) -> None:
+        """
+        Processes and sends an incoming audio chunk for STT.
+
+        This method is called by the RTP media server (or equivalent) with raw
+        audio bytes (expected PCMU). It performs:
+        1. Audio processing (PCMU decode, resample, normalize) via `AudioProcessor`.
+        2. VAD processing (if not bypassed) via `VADProcessor`.
+        3. If VAD indicates speech, the audio is sent to the Vosk server via `VoskClient`.
+           This step also handles TTS barge-in if user speech is detected during TTS playback.
+
+        Args:
+            audio: Raw audio bytes (e.g., from an RTP packet, typically PCMU).
+        """
         if self._is_closing: 
             logging.warning(f"{self.session_id}Attempted to send audio while session is closing. Skipping.")
             return
 
-        if not self.vosk_client.is_connected:
-            logging.warning(f"{self.session_id}WebSocket not connected. Cannot send audio.")
+        if not self.vosk_client or not self.vosk_client.is_connected:
+            logging.warning(f"{self.session_id}Vosk client not connected. Cannot send audio.")
             return
             
         try:
@@ -771,149 +1156,239 @@ class SmartSpeech(AIEngine):
                 logging.warning(f"{self.session_id}Unexpected audio type received: {type(audio)}, expected bytes. Skipping.")
                 return
 
-            resampled_tensor, processed_audio_bytes = self.audio_processor.process_bytes_audio(audio)
+            # Process the raw audio (e.g., decode PCMU, resample)
+            resampled_tensor, processed_audio_bytes_for_stt = self.audio_processor.process_bytes_audio(audio)
             
-            if processed_audio_bytes is None:
-                return
+            if processed_audio_bytes_for_stt is None: # Processing might fail or return no data
+                return # Error already logged by AudioProcessor
                 
-            await self._handle_processed_audio(resampled_tensor, processed_audio_bytes)
+            # Pass processed audio to VAD (or directly to STT if VAD is bypassed)
+            await self._handle_processed_audio(resampled_tensor, processed_audio_bytes_for_stt)
                 
         except Exception as e:
-            logging.error(f"{self.session_id}Unhandled error in send method: {e}", exc_info=True)
+            logging.error(f"{self.session_id}Unhandled error in SmartSpeech.send method: {e}", exc_info=True)
 
-    async def _handle_processed_audio(self, tensor: torch.Tensor | None, audio_bytes: bytes):
-        """Handles processed audio, sending to VAD or directly to Vosk."""
+    async def _handle_processed_audio(self, 
+                                      tensor: Optional[torch.Tensor], 
+                                      audio_bytes_for_stt: bytes) -> None:
+        """
+        Handles audio after initial processing (e.g., resampling).
+
+        If VAD is bypassed, sends audio directly to STT. Otherwise, adds audio
+        to `VADProcessor`. If VAD signals speech start, interrupts any ongoing TTS
+        (barge-in) and then sends VAD-processed audio to STT.
+
+        Args:
+            tensor: The audio tensor corresponding to `audio_bytes_for_stt`. Used by VADProcessor
+                    if VAD is not bypassed, for deriving number of samples. Can be None if
+                    AudioProcessor failed to produce a tensor but still provided bytes.
+            audio_bytes_for_stt: The 16-bit PCM audio bytes ready for STT or VAD.
+        """
         if self.debug: 
-            logging.debug(f"{self.session_id}Handling processed audio: {len(audio_bytes)} bytes")
+            logging.debug(f"{self.session_id}Handling processed audio chunk: {len(audio_bytes_for_stt)} bytes for STT/VAD.")
         
         if self.bypass_vad:
+            # VAD is bypassed, send audio directly to Vosk STT server
             if self.debug: 
-                hex_preview = ' '.join([f'{b:02x}' for b in audio_bytes[:20]])
-                logging.debug(f"{self.session_id}Sending audio bytes directly (VAD bypassed): len={len(audio_bytes)}, start_hex={hex_preview}")
-            await self.vosk_client.send_audio(audio_bytes)
-        else:
-            num_samples = tensor.shape[0] if tensor is not None else len(audio_bytes) // 2 
-            was_processed, is_speech, buffer_bytes = await self.vad_processor.add_audio(
-                audio_bytes, num_samples)
+                hex_preview = ' '.join([f'{b:02x}' for b in audio_bytes_for_stt[:20]])
+                logging.debug(f"{self.session_id}Sending audio directly to STT (VAD bypassed): len={len(audio_bytes_for_stt)}, preview_hex={hex_preview}")
+            if self.vosk_client and self.vosk_client.is_connected:
+                await self.vosk_client.send_audio(audio_bytes_for_stt)
+            else:
+                logging.warning(f"{self.session_id}Vosk client not available for sending audio (VAD bypassed).")
+        else: # VAD is active
+            # Determine number of samples for VADProcessor. If tensor is None, estimate from bytes (assuming 16-bit mono).
+            num_samples = tensor.shape[0] if tensor is not None else len(audio_bytes_for_stt) // 2 
+            
+            # Add audio to VADProcessor, which buffers and runs VAD model internally
+            was_vad_buffer_processed, is_speech_in_vad_chunk, vad_output_buffer_bytes = \
+                await self.vad_processor.add_audio(audio_bytes_for_stt, num_samples)
                 
-            if was_processed and is_speech and buffer_bytes:
-                if self.debug: 
-                    hex_preview_vad = ' '.join([f'{b:02x}' for b in buffer_bytes[:20]])
-                    logging.debug(f"{self.session_id}Sending VAD buffer bytes: len={len(buffer_bytes)}, start_hex={hex_preview_vad}")
-                await self.vosk_client.send_audio(buffer_bytes)
+            if was_vad_buffer_processed and is_speech_in_vad_chunk:
+                # VAD processed a full chunk and detected speech (or ongoing speech state)
+                
+                # Barge-in: If TTS is playing and user starts speaking, interrupt TTS.
+                if self.tts_task and not self.tts_task.done():
+                    logging.info(f"{self.session_id}User speech detected during TTS playback. Interrupting TTS (barge-in).")
+                    self.tts_processor.interrupt() # Signal TTSProcessor to stop queuing and clear its queue
+                    self.tts_task.cancel() # Cancel the asyncio task running TTS generation
+                    try:
+                        await self.tts_task # Await the cancellation to complete
+                    except asyncio.CancelledError:
+                        logging.info(f"{self.session_id}TTS task successfully cancelled due to barge-in.")
+                    except Exception as e_cancel:
+                        logging.error(f"{self.session_id}Error awaiting cancelled TTS task during barge-in: {e_cancel}", exc_info=True)
+                    self.tts_task = None # Clear the reference, task is handled
 
-    async def receive_transcripts(self):
-        """Receives and processes transcripts from Vosk server."""
+                # Send the audio chunk from VAD to STT server (if VAD provided bytes)
+                if vad_output_buffer_bytes:
+                    if self.debug: 
+                        hex_preview_vad = ' '.join([f'{b:02x}' for b in vad_output_buffer_bytes[:20]])
+                        logging.debug(
+                            f"{self.session_id}Sending VAD output buffer to STT: "
+                            f"len={len(vad_output_buffer_bytes)}, preview_hex={hex_preview_vad}"
+                        )
+                    if self.vosk_client and self.vosk_client.is_connected:
+                        await self.vosk_client.send_audio(vad_output_buffer_bytes)
+                    else:
+                        logging.warning(f"{self.session_id}Vosk client not available for sending VAD audio.")
+            # Additional cases for logging or specific actions based on VAD output:
+            # elif was_vad_buffer_processed and not is_speech_in_vad_chunk:
+            #     if self.debug: logging.debug(f"{self.session_id}VAD processed a silent chunk.")
+            # else: # was_vad_buffer_processed is False
+            #     if self.debug: logging.debug(f"{self.session_id}VAD buffer is still accumulating audio.")
+
+
+    async def receive_transcripts(self) -> None:
+        """
+        Continuously receives and processes STT results from the Vosk server.
+
+        This method runs as a background task (`self.receive_task`). It listens for
+        messages from `VoskClient.receive_result()`, handles potential WebSocket
+        connection issues (including reconnection attempts), and passes valid
+        transcript messages to `TranscriptHandler.handle_message()`.
+        The loop terminates if the session is closing or if reconnection fails repeatedly.
+        """
         try:
             reconnect_attempts = 0
-            max_reconnect_attempts = 5  
+            max_reconnect_attempts = 5  # Max attempts before giving up
             
-            while True:
+            while not self._is_closing: # Loop until session closure is signaled
                 try:
+                    if not self.vosk_client or not self.vosk_client.is_connected:
+                        # Attempt to reconnect if not connected and not closing
+                        logging.warning(f"{self.session_id}Vosk client disconnected. Attempting reconnect...")
+                        if await self._try_reconnect(reconnect_attempts, max_reconnect_attempts):
+                            reconnect_attempts = 0 # Reset attempts on successful reconnect
+                        else:
+                            reconnect_attempts +=1
+                            if reconnect_attempts >= max_reconnect_attempts:
+                                logging.error(f"{self.session_id}Max Vosk reconnection attempts reached. Stopping transcript reception.")
+                                break # Exit loop if max attempts failed
+                            continue # Try to reconnect in the next iteration after backoff
+                    
+                    # Receive result from Vosk client (with timeout)
                     message = await self.vosk_client.receive_result()
                     
-                    if self.debug:
-                        logging.debug(f"{self.session_id}Vosk response received: {message}")
+                    if self.debug and message is not None: # Log if a message (not timeout None) was received
+                        logging.debug(f"{self.session_id}Raw Vosk response received: \"{message[:70]}...\"")
                     
                     if message is None:
-                        logging.debug(f"{self.session_id}Timeout or no new message from Vosk (normal during silence).") 
-                        if not self.vosk_client.is_connected:
-                            logging.error(f"{self.session_id}WebSocket connection lost during transcript reception")
-                            if self._is_closing or self.call.terminated:
-                                logging.info(f"{self.session_id}Session is closing, not attempting to reconnect")
-                                break
-                                
-                            success = await self._try_reconnect(reconnect_attempts, max_reconnect_attempts)
-                            if success:
-                                reconnect_attempts = 0
-                            else:
-                                reconnect_attempts += 1
-                                if reconnect_attempts >= max_reconnect_attempts:
-                                    logging.error(f"{self.session_id}Maximum reconnection attempts reached. Giving up.")
-                                    break
-                        continue
+                        # Timeout or no new message from Vosk (normal during silence or if connection dropped)
+                        # If connection dropped, is_connected will be false, handled by next loop iteration's check
+                        if self.vosk_client and not self.vosk_client.is_connected and not self._is_closing:
+                            logging.warning(f"{self.session_id}Vosk connection found closed after receive_result timeout.")
+                            # Reconnection will be attempted in the next iteration by the check at the loop start
+                        continue # Continue to next receive attempt or reconnection
                     
-                    reconnect_attempts = 0
+                    reconnect_attempts = 0 # Reset on successful message receipt
+                    
+                    # Process the received message using TranscriptHandler
                     if not await self.transcript_handler.handle_message(message):
-                        logging.warning(f"{self.session_id}Transcript handler failed to process message.")
+                        logging.warning(f"{self.session_id}Transcript handler failed to process message: {message[:100]}...")
                     
                 except websockets.exceptions.ConnectionClosed as conn_err:
-                    if self._is_closing or self.call.terminated:
-                        logging.info(f"{self.session_id}WebSocket connection closed as part of session shutdown (Code: {conn_err.code}).")
-                        break 
-                    
-                    logging.error(f"{self.session_id}WebSocket connection closed unexpectedly: {conn_err}", exc_info=True)
-                    self.vosk_client.is_connected = False 
-                    
-                    if await self._try_reconnect(reconnect_attempts, max_reconnect_attempts):
-                        reconnect_attempts = 0 
-                    else:
-                        reconnect_attempts += 1
-                        if reconnect_attempts >= max_reconnect_attempts:
-                            logging.error(f"{self.session_id}Maximum reconnection attempts reached. Stopping transcript reception.")
-                            break 
+                    # This exception might be raised by receive_result if not handled internally by VoskClient
+                    # or if it occurs between is_connected check and recv()
+                    logging.error(f"{self.session_id}WebSocket connection closed unexpectedly in receive_transcripts: {conn_err}", exc_info=True)
+                    if self.vosk_client: self.vosk_client.is_connected = False # Ensure state is updated
+                    if self._is_closing or (hasattr(self.call, 'terminated') and self.call.terminated):
+                        logging.info(f"{self.session_id}WebSocket connection closed during session shutdown (Code: {conn_err.code}).")
+                        break # Exit loop if closing
+                    # Reconnection will be attempted by the check at the start of the loop
                 except asyncio.CancelledError:
                     logging.info(f"{self.session_id}Transcript receive task was cancelled.")
-                    raise 
-                except Exception as e:
+                    raise # Propagate cancellation
+                except Exception as e: # Catch any other unexpected errors in the loop
                     logging.error(f"{self.session_id}Unexpected error in receive_transcripts loop: {e}", exc_info=True)
+                    # Brief pause before retrying to prevent rapid error looping
                     await asyncio.sleep(1) 
             
-            logging.info(f"{self.session_id}Exiting receive_transcripts loop.")
+            logging.info(f"{self.session_id}Exiting Vosk transcript receive_transcripts loop (closing: {self._is_closing}).")
+        except asyncio.CancelledError: # Catch cancellation of the receive_transcripts task itself
+             logging.info(f"{self.session_id}Vosk transcript receive_transcripts task definitively cancelled.")
+        except Exception as e_outer: # Catch any unexpected error that might break the outer loop
+            logging.critical(f"{self.session_id}Fatal error in receive_transcripts outer loop: {e_outer}", exc_info=True)
 
-    async def _try_reconnect(self, attempts: int, max_attempts: int) -> bool:
-        """Attempts to reconnect to the Vosk server with backoff."""
-        if attempts >= max_attempts:
-            logging.error(f"{self.session_id}Maximum reconnection attempts ({max_attempts}) reached. Giving up.")
+
+    async def _try_reconnect(self, current_attempts: int, max_attempts: int) -> bool:
+        """
+        Attempts to reconnect to the Vosk server with exponential backoff.
+
+        Args:
+            current_attempts: The number of reconnection attempts made so far.
+            max_attempts: The maximum number of reconnection attempts before giving up.
+
+        Returns:
+            True if reconnection was successful, False otherwise.
+        """
+        if current_attempts >= max_attempts:
+            logging.error(f"{self.session_id}Maximum Vosk reconnection attempts ({max_attempts}) reached. Giving up.")
             return False
             
-        attempt_number = attempts + 1
-        backoff_time = min(2 ** attempt_number, 10) 
+        attempt_number = current_attempts + 1
+        # Exponential backoff: 2s, 4s, 8s, capped at 10s
+        backoff_time = min(2 ** attempt_number, 10)  
             
-        logging.info(f"{self.session_id}Attempting to reconnect to Vosk server (attempt {attempt_number}/{max_attempts}). Waiting {backoff_time}s.")
+        logging.info(
+            f"{self.session_id}Attempting to reconnect to Vosk server "
+            f"(attempt {attempt_number}/{max_attempts}). Waiting {backoff_time}s."
+        )
         await asyncio.sleep(backoff_time) 
         
         try:
-            await self.vosk_client.connect() 
-            if not self.vosk_client.is_connected: 
-                 logging.error(f"{self.session_id}Failed to reconnect to Vosk server (connection status false).")
-                 return False
+            # Attempt to connect and re-send initial config
+            if not await self.vosk_client.connect():
+                logging.warning(f"{self.session_id}Failed to reconnect to Vosk server (attempt {attempt_number}).")
+                return False
 
-            logging.info(f"{self.session_id}Successfully reconnected to Vosk server.")
+            logging.info(f"{self.session_id}Successfully reconnected to Vosk server (attempt {attempt_number}).")
+            vosk_config = { "config": { "sample_rate": self.target_sample_rate, "num_channels": self.channels } }
+            if not await self.vosk_client.send(vosk_config):
+                logging.error(f"{self.session_id}Failed to send initial config to Vosk after reconnection. Disconnecting.")
+                await self.vosk_client.disconnect()
+                return False
             
-            config_payload = {
-                "config": {
-                    "sample_rate": self.target_sample_rate,
-                    "num_channels": self.channels
-                }
-            }
-            await self.vosk_client.send(config_payload)
             logging.info(f"{self.session_id}Resent configuration to Vosk server after reconnection.")
-            return True
+            return True # Reconnection successful
             
         except Exception as reconnect_error:
-            logging.error(f"{self.session_id}Error during reconnection attempt {attempt_number}: {reconnect_error}", exc_info=True)
-            return False
+            logging.error(f"{self.session_id}Error during Vosk reconnection attempt {attempt_number}: {reconnect_error}", exc_info=True)
+            return False # Reconnection failed
 
-    async def close(self):
-        """Closes the SmartSpeech session gracefully."""
+    async def close(self) -> None:
+        """
+        Closes the SmartSpeech session gracefully.
+
+        This involves:
+        1. Cancelling any active TTS task and clearing its queue.
+        2. Processing any final audio in the VAD buffer.
+        3. Finalizing the transcript (e.g., using partial if no final).
+        4. Sending EOF to Vosk and disconnecting the client.
+        5. Cancelling the Vosk transcript receiving task.
+        """
         if self._is_closing:
-            logging.info(f"{self.session_id}Close operation already in progress.")
+            logging.info(f"{self.session_id}Close operation already in progress. Skipping.")
             return
         logging.info(f"{self.session_id}Initiating closure of SmartSpeech session.")
         
-        self._is_closing = True 
+        self._is_closing = True # Signal that closure is underway
         
+        # 1. Cancel and clean up TTS task
         if hasattr(self, 'tts_task') and self.tts_task and not self.tts_task.done():
-            logging.debug(f"{self.session_id}Attempting to cancel active TTS task.")
+            logging.debug(f"{self.session_id}Attempting to cancel active TTS task during close.")
+            if hasattr(self, 'tts_processor') and self.tts_processor:
+                self.tts_processor.interrupt() # Signal TTSProcessor to stop and drain its queue
             self.tts_task.cancel()
             try:
                 await self.tts_task
             except asyncio.CancelledError:
-                logging.info(f"{self.session_id}Active TTS task cancelled successfully.")
+                logging.info(f"{self.session_id}Active TTS task successfully cancelled during close.")
             except Exception as e_tts_cancel:
-                logging.error(f"{self.session_id}Error awaiting cancelled TTS task: {e_tts_cancel}", exc_info=True)
+                logging.error(f"{self.session_id}Error awaiting cancelled TTS task during close: {e_tts_cancel}", exc_info=True)
+            self.tts_task = None # Ensure cleared
         
+        # 2. Process final VAD buffer (if VAD is not bypassed)
         if not self.bypass_vad:
             try:
                 logging.debug(f"{self.session_id}Processing final VAD buffer before closing.")
@@ -921,122 +1396,182 @@ class SmartSpeech(AIEngine):
             except Exception as e_vad_final:
                 logging.error(f"{self.session_id}Error processing final VAD buffer during close: {e_vad_final}", exc_info=True)
         
+        # 3. Finalize transcript (use partial if no final, etc.)
         try:
             self._finalize_transcript()
         except Exception as e_finalize:
             logging.error(f"{self.session_id}Error finalizing transcript during close: {e_finalize}", exc_info=True)
 
-        if self.vosk_client.is_connected:
+        # 4. Send EOF and disconnect Vosk client
+        if self.vosk_client and self.vosk_client.is_connected:
             try:
                 await self._send_eof_if_enabled() 
                 logging.debug(f"{self.session_id}Attempting to disconnect Vosk client.")
-                await self.vosk_client.disconnect()
-                logging.info(f"{self.session_id}Disconnected from Vosk server successfully.")
+                await self.vosk_client.disconnect() # disconnect is an alias for close
+                logging.info(f"{self.session_id}Disconnected from Vosk server successfully during close.")
             except Exception as e_vosk_close:
                 logging.error(f"{self.session_id}Error disconnecting from Vosk server during close: {e_vosk_close}", exc_info=True)
         
-        logging.debug(f"{self.session_id}Ensuring Vosk receive task is cancelled.")
-        await self._cancel_receive_task() 
+        # 5. Cancel Vosk transcript receiving task
+        logging.debug(f"{self.session_id}Ensuring Vosk transcript receive task is cancelled during close.")
+        await self._cancel_receive_task() # Handles if task is None or already done
         
         logging.info(f"{self.session_id}SmartSpeech session close procedure completed.")
 
-    def _finalize_transcript(self):
-        """Ensure we have a final transcript (use partial if no final available)."""
+    def _finalize_transcript(self) -> None:
+        """
+        Ensures a final transcript is available, using the last partial transcript if no
+        explicit final transcript was received. Logs the definitive final transcript.
+        """
         try:
+            # If no final "text" was received, but there was a "partial", use the partial.
             if not self.transcript_handler.last_final_transcript and self.transcript_handler.last_partial_transcript:
-                logging.info(f"{self.session_id}No final transcript at session end, using last partial: {self.transcript_handler.last_partial_transcript[:80]}...")
+                logging.info(
+                    f"{self.session_id}No final transcript at session end, "
+                    f"using last partial: \"{self.transcript_handler.last_partial_transcript[:80]}...\""
+                )
                 self.transcript_handler.last_final_transcript = self.transcript_handler.last_partial_transcript
             
+            # Log the definitive final transcript for the session
             if self.transcript_handler.last_final_transcript:
-                logging.info(f"{self.session_id}Definitive final transcript for session: {self.transcript_handler.last_final_transcript}")
+                logging.info(f"{self.session_id}Definitive final transcript for session: \"{self.transcript_handler.last_final_transcript}\"")
             else:
                 logging.info(f"{self.session_id}No transcript (final or partial) available at session end.")
-        except Exception as e:
+        except Exception as e: # Should not happen with string operations, but as a safeguard.
             logging.error(f"{self.session_id}Error during _finalize_transcript: {e}", exc_info=True)
 
 
-    def terminate_call(self):
-        """ Terminates the call """
-        logging.info(f"{self.session_id}Terminating call")
-        self.call.terminated = True
+    def terminate_call(self) -> None:
+        """ 
+        Signals that the call associated with this SmartSpeech session should be terminated.
+        This typically involves setting a flag on the call object that external logic checks.
+        """
+        logging.info(f"{self.session_id}Signaling to terminate call.")
+        if hasattr(self.call, 'terminated'):
+            self.call.terminated = True
+        else:
+            logging.warning(f"{self.session_id}Call object does not have a 'terminated' attribute to set.")
 
-    def set_log_level(self, level):
-        """Sets the logging level for this session and its components."""
-        logging.getLogger().setLevel(level)
-        logging.info(f"{self.session_id}Set logging level to {logging._levelToName.get(level, level)}")
+    def set_log_level(self, level: int) -> None:
+        """
+        Sets the logging level for this session and its components.
         
-        self.debug = (level == logging.DEBUG)
-        self.audio_processor.debug = self.debug
-        self.vad_processor.debug = self.debug # VADProcessor also has a debug flag
-        if hasattr(self, 'tts_processor'): 
-            self.tts_processor.debug = self.debug
+        Note: This currently sets the global logging level if `self.debug` is true.
+        For per-session logging without affecting global state, dedicated loggers
+        would be required.
 
-    async def _process_final_vad_buffer(self):
-        """Process final VAD buffer before closing, attempting to get a last transcript."""
-        original_on_partial = None
-        original_on_final = None
+        Args:
+            level: The logging level (e.g., `logging.DEBUG`, `logging.INFO`).
+        """
+        # This will affect the root logger if not handled carefully.
+        # Consider using a session-specific logger instance if finer control is needed.
+        current_level_name = logging.getLevelName(logging.getLogger().getEffectiveLevel())
+        new_level_name = logging.getLevelName(level)
+        logging.info(f"{self.session_id}Attempting to set logging level to {new_level_name}. Current effective level: {current_level_name}.")
+        
+        self.debug = (level == logging.DEBUG) # Update internal debug flag
+        
+        # Propagate debug status to components
+        if hasattr(self, 'audio_processor'): self.audio_processor.debug = self.debug
+        if hasattr(self, 'vad_processor'): self.vad_processor.debug = self.debug
+        if hasattr(self, 'tts_processor'): self.tts_processor.debug = self.debug
+        
+        # This might change global logging level if not careful.
+        # A better approach for per-session verbosity might involve custom logger instances.
+        if self.debug: 
+            logging.getLogger().setLevel(logging.DEBUG) 
+            logging.debug(f"{self.session_id}Switched to DEBUG logging level for current session components and potentially globally.")
+        else:
+            # Reverting global log level if this session is not debug.
+            # This assumes a default INFO unless another session requires DEBUG.
+            # This part is tricky with shared global loggers.
+            # logging.getLogger().setLevel(logging.INFO) 
+            pass # Avoid changing global level back and forth too much without a more robust system.
+
+    async def _process_final_vad_buffer(self) -> None:
+        """
+        Processes the final VAD buffer before closing the session.
+
+        If there's audio data in the VAD buffer deemed as speech, it's sent to the STT service.
+        A short wait period is introduced to allow any resulting transcript from this final
+        audio to be processed by the main transcript receiving loop.
+        The `_finalize_transcript` method, called later in the `close()` sequence, will then
+        use the latest available partial transcript if no final transcript was received.
+        """
         try:
             is_speech, buffer_bytes = await self.vad_processor.process_final_buffer()
             
-            if buffer_bytes and self.vosk_client.is_connected: 
-                buffer_seconds = len(buffer_bytes) / (2 * self.target_sample_rate)  
-                last_partial_from_final_buffer = None
-                
-                original_on_partial = self.transcript_handler.on_partial_transcript
-                original_on_final = self.transcript_handler.on_final_transcript
-                
-                async def final_buffer_partial_callback(text: str):
-                    nonlocal last_partial_from_final_buffer
-                    last_partial_from_final_buffer = text
-                    if self.debug:
-                        logging.debug(f"{self.session_id}Partial from final VAD buffer: {text[:80]}...")
-
-                self.transcript_handler.on_partial_transcript = final_buffer_partial_callback
-
+            if buffer_bytes and self.vosk_client and self.vosk_client.is_connected: 
                 if is_speech:
                     if self.debug:
                         logging.debug(f"{self.session_id}Sending {len(buffer_bytes)} bytes from final VAD buffer to STT.")
                     await self.vosk_client.send_audio(buffer_bytes)
-                
-                wait_time = min(buffer_seconds * 0.4 + 0.2, 1.0) 
-                if self.debug:
-                    logging.debug(f"{self.session_id}Waiting {wait_time:.2f}s for potential transcript from final VAD buffer.")
-                await asyncio.sleep(wait_time)
-                
-                if last_partial_from_final_buffer:
-                    logging.info(f"{self.session_id}Using last partial from final VAD buffer as definitive final transcript: {last_partial_from_final_buffer[:80]}...")
-                    self.transcript_handler.last_final_transcript = last_partial_from_final_buffer
+                    
+                    # Calculate a reasonable wait time for network round trip and STT processing.
+                    # This allows the receive_transcripts loop to potentially update last_partial_transcript.
+                    buffer_duration_seconds = len(buffer_bytes) / (2 * self.target_sample_rate) # Assuming 16-bit mono
+                    # Heuristic: half buffer duration + network overhead (e.g., 200ms), capped.
+                    wait_time = min(buffer_duration_seconds * 0.5 + 0.2, 1.5) 
+                                        
+                    if self.debug:
+                        logging.debug(f"{self.session_id}Waiting {wait_time:.2f}s for potential transcript from final VAD buffer send.")
+                    await asyncio.sleep(wait_time) # Give time for the transcript to arrive
                 elif self.debug:
-                    logging.debug(f"{self.session_id}No new partial transcript received from final VAD buffer send.")
+                    logging.debug(f"{self.session_id}Final VAD buffer contained data, but not deemed as speech. Discarding.")
                 
-            elif buffer_bytes and not self.vosk_client.is_connected:
+            elif buffer_bytes and (not self.vosk_client or not self.vosk_client.is_connected):
                 logging.warning(f"{self.session_id}Final VAD buffer had data, but Vosk client is not connected. Cannot process.")
-            elif self.debug:
-                logging.debug(f"{self.session_id}No data in final VAD buffer or client not connected.")
+            elif self.debug: # No buffer_bytes
+                logging.debug(f"{self.session_id}No data in final VAD buffer to process, or client not connected.")
 
         except Exception as e:
             logging.error(f"{self.session_id}Error processing final VAD buffer: {e}", exc_info=True)
-        finally:
-            # Restore original transcript handlers
-            if original_on_partial is not None and hasattr(self.transcript_handler, 'on_partial_transcript'):
-                 self.transcript_handler.on_partial_transcript = original_on_partial 
-            if original_on_final is not None and hasattr(self.transcript_handler, 'on_final_transcript'):
-                 self.transcript_handler.on_final_transcript = original_on_final 
 
 
     def get_final_transcript(self) -> str:
-        """Returns the last recognized final transcript text."""
+        """
+        Returns the last recognized final transcript text for the session.
+        
+        Delegates to `TranscriptHandler.get_final_transcript()`.
+        """
         return self.transcript_handler.get_final_transcript()
 
-    async def _handle_final_transcript(self, final_text: str):
+    async def _handle_final_transcript(self, final_text: str) -> None:
         """
-        Handles final transcript: Gets (simulated) LLM response, then calls TTSProcessor
-        to generate and queue audio. Also manages VAD state reset.
+        Callback triggered when a final transcript is received from `TranscriptHandler`.
+
+        This method orchestrates the response to a final transcript:
+        1. Ensures any previous TTS task is cancelled (e.g., if final transcripts arrive rapidly).
+        2. (Simulates) Gets a response from an LLM based on `final_text`.
+        3. Resets VAD state to prepare for new user speech.
+        4. Initiates TTS generation for the LLM response via `TTSProcessor`.
+        The TTS generation itself runs as a new asyncio task (`self.tts_task`).
+
+        Args:
+            final_text: The final recognized transcript string.
         """
-        logging.info(f"{self.session_id}SmartSpeech: Final transcript for LLM/TTS: '{final_text}'")
+        logging.info(f"{self.session_id}SmartSpeech: Handling final transcript: \"{final_text[:100]}...\"")
         
-        # 1. Get LLM Response (Simulated)
-        # PLACEHOLDER: Replace with actual LLM call
+        # 0. Ensure any previous TTS task is fully handled/cancelled before starting a new one.
+        # This can happen if final transcripts are generated very quickly or if a previous
+        # barge-in cancellation is still being awaited when a new transcript arrives.
+        if self.tts_task and not self.tts_task.done():
+            logging.warning(
+                f"{self.session_id}A previous TTS task was still active when a new final transcript "
+                f"arrived ('{final_text[:50]}...'). Attempting to cancel the old task first."
+            )
+            self.tts_processor.interrupt() # Ensure its queue is cleared and event set
+            self.tts_task.cancel()
+            try:
+                await self.tts_task # Await its completion/cancellation
+            except asyncio.CancelledError:
+                logging.info(f"{self.session_id}Successfully cancelled the lingering TTS task before starting new one.")
+            except Exception as e: # Catch any other error from awaiting the old task
+                logging.error(f"{self.session_id}Error awaiting lingering TTS task: {e}", exc_info=True)
+        self.tts_task = None # Reset tts_task, ready for a new one if needed
+
+        # 1. Get LLM Response (Simulated - Placeholder for actual LLM interaction)
+        # In a real system, this would be an awaitable call to an LLM service.
         turkish_sentences = [
             "Merhaba, size nasıl yardımcı olabilirim? Bu konuşma sistemimiz sayesinde isteklerinizi sesli olarak iletebilirsiniz. Ben sizin sorularınızı yanıtlamak, bilgi vermek ve çeşitli işlemlerinizi gerçekleştirmek için buradayım. Herhangi bir konuda yardıma ihtiyacınız olursa lütfen belirtin. Size en iyi şekilde yardımcı olmak için elimden geleni yapacağım. Sesli asistanınız olarak size hizmet vermekten mutluluk duyuyorum.", 
             "Lütfen isteğinizi belirtin. Sorularınızı mümkün olduğunca açık ve net bir şekilde ifade ederseniz size daha doğru ve hızlı bir şekilde yardımcı olabilirim. Detaylı bilgiye ihtiyacım olursa ek sorular sorabilirim. İhtiyacınızı tam olarak anlayabilmem için gerekli tüm detayları paylaşmanız önemlidir. Karmaşık konularda adım adım ilerlememiz gerekebilir. Hangi konuda yardıma ihtiyacınız olduğunu lütfen anlatın.",
@@ -1049,18 +1584,34 @@ class SmartSpeech(AIEngine):
             "Yardımcı olabileceğim başka bir konu var mı? Bugün sizin için başka hangi işlemleri gerçekleştirebilirim? Sistemimiz birçok farklı konuda hizmet sunmaktadır ve sizin için daha fazla bilgi sağlamaktan veya farklı konularda yardımcı olmaktan memnuniyet duyarım. Hesap işlemleri, bilgi sorgulama, randevu oluşturma veya iptal etme gibi çeşitli hizmetlerimizden faydalanabilirsiniz. Ayrıca ürünlerimiz ve hizmetlerimiz hakkında detaylı bilgi almak isterseniz, bu konuda da size kapsamlı bilgi sunabilirim. İhtiyaçlarınız doğrultusunda size en iyi şekilde yardımcı olmak için buradayım.", 
             "Görüşmek üzere, iyi günler! Bugün bizi tercih ettiğiniz ve hizmetimizden yararlandığınız için teşekkür ederiz. Umarım tüm sorularınıza tatmin edici yanıtlar alabilmişsinizdir. Tekrar görüşmek dileğiyle, size güzel ve verimli bir gün diliyorum. Herhangi bir sorunuz veya ihtiyacınız olduğunda tekrar bizi aramanız yeterli olacaktır. Sizinle tekrar görüşmeyi umuyoruz. Her zaman hizmetinizdeyiz. Bizden tekrar yardım almak istediğinizde çağrı merkezimizi arayabilir veya web sitemiz üzerinden bizimle iletişime geçebilirsiniz. Kendinize iyi bakın!",
         ]
-        llm_response_text = random.choice(turkish_sentences)
-        logging.info(f"{self.session_id}SmartSpeech: Simulated LLM response: '{llm_response_text}'")
+        llm_response_text = random.choice(turkish_sentences) # Placeholder
+        logging.info(f"{self.session_id}SmartSpeech: Simulated LLM response: \"{llm_response_text[:70]}...\"")
 
+        # 2. Reset VAD state before starting new TTS to prepare for potential user barge-in
         if not self.bypass_vad:
-            self.vad_processor.reset_vad_state(preserve_buffer=False)
-            logging.info(f"{self.session_id}SmartSpeech: VAD state reset after LLM response, before TTS processing")
+            self.vad_processor.reset_vad_state(preserve_buffer=False) # Clear VAD buffer and state
+            logging.info(f"{self.session_id}SmartSpeech: VAD state reset after LLM response, before TTS playback.")
         
+        # 3. Initiate TTS generation for the LLM response
         if self.tts_processor:
             try:
-                await self.tts_processor.generate_and_queue_tts_audio(llm_response_text)
-            except Exception as e_tts_gen:
+                # Create and store the new TTS task
+                self.tts_task = asyncio.create_task(
+                    self.tts_processor.generate_and_queue_tts_audio(llm_response_text),
+                    name=f"TTS-{self.session_id}-{time.time()}" # Unique name for the task
+                )
+                # Optionally await here if further actions depend on TTS completion/failure directly.
+                # However, if this callback blocks, it might delay processing of other events.
+                # Current design: _handle_final_transcript is itself a task, so awaiting here is okay.
+                await self.tts_task 
+            except asyncio.CancelledError:
+                 # This would be if _handle_final_transcript task itself is cancelled while awaiting tts_task
+                 logging.info(f"{self.session_id}SmartSpeech: TTS task creation or awaiting was cancelled.")
+                 if self.tts_task and self.tts_task.done() and self.tts_task.cancelled():
+                     self.tts_task = None # Ensure task is cleared if it was cancelled
+            except Exception as e_tts_gen: # Catch any other error during TTS task creation/initial await
                 logging.error(f"{self.session_id}SmartSpeech: Error during TTS generation call: {e_tts_gen}", exc_info=True)
+                self.tts_task = None # Ensure task is cleared on error
         else:
             logging.error(f"{self.session_id}SmartSpeech: TTSProcessor not initialized, cannot generate TTS.")
 

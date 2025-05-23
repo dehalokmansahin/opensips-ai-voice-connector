@@ -2,19 +2,40 @@ import asyncio
 import websockets
 import json
 import logging
-import traceback
+# import traceback # Unused import
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 from typing import Optional
 
 class VoskClient:
-    def __init__(self, server_url, timeout=5.0):
-        self.server_url = server_url
-        self.websocket = None
-        self.is_connected = False
-        self.receiving = False
-        self.read_timeout = timeout  # saniye olarak okuma zaman aşımı
+    """
+    A WebSocket client for interacting with a Vosk STT (Speech-to-Text) server.
 
-    async def connect(self):
+    This class handles connecting to the Vosk server, sending audio data for transcription,
+    and receiving transcription results. It manages the WebSocket connection lifecycle
+    and provides methods for sending configuration, audio chunks, and EOF signals.
+    """
+    def __init__(self, server_url: str, timeout: float = 5.0):
+        """
+        Initializes the VoskClient.
+
+        Args:
+            server_url: The URL of the Vosk WebSocket server (e.g., "ws://localhost:2700").
+            timeout: The timeout in seconds for WebSocket read operations.
+        """
+        self.server_url: str = server_url
+        self.websocket: Optional[websockets.WebSocketClientProtocol] = None
+        self.is_connected: bool = False
+        self.read_timeout: float = timeout  # Read timeout in seconds
+
+    async def connect(self) -> bool:
+        """
+        Connects to the Vosk WebSocket server.
+
+        Sets `self.is_connected` to True on success, False otherwise.
+
+        Returns:
+            True if the connection was successful, False otherwise.
+        """
         try:
             self.websocket = await websockets.connect(self.server_url)
             self.is_connected = True
@@ -25,67 +46,84 @@ class VoskClient:
             self.is_connected = False
             return False
 
-    async def send(self, data):
-        """Send a message to the Vosk server
-        
+    async def send(self, data: dict | str) -> bool:
+        """
+        Sends a message (typically JSON configuration) to the Vosk server.
+
         Args:
-            data: Data to send (dict or JSON string)
+            data: Data to send. Can be a dictionary (which will be dumped to JSON)
+                  or a pre-formatted JSON string.
             
         Returns:
-            bool: True if successful, False otherwise
+            True if the data was sent successfully, False otherwise.
         """
         if not self.is_connected or not self.websocket:
-            logging.error("Cannot send data: Not connected to Vosk server")
+            logging.error("Cannot send data: Not connected to Vosk server.")
             return False
 
         try:
-            if isinstance(data, dict):
-                data = json.dumps(data)
-            await self.websocket.send(data)
+            message_to_send = json.dumps(data) if isinstance(data, dict) else data
+            await self.websocket.send(message_to_send)
             return True
         except Exception as e:
-            logging.error(f"Failed to send data to Vosk server: {e}")
-            self.is_connected = False
+            logging.error(f"Failed to send data to Vosk server: {e}. Data: {str(data)[:100]}")
+            # Consider if connection is always broken here. Vosk might be strict.
+            self.is_connected = False 
             return False
 
-    async def send_audio(self, audio_bytes: bytes):
+    async def send_audio(self, audio_bytes: bytes) -> bool:
+        """
+        Sends raw audio bytes to the Vosk server.
+
+        Args:
+            audio_bytes: The audio data to send, as bytes.
+            
+        Returns:
+            True if the audio data was sent successfully, False otherwise.
+        """
         if not self.is_connected or not self.websocket:
-            logging.error("Cannot send audio: Not connected to Vosk server")
+            logging.error("Cannot send audio: Not connected to Vosk server.")
             return False
 
         if not isinstance(audio_bytes, bytes):
-            logging.error(f"Audio data must be bytes, got {type(audio_bytes).__name__}")
+            logging.warning(f"Audio data must be bytes, got {type(audio_bytes).__name__}. Skipping send.")
             return False
             
-        # Debug log the audio data details
-        audio_len = len(audio_bytes)
-        if audio_len == 0:
-            logging.error("Cannot send empty audio data to Vosk")
+        if not audio_bytes: # Check for empty bytes
+            logging.warning("Cannot send empty audio data to Vosk. Skipping send.")
             return False
             
-        # Add hex dump of first few bytes for debugging
-        if audio_len > 0:
+        # Debug log includes length and a preview of the audio data
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
             hex_preview = ' '.join([f'{b:02x}' for b in audio_bytes[:20]])
-            logging.debug(f"Sending audio: {audio_len} bytes, first 20 bytes: {hex_preview}")
+            logging.debug(f"Sending audio: {len(audio_bytes)} bytes, first 20 bytes (hex): {hex_preview}")
 
         try:
             await self.websocket.send(audio_bytes)
             return True
         except Exception as e:
             logging.error(f"Failed to send audio data to Vosk server: {e}")
-            self.is_connected = False
+            self.is_connected = False # Assume connection is compromised if send fails
             return False
 
-    async def send_eof(self):
+    async def send_eof(self) -> bool:
+        """
+        Sends an EOF (End Of File/Stream) signal to the Vosk server.
+
+        This typically indicates that no more audio will be sent for the current utterance.
+        
+        Returns:
+            True if the EOF signal was sent successfully, False otherwise.
+        """
         if not self.is_connected or not self.websocket:
-            logging.error("Cannot send EOF: Not connected to Vosk server")
+            logging.error("Cannot send EOF: Not connected to Vosk server.")
             return False
 
         try:
-            logging.info("Sending EOF message to Vosk server")
+            logging.info("Sending EOF message to Vosk server.")
             await self.websocket.send(json.dumps({"eof": 1}))
-            # Sunucuya EOF işlenmesi için kısa bir süre tanı
-            await asyncio.sleep(0.1)
+            # Brief pause to allow server to process EOF; behavior might vary by server implementation.
+            await asyncio.sleep(0.1) 
             return True
         except Exception as e:
             logging.error(f"Failed to send EOF to Vosk server: {e}")
@@ -93,71 +131,95 @@ class VoskClient:
             return False
 
     async def receive_result(self) -> Optional[str]:
+        """
+        Receives a transcription result or message from the Vosk server.
+
+        This method waits for a message with a configured timeout (`self.read_timeout`).
+        It handles JSON parsing of results and logs different types of messages
+        (partial, final, EOF).
+
+        Returns:
+            The raw message string received from the server if successful, 
+            None if a timeout occurs or if the connection is closed/lost.
+        """
         if not self.is_connected or not self.websocket:
-            logging.error("Cannot receive result: Not connected to Vosk server")
+            logging.error("Cannot receive result: Not connected to Vosk server.")
             return None
 
         try:
-            # Zaman aşımı ile mesaj bekleme
-            self.receiving = True
-            message = None
+            message: Optional[str] = None
             try:
+                # Wait for a message from the WebSocket with the specified timeout
                 message = await asyncio.wait_for(
                     self.websocket.recv(), 
                     timeout=self.read_timeout
                 )
-                logging.debug(f"Received raw WebSocket message: {message[:100]}...")
+                if logging.getLogger().isEnabledFor(logging.DEBUG):
+                    logging.debug(f"Received raw WebSocket message: {str(message)[:100]}...") # Ensure message is str for slicing
                 
-                # JSON mesajı ise, içeriği kontrol et
+                # Attempt to parse if it's a JSON message for more detailed logging
                 try:
-                    result = json.loads(message)
+                    result = json.loads(str(message)) # Ensure message is str for json.loads
                     if "text" in result and result["text"]:
-                        logging.info(f"Transcription received from Vosk: {result['text']}")
+                        # Log final transcriptions at INFO level
+                        logging.info(f"Vosk: Final transcript: \"{result['text']}\"")
                     elif "partial" in result and result["partial"]:
-                        logging.debug(f"Partial transcription: {result['partial']}")
+                        # Log partial transcriptions at DEBUG level
+                        logging.debug(f"Vosk: Partial transcript: \"{result['partial']}\"")
                     elif "eof" in result:
-                        logging.info("EOF acknowledgment received from Vosk server")
-                    else:
-                        logging.debug(f"Other message received: {message[:50]}...")
+                        logging.info("Vosk: EOF acknowledgment received from server.")
+                    # Add other specific Vosk message types if needed
                 except json.JSONDecodeError:
-                    logging.warning(f"Received non-JSON message: {message[:50]}...")
-                except Exception as e:
-                    logging.error(f"Error processing message: {e}")
+                    # If not JSON, or if JSON structure is unexpected, log as a general message
+                    logging.debug(f"Vosk: Received non-JSON or unknown structure message: {str(message)[:70]}...")
+                except Exception as e_parse:
+                    # Catch errors during the parsing/logging phase but still return the original message
+                    logging.error(f"Error processing/logging received message: {e_parse}")
                 
-                return message
+                return str(message) # Return the raw message string
                 
             except asyncio.TimeoutError:
-                logging.debug("Timeout while waiting for message from Vosk server")
-                return None
+                # This is an expected event during periods of silence
+                logging.debug(f"Timeout ({self.read_timeout}s) waiting for message from Vosk server.")
+                return None # Return None to indicate no message received within timeout
             
         except websockets.exceptions.ConnectionClosed as e:
-            if e.code == 1000:
-                logging.info(f"WebSocket connection closed normally with code {e.code}")
-            elif e.code == 1001:
-                logging.info(f"WebSocket connection going away with code {e.code}")
-            else:
-                logging.warning(f"WebSocket connection closed with code {e.code}: {e.reason}")
+            # Handle WebSocket connection closed scenarios
+            if e.code == 1000: # Normal closure
+                logging.info(f"WebSocket connection to Vosk closed normally (code {e.code}).")
+            elif e.code == 1001: # Going away
+                logging.info(f"WebSocket connection to Vosk server is going away (code {e.code}).")
+            else: # Other closure codes
+                logging.warning(f"WebSocket connection to Vosk closed unexpectedly (code {e.code}, reason: {e.reason}).")
             self.is_connected = False
             return None
         except Exception as e:
-            logging.error(f"Error receiving result from Vosk server: {e}")
+            # Catch any other exceptions during receive
+            logging.error(f"Error receiving result from Vosk server: {e}", exc_info=True)
             self.is_connected = False
             return None
-        finally:
-            self.receiving = False
 
     async def disconnect(self):
-        """Disconnect from the Vosk server (alias for close)"""
+        """
+        Disconnects from the Vosk server. This is an alias for `close()`.
+        """
         await self.close()
 
     async def close(self):
+        """
+        Closes the WebSocket connection to the Vosk server gracefully.
+        
+        Sets `self.is_connected` to False and `self.websocket` to None.
+        """
         if self.websocket:
             try:
-                # Normal kapatma kodu ile WebSocket'i kapatıyoruz
-                await self.websocket.close(code=1000, reason="Normal closure")
-                logging.info("WebSocket connection closed gracefully")
+                # Attempt to close with a normal closure code
+                await self.websocket.close(code=1000, reason="Normal client closure")
+                logging.info("WebSocket connection to Vosk closed gracefully.")
             except Exception as e:
-                logging.error(f"Error closing WebSocket connection: {e}")
+                logging.error(f"Error closing WebSocket connection to Vosk: {e}")
             finally:
                 self.websocket = None
                 self.is_connected = False
+        else:
+            logging.debug("Close called but WebSocket was already None.")
