@@ -28,7 +28,7 @@ from sipmessage import Address
 from deepgram_api import Deepgram
 from openai_api import OpenAI
 from deepgram_native_api import DeepgramNative
-from speech_session_vosk import VoskSTT
+from speech_session_vosk import SmartSpeech
 # Try to import Azure, but don't fail if not available
 try:
     from azure_api import AzureAI
@@ -42,7 +42,7 @@ from config import Config
 FLAVORS = {"deepgram": Deepgram,
            "openai": OpenAI,
            "deepgram_native": DeepgramNative,
-           "vosk":VoskSTT}
+           "smart_speech": SmartSpeech}
 
 # Add Azure if available
 if has_azure:

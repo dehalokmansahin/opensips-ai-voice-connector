@@ -38,7 +38,7 @@ from ai import AIEngine # Base class for AI engine implementations
 from queue import Empty, Queue # For synchronous queue (rtp_queue for TTS output)
 import json # For STT message parsing (Vosk primarily)
 import logging # For application logging
-from typing import Callable, Awaitable, Optional, Tuple # For type hinting
+from typing import Any, Callable, Awaitable, Optional, Tuple # For type hinting
 from vosk_client import VoskClient # Client for Vosk STT server
 import torchaudio # For audio resampling and transformations
 import time # For timing VAD buffer flushes, etc.
@@ -838,7 +838,7 @@ class SmartSpeech(AIEngine):
                   and `client_addr`/`client_port` for logging.
             cfg: The application configuration object.
         """
-        self.cfg: Config = Config.get("vosk", cfg) # Get Vosk-specific configuration
+        self.cfg: Config = Config.get("smart_speech", cfg) # Get Vosk-specific configuration
         
         # Session identification for logging
         self.b2b_key: Optional[str] = call.b2b_key if hasattr(call, 'b2b_key') else None
