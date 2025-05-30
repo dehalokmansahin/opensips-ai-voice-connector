@@ -838,7 +838,7 @@ class SmartSpeech(AIEngine):
                   and `client_addr`/`client_port` for logging.
             cfg: The application configuration object.
         """
-        self.cfg: Config = Config.get("smart_speech", cfg) # Get Vosk-specific configuration
+        self.cfg: Config = Config.get("SmartSpeech", cfg) # Get Vosk-specific configuration
         
         # Session identification for logging
         self.b2b_key: Optional[str] = call.b2b_key if hasattr(call, 'b2b_key') else None
@@ -1614,5 +1614,3 @@ class SmartSpeech(AIEngine):
                 self.tts_task = None # Ensure task is cleared on error
         else:
             logging.error(f"{self.session_id}SmartSpeech: TTSProcessor not initialized, cannot generate TTS.")
-
-[end of src/speech_session_vosk.py]

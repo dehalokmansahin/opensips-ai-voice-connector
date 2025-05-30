@@ -42,7 +42,7 @@ from config import Config
 FLAVORS = {"deepgram": Deepgram,
            "openai": OpenAI,
            "deepgram_native": DeepgramNative,
-           "smart_speech": SmartSpeech}
+           "SmartSpeech": SmartSpeech}
 
 # Add Azure if available
 if has_azure:
