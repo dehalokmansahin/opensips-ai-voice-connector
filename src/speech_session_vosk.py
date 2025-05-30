@@ -852,6 +852,11 @@ class SmartSpeech(AIEngine):
         self.receive_task: Optional[asyncio.Task] = None # Task for receiving Vosk transcripts
         self.tts_task: Optional[asyncio.Task] = None     # Task for TTS generation
         self._is_closing: bool = False                   # Flag to indicate session closure is in progress
+
+        # EOF signaling attributes
+        self.eof_timer_task: Optional[asyncio.Task] = None
+        self.eof_send_delay: float = 0.7  # 700ms delay for sending EOF
+        self.previous_vad_active_state: bool = False
         
         self._setup_logging() # Configure logging level based on settings
         
@@ -867,15 +872,23 @@ class SmartSpeech(AIEngine):
         self.send_eof: bool = self.cfg.get("send_eof", "send_eof", True) # Send EOF to Vosk
         self.debug: bool = self.cfg.get("debug", "debug", False) # General debug flag for this session
         
-        # VAD settings
-        self.bypass_vad: bool = self.cfg.get("bypass_vad", "bypass_vad", False)
-        self.vad_threshold: float = self.cfg.get("vad_threshold", "vad_threshold", 0.25)
-        self.vad_min_speech_ms: int = self.cfg.get("vad_min_speech_ms", "vad_min_speech_ms", 150)
-        self.vad_min_silence_ms: int = self.cfg.get("vad_min_silence_ms", "vad_min_silence_ms", 450)
-        self.vad_buffer_chunk_ms: int = self.cfg.get("vad_buffer_chunk_ms", "vad_buffer_chunk_ms", 600)
-        # self.vad_buffer_max_seconds: float = self.cfg.get("vad_buffer_max_seconds", "vad_buffer_max_seconds", 2.0) # Currently unused
-        self.speech_detection_threshold: int = self.cfg.get("speech_detection_threshold", "speech_detection_threshold", 1)
-        self.silence_detection_threshold: int = self.cfg.get("silence_detection_threshold", "silence_detection_threshold", 1)
+        # VAD settings - Default values
+        default_bypass_vad: bool = False
+        default_vad_threshold: float = 0.25
+        default_vad_min_speech_ms: int = 150
+        default_vad_min_silence_ms: int = 450
+        default_vad_buffer_chunk_ms: int = 600
+        default_speech_detection_threshold: int = 1
+        default_silence_detection_threshold: int = 3 # Changed default from 1 to 3
+
+        # Try to read VAD settings from [vad] section, fallback to defaults
+        self.bypass_vad: bool = self.cfg.get("vad", "bypass_vad", default_bypass_vad)
+        self.vad_threshold: float = self.cfg.get("vad", "vad_threshold", default_vad_threshold)
+        self.vad_min_speech_ms: int = self.cfg.get("vad", "vad_min_speech_ms", default_vad_min_speech_ms)
+        self.vad_min_silence_ms: int = self.cfg.get("vad", "vad_min_silence_ms", default_vad_min_silence_ms)
+        self.vad_buffer_chunk_ms: int = self.cfg.get("vad", "vad_buffer_chunk_ms", default_vad_buffer_chunk_ms)
+        self.speech_detection_threshold: int = self.cfg.get("vad", "speech_detection_threshold", default_speech_detection_threshold)
+        self.silence_detection_threshold: int = self.cfg.get("vad", "silence_detection_threshold", default_silence_detection_threshold)
             
         # Piper TTS Server settings
         self.tts_server_host_cfg: str = self.cfg.get("host", "TTS_HOST", "localhost")
@@ -1120,6 +1133,56 @@ class SmartSpeech(AIEngine):
         elif self.debug:
             logging.debug(f"{self.session_id}Vosk receive_task is None, no cancellation needed.")
 
+    def _start_eof_timer(self) -> None:
+        """Cancels any existing EOF timer and starts a new one."""
+        self._cancel_eof_timer() # Cancel any existing timer first
+        if self.debug:
+            logging.debug(f"{self.session_id}Starting EOF timer with delay {self.eof_send_delay}s.")
+        self.eof_timer_task = asyncio.create_task(
+            self._send_eof_after_delay(),
+            name=f"EOFTimer-{self.session_id}"
+        )
+
+    def _cancel_eof_timer(self) -> None:
+        """Cancels the active EOF timer task if it exists and is not done."""
+        if self.eof_timer_task and not self.eof_timer_task.done():
+            if self.debug:
+                logging.debug(f"{self.session_id}Cancelling EOF timer task.")
+            self.eof_timer_task.cancel()
+            # We don't typically await cancellation here as it might be called
+            # from contexts where blocking is undesirable (e.g., speech start).
+            # The task should handle CancelledError gracefully.
+        self.eof_timer_task = None # Clear the reference
+
+    async def _send_eof_after_delay(self) -> None:
+        """Waits for a delay, then sends EOF if conditions are met."""
+        try:
+            await asyncio.sleep(self.eof_send_delay)
+
+            # Check conditions *after* the sleep
+            if not self.vad_processor.speech_active and self.vosk_client and self.vosk_client.is_connected:
+                if self.debug:
+                    logging.debug(f"{self.session_id}EOF timer expired. VAD inactive and client connected. Sending EOF.")
+                await self._send_eof_if_enabled()
+            elif self.debug:
+                logging.debug(
+                    f"{self.session_id}EOF timer expired, but conditions not met for sending EOF. "
+                    f"VAD active: {self.vad_processor.speech_active}, Client connected: {self.vosk_client.is_connected if self.vosk_client else 'N/A'}"
+                )
+        except asyncio.CancelledError:
+            if self.debug:
+                logging.debug(f"{self.session_id}EOF timer task was cancelled during sleep or operation.")
+            # Propagate cancellation if needed, or just log and exit
+            # For this timer, just logging is usually sufficient.
+        except Exception as e:
+            logging.error(f"{self.session_id}Error in _send_eof_after_delay: {e}", exc_info=True)
+        finally:
+            # Ensure the task reference is cleared once it's finished or cancelled.
+            # This is particularly important if _cancel_eof_timer wasn't called before this task finished naturally.
+            if self.eof_timer_task and self.eof_timer_task.done(): # Check if it's the current task
+                 self.eof_timer_task = None
+
+
     async def _send_eof_if_enabled(self) -> None:
         """Sends an EOF signal to the Vosk server if `self.send_eof` is True and connected."""
         if self.send_eof and self.vosk_client and self.vosk_client.is_connected:
@@ -1237,6 +1300,19 @@ class SmartSpeech(AIEngine):
             #     if self.debug: logging.debug(f"{self.session_id}VAD processed a silent chunk.")
             # else: # was_vad_buffer_processed is False
             #     if self.debug: logging.debug(f"{self.session_id}VAD buffer is still accumulating audio.")
+
+            # Manage EOF timer based on VAD state transitions
+            if was_vad_buffer_processed: # Only consider transitions if VAD actually processed a chunk
+                current_vad_active = self.vad_processor.speech_active
+                if current_vad_active and not self.previous_vad_active_state:
+                    if self.debug:
+                        logging.debug(f"{self.session_id}Speech started (transition detected). Cancelling EOF timer.")
+                    self._cancel_eof_timer()
+                elif not current_vad_active and self.previous_vad_active_state:
+                    if self.debug:
+                        logging.debug(f"{self.session_id}Speech ended (transition detected). Starting EOF timer.")
+                    self._start_eof_timer()
+                self.previous_vad_active_state = current_vad_active
 
 
     async def receive_transcripts(self) -> None:
@@ -1415,6 +1491,11 @@ class SmartSpeech(AIEngine):
         # 5. Cancel Vosk transcript receiving task
         logging.debug(f"{self.session_id}Ensuring Vosk transcript receive task is cancelled during close.")
         await self._cancel_receive_task() # Handles if task is None or already done
+
+        # 6. Cancel any pending EOF timer task
+        if self.debug:
+            logging.debug(f"{self.session_id}Cancelling any pending EOF timer during close.")
+        self._cancel_eof_timer()
         
         logging.info(f"{self.session_id}SmartSpeech session close procedure completed.")
 
@@ -1603,7 +1684,9 @@ class SmartSpeech(AIEngine):
                 # Optionally await here if further actions depend on TTS completion/failure directly.
                 # However, if this callback blocks, it might delay processing of other events.
                 # Current design: _handle_final_transcript is itself a task, so awaiting here is okay.
-                await self.tts_task 
+                # await self.tts_task # Removed to make TTS non-blocking
+                if self.debug:
+                    logging.debug(f"{self.session_id}TTS task created and will run in the background.")
             except asyncio.CancelledError:
                  # This would be if _handle_final_transcript task itself is cancelled while awaiting tts_task
                  logging.info(f"{self.session_id}SmartSpeech: TTS task creation or awaiting was cancelled.")
