@@ -901,6 +901,7 @@ class SmartSpeech(AIEngine):
         self.tts_task: Optional[asyncio.Task] = None     # Task for TTS generation
         self.timeout_monitor_task: Optional[asyncio.Task] = None  # Task for monitoring VAD timeouts
         self._is_closing: bool = False                   # Flag to indicate session closure is in progress
+        self.is_tts_active: bool = False                 # <<< ADDED: Flag to indicate TTS is actively playing
         
         # Barge-in timing control
         self.barge_in_speech_start_time: float = 0.0     # When continuous speech started during TTS
@@ -1360,53 +1361,72 @@ class SmartSpeech(AIEngine):
             if self.debug: 
                 hex_preview = ' '.join([f'{b:02x}' for b in audio_bytes_for_stt[:20]])
                 logging.debug(f"{self.session_id}Sending audio directly to STT (VAD bypassed): len={len(audio_bytes_for_stt)}, preview_hex={hex_preview}")
-            if self.vosk_client and self.vosk_client.is_connected:
-                await self.vosk_client.send_audio(audio_bytes_for_stt)
-            else:
-                logging.warning(f"{self.session_id}Vosk client not available for sending audio (VAD bypassed).")
+            
+            if not self.is_tts_active: # <<< MODIFIED: Check TTS status
+                if self.vosk_client and self.vosk_client.is_connected:
+                    await self.vosk_client.send_audio(audio_bytes_for_stt)
+                else:
+                    logging.warning(f"{self.session_id}Vosk client not available for sending audio (VAD bypassed).")
+            elif self.debug:
+                logging.debug(f"{self.session_id}TTS is active, discarding direct audio to prevent echo transcription (VAD bypassed).")
         else: # VAD is active
-            # Determine number of samples for VADProcessor. If tensor is None, estimate from bytes (assuming 16-bit mono).
             num_samples = tensor.shape[0] if tensor is not None else len(audio_bytes_for_stt) // 2 
             
-            # Add audio to VADProcessor, which buffers and runs VAD model internally
             was_vad_buffer_processed, is_speech_in_vad_chunk, vad_output_buffer_bytes = \
                 await self.vad_processor.add_audio(audio_bytes_for_stt, num_samples)
                 
-            if was_vad_buffer_processed and is_speech_in_vad_chunk:
-                # VAD processed a full chunk and detected speech (or ongoing speech state)
-                
-                # Delayed Barge-in: If TTS is playing and user starts speaking, check for sustained speech
-                if self.tts_task and not self.tts_task.done():
-                    current_time = time.time()
+            current_time = time.time()
+
+            # 1. Start or continue barge-in timing if user speaks during active TTS
+            if self.is_tts_active and is_speech_in_vad_chunk and not self.barge_in_pending:
+                self.barge_in_pending = True
+                self.barge_in_speech_start_time = current_time
+                logging.info(f"{self.session_id}User speech detected during TTS. Starting barge-in timer ({self.barge_in_threshold_seconds}s threshold). Current TTS active: {self.is_tts_active}")
+
+            # 2. Process barge-in if pending and threshold met
+            if self.barge_in_pending and is_speech_in_vad_chunk: # User is currently speaking and barge-in was initiated
+                speech_duration = current_time - self.barge_in_speech_start_time
+                if speech_duration >= self.barge_in_threshold_seconds:
+                    logging.info(f"{self.session_id}Sustained user speech ({speech_duration:.2f}s). Triggering barge-in. TTS active: {self.is_tts_active}")
                     
-                    # If this is the start of speech during TTS, start timing
-                    if not self.barge_in_pending:
-                        self.barge_in_pending = True
-                        self.barge_in_speech_start_time = current_time
-                        logging.info(f"{self.session_id}User speech detected during TTS. Starting barge-in timer ({self.barge_in_threshold_seconds}s threshold).")
-                    
-                    # Check if speech has been sustained long enough for barge-in
-                    speech_duration = current_time - self.barge_in_speech_start_time
-                    if speech_duration >= self.barge_in_threshold_seconds:
-                        logging.info(f"{self.session_id}Sustained user speech ({speech_duration:.2f}s) during TTS. Triggering barge-in.")
-                        self.tts_processor.interrupt() # Signal TTSProcessor to stop queuing and clear its queue
-                        self.tts_task.cancel() # Cancel the asyncio task running TTS generation
+                    if self.is_tts_active and self.tts_task and not self.tts_task.done():
+                        self.tts_processor.interrupt() 
+                        self.tts_task.cancel()
                         try:
-                            await self.tts_task # Await the cancellation to complete
+                            await self.tts_task 
                         except asyncio.CancelledError:
                             logging.info(f"{self.session_id}TTS task successfully cancelled due to sustained barge-in.")
                         except Exception as e_cancel:
                             logging.error(f"{self.session_id}Error awaiting cancelled TTS task during barge-in: {e_cancel}", exc_info=True)
-                        self.tts_task = None # Clear the reference, task is handled
-                        
-                        # Reset barge-in state
-                        self.barge_in_pending = False
-                        self.barge_in_speech_start_time = 0.0
-                    else:
-                        logging.info(f"{self.session_id}Speech duration {speech_duration:.2f}s < threshold {self.barge_in_threshold_seconds}s. Barge-in pending.")
+                        self.tts_task = None
+                    # Ensure TTS active flag is false AFTER attempting to stop TTS, regardless of its prior state when barge-in threshold met.
+                    self.is_tts_active = False 
+                    
+                    self.transcript_handler.clear_transcripts()
+                    logging.info(f"{self.session_id}Partial transcripts cleared due to barge-in.")
 
-                # Send the audio chunk from VAD to STT server (if VAD provided bytes)
-                if vad_output_buffer_bytes:
+                    if not self.bypass_vad:
+                        self.vad_processor.reset_vad_state(preserve_buffer=False)
+                        logging.info(f"{self.session_id}VAD state reset due to barge-in. Listening for new user utterance.")
+                    
+                    self.barge_in_pending = False # Barge-in completed
+                    self.barge_in_speech_start_time = 0.0
+                    vad_output_buffer_bytes = None # Consumed by barge-in, don't send this chunk to STT
+                else:
+                    logging.info(f"{self.session_id}User speech continues during TTS, duration {speech_duration:.2f}s < threshold {self.barge_in_threshold_seconds}s. Barge-in pending. TTS active: {self.is_tts_active}")
+            
+            # 3. Reset barge-in if user stops speaking *before* threshold is met
+            elif self.barge_in_pending and not is_speech_in_vad_chunk:
+                speech_duration_at_stop = current_time - self.barge_in_speech_start_time
+                logging.info(f"{self.session_id}User speech stopped during barge-in pending (duration: {speech_duration_at_stop:.2f}s). Resetting barge-in state as threshold not met. TTS active: {self.is_tts_active}")
+                self.barge_in_pending = False
+                self.barge_in_speech_start_time = 0.0
+                # If TTS had already finished by itself before this point, is_tts_active would be false.
+                # If TTS is still (or was just) active, the VAD audio here (silence) shouldn't be sent to STT if is_tts_active is true.
+
+            # 4. Send audio to STT if applicable (VAD output, no active TTS, not consumed by barge-in)
+            if was_vad_buffer_processed and vad_output_buffer_bytes: # vad_output_buffer_bytes might be None if barge-in consumed it
+                if not self.is_tts_active: 
                     if self.debug: 
                         hex_preview_vad = ' '.join([f'{b:02x}' for b in vad_output_buffer_bytes[:20]])
                         logging.debug(
@@ -1417,13 +1437,15 @@ class SmartSpeech(AIEngine):
                         await self.vosk_client.send_audio(vad_output_buffer_bytes)
                     else:
                         logging.warning(f"{self.session_id}Vosk client not available for sending VAD audio.")
+                elif self.debug and vad_output_buffer_bytes: # TTS is active, but VAD still produced something
+                    logging.debug(f"{self.session_id}TTS is active, discarding VAD output buffer to prevent echo transcription.")
             
             # Handle case where speech stops during barge-in pending (reset barge-in state)
-            elif was_vad_buffer_processed and not is_speech_in_vad_chunk and self.barge_in_pending:
-                speech_duration = time.time() - self.barge_in_speech_start_time
-                logging.info(f"{self.session_id}Speech ended during barge-in pending (duration: {speech_duration:.2f}s). Resetting barge-in state.")
+            # This needs to be after the main barge-in check.
+            if was_vad_buffer_processed and not is_speech_in_vad_chunk and self.barge_in_pending:
+                speech_duration_at_stop = time.time() - self.barge_in_speech_start_time
+                logging.info(f"{self.session_id}Speech ended during barge-in pending (duration: {speech_duration_at_stop:.2f}s). Resetting barge-in state as threshold not met.")
                 self.barge_in_pending = False
-                self.barge_in_speech_start_time = 0.0
 
             # Yield control briefly to allow other tasks to run
             if not self._is_closing:
@@ -1768,15 +1790,17 @@ class SmartSpeech(AIEngine):
                 f"{self.session_id}A previous TTS task was still active when a new final transcript "
                 f"arrived ('{final_text[:50]}...'). Attempting to cancel the old task first."
             )
-            self.tts_processor.interrupt() # Ensure its queue is cleared and event set
+            self.is_tts_active = False # <<< ADDED: Ensure flag is cleared if old task is cancelled here
+            self.tts_processor.interrupt()
             self.tts_task.cancel()
             try:
-                await self.tts_task # Await its completion/cancellation
+                await self.tts_task
             except asyncio.CancelledError:
                 logging.info(f"{self.session_id}Successfully cancelled the lingering TTS task before starting new one.")
-            except Exception as e: # Catch any other error from awaiting the old task
+            except Exception as e: 
                 logging.error(f"{self.session_id}Error awaiting lingering TTS task: {e}", exc_info=True)
-        self.tts_task = None # Reset tts_task, ready for a new one if needed
+        self.tts_task = None
+        self.is_tts_active = False # <<< ADDED: Ensure flag is false before potentially starting new TTS
 
         # 1. Get LLM Response (Simulated - Placeholder for actual LLM interaction)
         # In a real system, this would be an awaitable call to an LLM service.
@@ -1807,30 +1831,31 @@ class SmartSpeech(AIEngine):
         # 3. Initiate TTS generation for the LLM response
         if self.tts_processor:
             try:
-                # Create and store the new TTS task
+                self.is_tts_active = True # <<< ADDED: Set flag before creating TTS task
                 self.tts_task = asyncio.create_task(
                     self.tts_processor.generate_and_queue_tts_audio(llm_response_text),
-                    name=f"TTS-{self.session_id}-{time.time()}" # Unique name for the task
+                    name=f"TTS-{self.session_id}-{time.time()}"
                 )
-                # DO NOT await the TTS task here - let it run in the background
-                # This allows audio processing to continue and enables barge-in
                 logging.info(f"{self.session_id}SmartSpeech: TTS generation started in background. Barge-in enabled.")
                 
-                # Add a callback to log when TTS completes
                 def log_tts_completion(task):
                     try:
-                        task.result()  # This will raise any exception from the task
-                        if not self.barge_in_pending:  # Only log if not interrupted
+                        task.result()
+                        if not self.barge_in_pending:
                             logging.info(f"{self.session_id}SmartSpeech: TTS task completed successfully.")
                     except asyncio.CancelledError:
                         logging.info(f"{self.session_id}SmartSpeech: TTS task was cancelled (likely due to barge-in).")
                     except Exception as e:
                         logging.error(f"{self.session_id}SmartSpeech: TTS task failed with error: {e}", exc_info=True)
+                    finally:
+                        self.is_tts_active = False # <<< ADDED: Clear flag when TTS task finishes (success, cancel, or error)
+                        # If barge-in happened, it might have already set is_tts_active to False. This is safe.
                 
                 self.tts_task.add_done_callback(log_tts_completion)
                 
-            except Exception as e_tts_gen: # Catch any error during TTS task creation
+            except Exception as e_tts_gen:
                 logging.error(f"{self.session_id}SmartSpeech: Error during TTS generation task creation: {e_tts_gen}", exc_info=True)
-                self.tts_task = None # Ensure task is cleared on error
+                self.tts_task = None
+                self.is_tts_active = False # <<< ADDED: Clear flag on creation error
         else:
             logging.error(f"{self.session_id}SmartSpeech: TTSProcessor not initialized, cannot generate TTS.")
