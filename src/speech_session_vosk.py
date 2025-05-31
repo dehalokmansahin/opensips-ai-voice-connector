@@ -1838,20 +1838,55 @@ class SmartSpeech(AIEngine):
                 )
                 logging.info(f"{self.session_id}SmartSpeech: TTS generation started in background. Barge-in enabled.")
                 
-                def log_tts_completion(task):
+                async def log_tts_completion(task):
+                    await asyncio.sleep(0) # Ensure done callback is fully processed before queue check
                     try:
                         task.result()
-                        if not self.barge_in_pending:
+                        if not self.barge_in_pending: # Check barge_in_pending before logging success
                             logging.info(f"{self.session_id}SmartSpeech: TTS task completed successfully.")
                     except asyncio.CancelledError:
                         logging.info(f"{self.session_id}SmartSpeech: TTS task was cancelled (likely due to barge-in).")
                     except Exception as e:
                         logging.error(f"{self.session_id}SmartSpeech: TTS task failed with error: {e}", exc_info=True)
                     finally:
-                        self.is_tts_active = False # <<< ADDED: Clear flag when TTS task finishes (success, cancel, or error)
+                        # Check queue status before setting TTS to inactive
+                        # This is to ensure that all TTS audio packets have been sent from the queue
+                        # especially if the TTS generation itself was very fast.
+                        if not self.queue.empty():
+                            logging.info(f"{self.session_id}SmartSpeech: TTS task finished, but output queue has {self.queue.qsize()} items. Waiting for queue to empty...")
+                            queue_wait_start_time = time.time()
+                            max_queue_wait_seconds = 3.0
+
+                            while not self.queue.empty():
+                                if self._is_closing:
+                                    logging.warning(f"{self.session_id}SmartSpeech: Session closing, aborting TTS queue wait.")
+                                    break
+                                if self.barge_in_pending: # If barge-in started while waiting for queue
+                                    logging.warning(f"{self.session_id}SmartSpeech: Barge-in detected, aborting TTS queue wait.")
+                                    break
+                                if (time.time() - queue_wait_start_time) > max_queue_wait_seconds:
+                                    logging.error(
+                                        f"{self.session_id}SmartSpeech: TTS output queue did not empty after {max_queue_wait_seconds}s. "
+                                        f"Remaining items: {self.queue.qsize()}. Proceeding to set TTS inactive."
+                                    )
+                                    # Consider clearing the queue here if this timeout implies a problem
+                                    # while not self.queue.empty():
+                                    #     try: self.queue.get_nowait()
+                                    #     except Empty: break
+                                    break
+                                await asyncio.sleep(0.1) # Short sleep while checking queue
+
+                            elapsed_wait_time = time.time() - queue_wait_start_time
+                            if self.queue.empty():
+                                logging.info(f"{self.session_id}SmartSpeech: TTS output queue emptied after {elapsed_wait_time:.2f}s.")
+                            elif not self._is_closing and not self.barge_in_pending : # Log if not emptied due to timeout
+                                logging.warning(f"{self.session_id}SmartSpeech: TTS output queue wait finished after {elapsed_wait_time:.2f}s, but queue still has {self.queue.qsize()} items.")
+
+                        self.is_tts_active = False
                         # If barge-in happened, it might have already set is_tts_active to False. This is safe.
+                        logging.info(f"{self.session_id}SmartSpeech: is_tts_active set to False. Barge-in pending: {self.barge_in_pending}, Closing: {self._is_closing}")
                 
-                self.tts_task.add_done_callback(log_tts_completion)
+                self.tts_task.add_done_callback(lambda task: asyncio.create_task(log_tts_completion(task)))
                 
             except Exception as e_tts_gen:
                 logging.error(f"{self.session_id}SmartSpeech: Error during TTS generation task creation: {e_tts_gen}", exc_info=True)
