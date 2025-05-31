@@ -25,20 +25,20 @@ Module that provides helper functions for AI
 
 import re
 from sipmessage import Address
-from deepgram_api import Deepgram
-from openai_api import OpenAI
-from deepgram_native_api import DeepgramNative
+# from deepgram_api import Deepgram
+# from openai_api import OpenAI
+# from deepgram_native_api import DeepgramNative
 # from speech_session_vosk import SmartSpeech # Replaced by SpeechSessionManager
 from src.speech_processing.speech_session_manager import SpeechSessionManager
 from src.speech_processing.vosk_stt_engine import VoskSTTEngine
 from src.speech_processing.piper_tts_engine import PiperTTSEngine
 # Try to import Azure, but don't fail if not available
-try:
-    from azure_api import AzureAI
-    has_azure = True
-except ImportError:
-    has_azure = False
-    print("Azure module not available, Azure STT provider will be disabled")
+# try:
+#     from azure_api import AzureAI
+#     has_azure = True
+# except ImportError:
+#     has_azure = False
+#     print("Azure module not available, Azure STT provider will be disabled")
 from config import Config
 
 # Initialize FLAVORS dictionary
@@ -95,15 +95,12 @@ def _create_speech_session_manager(call, cfg):
     )
 
 FLAVORS = {
-    "deepgram": Deepgram,
-    "openai": OpenAI,
-    "deepgram_native": DeepgramNative,
-    "SmartSpeech": _create_speech_session_manager # Replaced here
+    "SmartSpeech": _create_speech_session_manager
 }
 
 # Add Azure if available
-if has_azure:
-    FLAVORS["azure"] = AzureAI
+# if has_azure:
+#     FLAVORS["azure"] = AzureAI
 
 class UnknownSIPUser(Exception):
     """ User is not known """

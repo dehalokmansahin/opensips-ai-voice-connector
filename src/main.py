@@ -19,7 +19,7 @@
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
 #
 
-""" Main module that starts the Deepgram AI integration """
+""" Main module that starts the AI Voice Connector """
 
 import sys
 import logging
