@@ -269,6 +269,12 @@ class VADProcessor:
         self.consecutive_silence_packets: int = 0 # Counter for consecutive silence chunks
         self.speech_active: bool = False  # Overall VAD state: True if speech is ongoing
         
+        # New: Add speech timing tracking for timeout detection
+        self.speech_start_time: float = 0.0  # When current speech started
+        self.last_speech_activity_time: float = 0.0  # Last time any speech was detected
+        self.speech_timeout_seconds: float = 10.0  # Maximum speech duration before forcing final
+        self.silence_timeout_seconds: float = 3.0   # Maximum silence after speech before forcing final
+        
         logging.info(
             f"{self.session_id}VADProcessor initialized: "
             f"ChunkMs={self.vad_buffer_chunk_ms}, SpeechThresh={self.speech_detection_threshold}, "
@@ -277,36 +283,32 @@ class VADProcessor:
     
     def reset_vad_state(self, preserve_buffer: bool = False) -> None:
         """
-        Resets the VAD state machine.
-
-        Clears speech/silence counters and deactivates `speech_active` state.
-        Optionally preserves or clears the internal audio buffer.
+        Resets the VAD state counters and optionally clears the audio buffer.
 
         Args:
-            preserve_buffer: If True, the existing audio in `_vad_buffer` is kept.
-                             If False (default), the buffer is cleared.
+            preserve_buffer: If True, keeps the current audio buffer. If False, clears it.
         """
-        if self.debug:
-            logging.debug(f"{self.session_id}Resetting VAD state. Preserve buffer: {preserve_buffer}")
-            
+        logging.info(
+            f"{self.session_id}VAD state reset. Speech was {'active' if self.speech_active else 'inactive'}. "
+            f"Buffer {'preserved' if preserve_buffer else 'cleared'}."
+        )
+        
+        # Reset state counters
         self.consecutive_speech_packets = 0
         self.consecutive_silence_packets = 0
         
-        was_active = self.speech_active
-        self.speech_active = False # Deactivate speech state
+        # Reset speech timing
+        self.speech_start_time = 0.0
+        self.last_speech_activity_time = time.time()
         
+        # Optionally clear buffer
         if not preserve_buffer:
             self._vad_buffer.clear()
             self._vad_buffer_size_samples = 0
-            self._last_buffer_flush_time = time.time() 
-            if self.debug:
-                logging.debug(f"{self.session_id}VAD audio buffer cleared.")
-            
-        logging.info(
-            f"{self.session_id}VAD state reset. Speech was previously "
-            f"{'active' if was_active else 'inactive'}. "
-            f"Buffer {'preserved' if preserve_buffer else 'cleared'}."
-        )
+            self._last_buffer_flush_time = time.time()
+        
+        # Important: Set speech_active to False after resetting counters but before any new processing
+        self.speech_active = False
 
     async def add_audio(self, audio_bytes: bytes, num_samples: int) -> Tuple[bool, bool, Optional[bytes]]:
         """
@@ -347,97 +349,106 @@ class VADProcessor:
     
     async def _process_buffer(self) -> Tuple[bool, bytes]:
         """
-        Internal method to process the current VAD buffer using the `VADDetector`.
-        
-        This method converts the buffered 16-bit PCM bytes to a float tensor,
-        gets a speech decision from `self.vad.is_speech()`, updates the VAD state machine
-        (`consecutive_speech_packets`, `consecutive_silence_packets`, `speech_active`),
-        and determines if the chunk should be sent to STT.
-        The buffer is cleared after processing.
+        Processes the current VAD buffer using the VAD detector.
 
-        Assumes `_vad_buffer_locks` is held by the caller.
+        This is called when the buffer reaches its configured chunk size.
+        It applies VAD to the buffered audio and updates the speech state based on
+        consecutive speech/silence detection thresholds.
 
         Returns:
-            A tuple (send_to_stt, buffer_bytes):
-            - `send_to_stt` (bool): True if this chunk should be sent to the STT engine.
-            - `buffer_bytes` (bytes): The actual audio bytes from the processed buffer.
+            A tuple containing:
+            - is_speech_in_current_chunk: Whether speech was detected in this chunk
+            - buffer_bytes: The audio bytes that were processed (for forwarding to STT)
         """
-        current_chunk_bytes = bytes(self._vad_buffer) # Copy buffer for processing
-        send_chunk_to_stt: bool = False 
+        if self.debug:
+            logging.debug(f"{self.session_id}VAD processing buffer of {len(self._vad_buffer)} bytes.")
         
-        try:
-            # Convert 16-bit PCM byte buffer to a float32 tensor for VAD model
-            # Normalization: int16 range is [-32768, 32767]. Dividing by 32768.0 maps it to [-1.0, 1.0).
-            audio_tensor = torch.frombuffer(bytearray(current_chunk_bytes), dtype=torch.int16).float() / 32768.0
-            
-            # Get speech detection result for the current chunk from the VAD detector
-            is_speech_in_current_chunk = self.vad.is_speech(audio_tensor)
-            
+        # Create a tensor from the buffer for VAD analysis
+        buffer_bytes = bytes(self._vad_buffer) # Copy buffer data before clearing
+        audio_tensor = torch.frombuffer(buffer_bytes, dtype=torch.int16).float() / 32768.0 # Normalize to [-1, 1]
+        
+        # Clear buffer after copying
+        self._vad_buffer.clear()
+        self._vad_buffer_size_samples = 0
+        self._last_buffer_flush_time = time.time()
+        
+        # Apply VAD to determine if speech is present in this chunk
+        is_speech_in_current_chunk = self.vad.is_speech(audio_tensor)
+        
+        current_time = time.time()
+        
+        # Update consecutive counters based on VAD result
+        if is_speech_in_current_chunk:
+            self.consecutive_speech_packets += 1
+            self.consecutive_silence_packets = 0 # Reset silence counter
+            self.last_speech_activity_time = current_time
+            if self.speech_start_time == 0.0:
+                self.speech_start_time = current_time
+                
             if self.debug:
                 logging.debug(
-                    f"{self.session_id}VAD processing chunk: "
-                    f"is_speech_in_chunk={is_speech_in_current_chunk}, "
-                    f"current_speech_active={self.speech_active}"
+                    f"{self.session_id}VAD detected speech in chunk "
+                    f"(consecutive_speech={self.consecutive_speech_packets})"
                 )
+                
+            # Check if we should activate speech state
+            if self.consecutive_speech_packets >= self.speech_detection_threshold and not self.speech_active:
+                self.speech_active = True
+                self.speech_start_time = current_time
+                logging.info(
+                    f"{self.session_id}Speech started (VAD active) after "
+                    f"{self.consecutive_speech_packets} consecutive speech chunk(s)."
+                )
+        else: # Current chunk is silent
+            self.consecutive_silence_packets += 1
+            self.consecutive_speech_packets = 0 # Reset speech counter
+            
+            if self.debug and self.speech_active:
+                logging.debug(
+                    f"{self.session_id}VAD detected silence in chunk while speech was active "
+                    f"(consecutive_silence={self.consecutive_silence_packets})"
+                )
+            
+            # Check if we should deactivate speech state
+            if self.consecutive_silence_packets >= self.silence_detection_threshold and self.speech_active:
+                self.speech_active = False
+                self.speech_start_time = 0.0
+                logging.info(
+                    f"{self.session_id}Speech ended (VAD inactive) after "
+                    f"{self.consecutive_silence_packets} consecutive silence chunk(s)."
+                )
+        
+        # Determine if this chunk should be sent to STT:
+        # Send if the current chunk itself contains speech, OR if speech is already generally active
+        # (e.g., to capture trailing audio after speech ends but before silence threshold is fully met).
+        send_chunk_to_stt = is_speech_in_current_chunk or self.speech_active
+        
+        if self.debug:
+            logging.debug(
+                f"{self.session_id}VAD decision: speech_in_chunk={is_speech_in_current_chunk}, "
+                f"speech_active={self.speech_active}, send_to_stt={send_chunk_to_stt}"
+            )
 
-            # Update consecutive speech/silence counters based on current chunk's VAD result
-            if is_speech_in_current_chunk:
-                self.consecutive_speech_packets += 1
-                self.consecutive_silence_packets = 0 
-            else:
-                self.consecutive_silence_packets += 1
-                self.consecutive_speech_packets = 0 
-            
-            # Update overall `speech_active` state based on thresholds
-            if is_speech_in_current_chunk:
-                # If speech is detected in the chunk and we've met the threshold, activate speech state
-                if self.consecutive_speech_packets >= self.speech_detection_threshold and not self.speech_active:
-                    self.speech_active = True
-                    logging.info(
-                        f"{self.session_id}Speech started (VAD active) after "
-                        f"{self.consecutive_speech_packets} consecutive speech chunk(s)."
-                    )
-            else: # Current chunk is silent
-                # If silence is detected and we've met the threshold while speech was active, deactivate
-                if self.debug and self.speech_active: 
-                     logging.debug(
-                         f"{self.session_id}VAD silence check (speech_active=true): "
-                         f"consecutive_silence_packets={self.consecutive_silence_packets}, "
-                         f"silence_detection_threshold={self.silence_detection_threshold}"
-                     )
-                if self.consecutive_silence_packets >= self.silence_detection_threshold and self.speech_active:
-                    self.speech_active = False
-                    logging.info(
-                        f"{self.session_id}Speech ended (VAD inactive) after "
-                        f"{self.consecutive_silence_packets} consecutive silence chunk(s)."
-                    )
-            
-            # Determine if this chunk should be sent to STT:
-            # Send if the current chunk itself contains speech, OR if speech is already generally active
-            # (e.g., to capture trailing audio after speech ends but before silence threshold is fully met).
-            send_chunk_to_stt = is_speech_in_current_chunk or self.speech_active
-            
-            if self.debug:
-                log_msg = "Send to STT" if send_chunk_to_stt else "Do not send to STT"
-                logging.debug(
-                    f"{self.session_id}VAD decision: {log_msg} "
-                    f"(chunk_speech={is_speech_in_current_chunk}, overall_speech_active={self.speech_active})"
-                )
-            
-            return send_chunk_to_stt, current_chunk_bytes
-            
-        except Exception as e:
-            logging.error(f"{self.session_id}Error processing VAD buffer: {str(e)}", exc_info=True)
-            # Fallback: don't send to STT on error, but return the buffer bytes
-            return False, current_chunk_bytes 
-        finally:
-            # Always clear the buffer and reset sample count after processing (or attempting to)
-            self._vad_buffer.clear()
-            self._vad_buffer_size_samples = 0
-            self._last_buffer_flush_time = time.time()
-            if self.debug:
-                logging.debug(f"{self.session_id}VAD buffer cleared after processing attempt.")
-    
+        return send_chunk_to_stt, buffer_bytes
+
+    def has_speech_timeout(self) -> bool:
+        """Check if speech has been going on too long and should be forced to end."""
+        if not self.speech_active or self.speech_start_time == 0.0:
+            return False
+        
+        current_time = time.time()
+        speech_duration = current_time - self.speech_start_time
+        return speech_duration > self.speech_timeout_seconds
+
+    def has_silence_timeout(self) -> bool:
+        """Check if silence after speech has gone on too long."""
+        if self.speech_active or self.last_speech_activity_time == 0.0:
+            return False
+        
+        current_time = time.time()
+        silence_duration = current_time - self.last_speech_activity_time
+        return silence_duration > self.silence_timeout_seconds
+
     async def process_final_buffer(self) -> Tuple[bool, Optional[bytes]]:
         """
         Processes any remaining audio in the VAD buffer.
@@ -487,6 +498,8 @@ class TranscriptHandler:
         """
         self.last_partial_transcript: str = ""
         self.last_final_transcript: str = ""
+        self.last_partial_timestamp: float = 0.0  # When the last partial was received
+        self.partial_unchanged_duration: float = 0.0  # How long the partial has been unchanged
         # Callbacks for transcript updates:
         self.on_partial_transcript: Optional[Callable[[str], Awaitable[None]]] = None
         self.on_final_transcript: Optional[Callable[[str], Awaitable[None]]] = None
@@ -510,22 +523,35 @@ class TranscriptHandler:
         """
         try:
             response = json.loads(message) # Parse the JSON message
+            current_time = time.time()
             
             # Handle partial transcript
             if "partial" in response:
                 partial_text = response.get("partial", "").strip() # Get partial text, strip whitespace
-                if partial_text != self.last_partial_transcript: # Update only if changed
+                
+                # Check if partial transcript has changed
+                if partial_text != self.last_partial_transcript:
                     self.last_partial_transcript = partial_text
+                    self.last_partial_timestamp = current_time
+                    self.partial_unchanged_duration = 0.0
+                    
                     if partial_text: # Log non-empty partials
                         logging.info(f"{self.session_id}Partial transcript: \"{partial_text}\"")
                     if self.on_partial_transcript and partial_text: # Trigger callback if set and text exists
                         await self.on_partial_transcript(partial_text)
+                else:
+                    # Partial hasn't changed, update duration
+                    self.partial_unchanged_duration = current_time - self.last_partial_timestamp
             
             # Handle final transcript
             if "text" in response:
                 final_text = response.get("text", "").strip() # Get final text, strip whitespace
                 if final_text: # Process only if final text is non-empty
                     self.last_final_transcript = final_text
+                    # Reset partial tracking since we got a final
+                    self.last_partial_timestamp = 0.0
+                    self.partial_unchanged_duration = 0.0
+                    
                     # It's common for final results to also update the last partial,
                     # ensuring consistency if no further partials arrive.
                     if final_text != self.last_partial_transcript:
@@ -545,6 +571,28 @@ class TranscriptHandler:
         except Exception as e:
             logging.error(f"{self.session_id}Error processing STT transcript message: {str(e)}", exc_info=True)
             return False
+
+    def has_stale_partial(self, max_unchanged_seconds: float = 2.0) -> bool:
+        """
+        Checks if the current partial transcript has been unchanged for too long.
+        
+        Args:
+            max_unchanged_seconds: Maximum time (in seconds) a partial can remain unchanged.
+            
+        Returns:
+            True if there's a stale partial that should be promoted to final.
+        """
+        if not self.last_partial_transcript or self.last_partial_timestamp == 0.0:
+            return False
+        
+        return self.partial_unchanged_duration >= max_unchanged_seconds
+
+    def clear_transcripts(self) -> None:
+        """Clears all transcript data and resets timing."""
+        self.last_partial_transcript = ""
+        self.last_final_transcript = ""
+        self.last_partial_timestamp = 0.0
+        self.partial_unchanged_duration = 0.0
     
     def get_final_transcript(self) -> str:
         """
@@ -851,11 +899,16 @@ class SmartSpeech(AIEngine):
         
         self.receive_task: Optional[asyncio.Task] = None # Task for receiving Vosk transcripts
         self.tts_task: Optional[asyncio.Task] = None     # Task for TTS generation
+        self.timeout_monitor_task: Optional[asyncio.Task] = None  # Task for monitoring VAD timeouts
         self._is_closing: bool = False                   # Flag to indicate session closure is in progress
+        
+        # Barge-in timing control
+        self.barge_in_speech_start_time: float = 0.0     # When continuous speech started during TTS
+        self.barge_in_pending: bool = False              # Whether barge-in is being considered
         
         self._setup_logging() # Configure logging level based on settings
         
-        logging.info(f"{self.session_id}SmartSpeech engine initialized. VAD Bypass: {self.bypass_vad}")
+        logging.info(f"{self.session_id}SmartSpeech engine initialized. VAD Bypass: {self.bypass_vad}, Barge-in threshold: {self.barge_in_threshold_seconds}s")
 
     def _load_config(self) -> None:
         """Loads STT, VAD, and TTS configurations from the application config."""
@@ -876,6 +929,14 @@ class SmartSpeech(AIEngine):
         # self.vad_buffer_max_seconds: float = self.cfg.get("vad_buffer_max_seconds", "vad_buffer_max_seconds", 2.0) # Currently unused
         self.speech_detection_threshold: int = self.cfg.get("speech_detection_threshold", "speech_detection_threshold", 1)
         self.silence_detection_threshold: int = self.cfg.get("silence_detection_threshold", "silence_detection_threshold", 1)
+        
+        # New timeout settings for robust transcript handling
+        self.speech_timeout_seconds: float = self.cfg.get("speech_timeout_seconds", "speech_timeout_seconds", 10.0)
+        self.silence_timeout_seconds: float = self.cfg.get("silence_timeout_seconds", "silence_timeout_seconds", 3.0)
+        self.stale_partial_timeout_seconds: float = self.cfg.get("stale_partial_timeout_seconds", "stale_partial_timeout_seconds", 2.5)
+            
+        # Barge-in control settings
+        self.barge_in_threshold_seconds: float = self.cfg.get("barge_in_threshold_seconds", "barge_in_threshold_seconds", 1.5)
             
         # Piper TTS Server settings
         self.tts_server_host_cfg: str = self.cfg.get("host", "TTS_HOST", "localhost")
@@ -893,6 +954,13 @@ class SmartSpeech(AIEngine):
             f"MinSpeechMs={self.vad_min_speech_ms}, MinSilenceMs={self.vad_min_silence_ms}, "
             f"BufferChunkMs={self.vad_buffer_chunk_ms}, SpeechDetectThresh={self.speech_detection_threshold}, "
             f"SilenceDetectThresh={self.silence_detection_threshold}"
+        )
+        logging.info(
+            f"{self.session_id}Timeout Config: SpeechTimeout={self.speech_timeout_seconds}s, "
+            f"SilenceTimeout={self.silence_timeout_seconds}s, StalePartialTimeout={self.stale_partial_timeout_seconds}s"
+        )
+        logging.info(
+            f"{self.session_id}Barge-in Config: Threshold={self.barge_in_threshold_seconds}s"
         )
 
     def _init_components(self, call: Any) -> None:
@@ -927,6 +995,10 @@ class SmartSpeech(AIEngine):
             debug=self.debug,
             session_id=self.session_id
         )
+        
+        # Configure timeout values for VAD processor
+        self.vad_processor.speech_timeout_seconds = self.speech_timeout_seconds
+        self.vad_processor.silence_timeout_seconds = self.silence_timeout_seconds
         
         # If VAD is bypassed, VADProcessor is always in "speech active" mode
         if self.bypass_vad:
@@ -1021,6 +1093,11 @@ class SmartSpeech(AIEngine):
                 
             # Start the background task to receive and process transcripts from Vosk
             self.receive_task = asyncio.create_task(self.receive_transcripts(), name=f"VoskReceive-{self.session_id}")
+            
+            # Start the timeout monitoring task to handle speech timeouts
+            if not self.bypass_vad:
+                self.timeout_monitor_task = asyncio.create_task(self._monitor_vad_timeouts(), name=f"VADTimeout-{self.session_id}")
+            
             logging.info(f"{self.session_id}SmartSpeech engine started successfully. Listening for transcripts.")
             return True
             
@@ -1029,7 +1106,98 @@ class SmartSpeech(AIEngine):
             if self.vosk_client and self.vosk_client.is_connected:
                 await self.vosk_client.disconnect() # Attempt cleanup
             return False
-    
+
+    async def _monitor_vad_timeouts(self) -> None:
+        """
+        Monitors VAD timeouts and generates final transcripts when needed.
+        
+        This task runs in the background and checks for speech/silence timeouts.
+        When a timeout is detected, it forces a final transcript generation using
+        the current partial transcript if available.
+        """
+        try:
+            while not self._is_closing:
+                await asyncio.sleep(0.5)  # Check every 500ms
+                
+                if not self.vad_processor or not self.transcript_handler:
+                    continue
+                
+                # Check for speech timeout (speech going too long)
+                if self.vad_processor.has_speech_timeout():
+                    logging.warning(f"{self.session_id}Speech timeout detected. Forcing final transcript generation.")
+                    await self._force_final_transcript("Speech timeout")
+                    continue
+                
+                # Check for silence timeout (silence after speech going too long)
+                if self.vad_processor.has_silence_timeout():
+                    logging.info(f"{self.session_id}Silence timeout detected. Forcing final transcript generation.")
+                    await self._force_final_transcript("Silence timeout")
+                    continue
+                
+                # Check for stale partial transcripts (partial unchanged for too long)
+                if self.transcript_handler.has_stale_partial(max_unchanged_seconds=self.stale_partial_timeout_seconds):
+                    logging.info(f"{self.session_id}Stale partial transcript detected. Promoting to final.")
+                    await self._force_final_transcript("Stale partial")
+                    continue
+                    
+        except asyncio.CancelledError:
+            logging.info(f"{self.session_id}VAD timeout monitor task cancelled.")
+        except Exception as e:
+            logging.error(f"{self.session_id}Error in VAD timeout monitor: {e}", exc_info=True)
+
+    async def _force_final_transcript(self, reason: str) -> None:
+        """
+        Forces generation of a final transcript using the current partial transcript.
+        
+        This is called when timeouts are detected and Vosk hasn't provided a final transcript.
+        
+        Args:
+            reason: The reason for forcing the transcript (for logging).
+        """
+        try:
+            if not self.transcript_handler.last_partial_transcript:
+                logging.info(f"{self.session_id}No partial transcript available for forced final ({reason}).")
+                # Reset VAD state even if no partial available
+                if not self.bypass_vad:
+                    self.vad_processor.reset_vad_state(preserve_buffer=False)
+                return
+            
+            partial_text = self.transcript_handler.last_partial_transcript.strip()
+            if not partial_text:
+                logging.info(f"{self.session_id}Partial transcript is empty for forced final ({reason}).")
+                # Reset VAD state and clear partial
+                if not self.bypass_vad:
+                    self.vad_processor.reset_vad_state(preserve_buffer=False)
+                self.transcript_handler.clear_transcripts()
+                return
+            
+            # Check minimum length threshold
+            if len(partial_text) < 2:
+                logging.info(f"{self.session_id}Partial transcript too short for forced final ({reason}): \"{partial_text}\"")
+                if not self.bypass_vad:
+                    self.vad_processor.reset_vad_state(preserve_buffer=False)
+                self.transcript_handler.clear_transcripts()
+                return
+            
+            logging.info(f"{self.session_id}Forcing final transcript from partial due to {reason}: \"{partial_text}\"")
+            
+            # Set the partial as final and trigger the callback
+            self.transcript_handler.last_final_transcript = partial_text
+            
+            # Reset VAD state to prepare for new speech
+            if not self.bypass_vad:
+                self.vad_processor.reset_vad_state(preserve_buffer=False)
+            
+            # Clear transcript timing to prevent double triggering
+            self.transcript_handler.clear_transcripts()
+            
+            # Trigger the final transcript callback
+            if self.transcript_handler.on_final_transcript:
+                asyncio.create_task(self.transcript_handler.on_final_transcript(partial_text))
+            
+        except Exception as e:
+            logging.error(f"{self.session_id}Error forcing final transcript: {e}", exc_info=True)
+
     async def stop(self) -> bool:
         """
         Stops the SmartSpeech engine components related to STT.
@@ -1207,18 +1375,35 @@ class SmartSpeech(AIEngine):
             if was_vad_buffer_processed and is_speech_in_vad_chunk:
                 # VAD processed a full chunk and detected speech (or ongoing speech state)
                 
-                # Barge-in: If TTS is playing and user starts speaking, interrupt TTS.
+                # Delayed Barge-in: If TTS is playing and user starts speaking, check for sustained speech
                 if self.tts_task and not self.tts_task.done():
-                    logging.info(f"{self.session_id}User speech detected during TTS playback. Interrupting TTS (barge-in).")
-                    self.tts_processor.interrupt() # Signal TTSProcessor to stop queuing and clear its queue
-                    self.tts_task.cancel() # Cancel the asyncio task running TTS generation
-                    try:
-                        await self.tts_task # Await the cancellation to complete
-                    except asyncio.CancelledError:
-                        logging.info(f"{self.session_id}TTS task successfully cancelled due to barge-in.")
-                    except Exception as e_cancel:
-                        logging.error(f"{self.session_id}Error awaiting cancelled TTS task during barge-in: {e_cancel}", exc_info=True)
-                    self.tts_task = None # Clear the reference, task is handled
+                    current_time = time.time()
+                    
+                    # If this is the start of speech during TTS, start timing
+                    if not self.barge_in_pending:
+                        self.barge_in_pending = True
+                        self.barge_in_speech_start_time = current_time
+                        logging.info(f"{self.session_id}User speech detected during TTS. Starting barge-in timer ({self.barge_in_threshold_seconds}s threshold).")
+                    
+                    # Check if speech has been sustained long enough for barge-in
+                    speech_duration = current_time - self.barge_in_speech_start_time
+                    if speech_duration >= self.barge_in_threshold_seconds:
+                        logging.info(f"{self.session_id}Sustained user speech ({speech_duration:.2f}s) during TTS. Triggering barge-in.")
+                        self.tts_processor.interrupt() # Signal TTSProcessor to stop queuing and clear its queue
+                        self.tts_task.cancel() # Cancel the asyncio task running TTS generation
+                        try:
+                            await self.tts_task # Await the cancellation to complete
+                        except asyncio.CancelledError:
+                            logging.info(f"{self.session_id}TTS task successfully cancelled due to sustained barge-in.")
+                        except Exception as e_cancel:
+                            logging.error(f"{self.session_id}Error awaiting cancelled TTS task during barge-in: {e_cancel}", exc_info=True)
+                        self.tts_task = None # Clear the reference, task is handled
+                        
+                        # Reset barge-in state
+                        self.barge_in_pending = False
+                        self.barge_in_speech_start_time = 0.0
+                    else:
+                        logging.info(f"{self.session_id}Speech duration {speech_duration:.2f}s < threshold {self.barge_in_threshold_seconds}s. Barge-in pending.")
 
                 # Send the audio chunk from VAD to STT server (if VAD provided bytes)
                 if vad_output_buffer_bytes:
@@ -1232,6 +1417,17 @@ class SmartSpeech(AIEngine):
                         await self.vosk_client.send_audio(vad_output_buffer_bytes)
                     else:
                         logging.warning(f"{self.session_id}Vosk client not available for sending VAD audio.")
+            
+            # Handle case where speech stops during barge-in pending (reset barge-in state)
+            elif was_vad_buffer_processed and not is_speech_in_vad_chunk and self.barge_in_pending:
+                speech_duration = time.time() - self.barge_in_speech_start_time
+                logging.info(f"{self.session_id}Speech ended during barge-in pending (duration: {speech_duration:.2f}s). Resetting barge-in state.")
+                self.barge_in_pending = False
+                self.barge_in_speech_start_time = 0.0
+
+            # Yield control briefly to allow other tasks to run
+            if not self._is_closing:
+                await asyncio.sleep(0)  # Allow other coroutines to run
             # Additional cases for logging or specific actions based on VAD output:
             # elif was_vad_buffer_processed and not is_speech_in_vad_chunk:
             #     if self.debug: logging.debug(f"{self.session_id}VAD processed a silent chunk.")
@@ -1365,7 +1561,7 @@ class SmartSpeech(AIEngine):
         2. Processing any final audio in the VAD buffer.
         3. Finalizing the transcript (e.g., using partial if no final).
         4. Sending EOF to Vosk and disconnecting the client.
-        5. Cancelling the Vosk transcript receiving task.
+        5. Cancelling the Vosk transcript receiving task and timeout monitor.
         """
         if self._is_closing:
             logging.info(f"{self.session_id}Close operation already in progress. Skipping.")
@@ -1388,7 +1584,19 @@ class SmartSpeech(AIEngine):
                 logging.error(f"{self.session_id}Error awaiting cancelled TTS task during close: {e_tts_cancel}", exc_info=True)
             self.tts_task = None # Ensure cleared
         
-        # 2. Process final VAD buffer (if VAD is not bypassed)
+        # 2. Cancel timeout monitor task
+        if hasattr(self, 'timeout_monitor_task') and self.timeout_monitor_task and not self.timeout_monitor_task.done():
+            logging.debug(f"{self.session_id}Cancelling VAD timeout monitor task during close.")
+            self.timeout_monitor_task.cancel()
+            try:
+                await self.timeout_monitor_task
+            except asyncio.CancelledError:
+                logging.info(f"{self.session_id}VAD timeout monitor task successfully cancelled during close.")
+            except Exception as e_monitor_cancel:
+                logging.error(f"{self.session_id}Error awaiting cancelled timeout monitor task during close: {e_monitor_cancel}", exc_info=True)
+            self.timeout_monitor_task = None
+        
+        # 3. Process final VAD buffer (if VAD is not bypassed)
         if not self.bypass_vad:
             try:
                 logging.debug(f"{self.session_id}Processing final VAD buffer before closing.")
@@ -1396,13 +1604,13 @@ class SmartSpeech(AIEngine):
             except Exception as e_vad_final:
                 logging.error(f"{self.session_id}Error processing final VAD buffer during close: {e_vad_final}", exc_info=True)
         
-        # 3. Finalize transcript (use partial if no final, etc.)
+        # 4. Finalize transcript (use partial if no final, etc.)
         try:
             self._finalize_transcript()
         except Exception as e_finalize:
             logging.error(f"{self.session_id}Error finalizing transcript during close: {e_finalize}", exc_info=True)
 
-        # 4. Send EOF and disconnect Vosk client
+        # 5. Send EOF and disconnect Vosk client
         if self.vosk_client and self.vosk_client.is_connected:
             try:
                 await self._send_eof_if_enabled() 
@@ -1412,7 +1620,7 @@ class SmartSpeech(AIEngine):
             except Exception as e_vosk_close:
                 logging.error(f"{self.session_id}Error disconnecting from Vosk server during close: {e_vosk_close}", exc_info=True)
         
-        # 5. Cancel Vosk transcript receiving task
+        # 6. Cancel Vosk transcript receiving task
         logging.debug(f"{self.session_id}Ensuring Vosk transcript receive task is cancelled during close.")
         await self._cancel_receive_task() # Handles if task is None or already done
         
@@ -1592,6 +1800,10 @@ class SmartSpeech(AIEngine):
             self.vad_processor.reset_vad_state(preserve_buffer=False) # Clear VAD buffer and state
             logging.info(f"{self.session_id}SmartSpeech: VAD state reset after LLM response, before TTS playback.")
         
+        # Reset barge-in state for new TTS session
+        self.barge_in_pending = False
+        self.barge_in_speech_start_time = 0.0
+        
         # 3. Initiate TTS generation for the LLM response
         if self.tts_processor:
             try:
@@ -1600,17 +1812,25 @@ class SmartSpeech(AIEngine):
                     self.tts_processor.generate_and_queue_tts_audio(llm_response_text),
                     name=f"TTS-{self.session_id}-{time.time()}" # Unique name for the task
                 )
-                # Optionally await here if further actions depend on TTS completion/failure directly.
-                # However, if this callback blocks, it might delay processing of other events.
-                # Current design: _handle_final_transcript is itself a task, so awaiting here is okay.
-                await self.tts_task 
-            except asyncio.CancelledError:
-                 # This would be if _handle_final_transcript task itself is cancelled while awaiting tts_task
-                 logging.info(f"{self.session_id}SmartSpeech: TTS task creation or awaiting was cancelled.")
-                 if self.tts_task and self.tts_task.done() and self.tts_task.cancelled():
-                     self.tts_task = None # Ensure task is cleared if it was cancelled
-            except Exception as e_tts_gen: # Catch any other error during TTS task creation/initial await
-                logging.error(f"{self.session_id}SmartSpeech: Error during TTS generation call: {e_tts_gen}", exc_info=True)
+                # DO NOT await the TTS task here - let it run in the background
+                # This allows audio processing to continue and enables barge-in
+                logging.info(f"{self.session_id}SmartSpeech: TTS generation started in background. Barge-in enabled.")
+                
+                # Add a callback to log when TTS completes
+                def log_tts_completion(task):
+                    try:
+                        task.result()  # This will raise any exception from the task
+                        if not self.barge_in_pending:  # Only log if not interrupted
+                            logging.info(f"{self.session_id}SmartSpeech: TTS task completed successfully.")
+                    except asyncio.CancelledError:
+                        logging.info(f"{self.session_id}SmartSpeech: TTS task was cancelled (likely due to barge-in).")
+                    except Exception as e:
+                        logging.error(f"{self.session_id}SmartSpeech: TTS task failed with error: {e}", exc_info=True)
+                
+                self.tts_task.add_done_callback(log_tts_completion)
+                
+            except Exception as e_tts_gen: # Catch any error during TTS task creation
+                logging.error(f"{self.session_id}SmartSpeech: Error during TTS generation task creation: {e_tts_gen}", exc_info=True)
                 self.tts_task = None # Ensure task is cleared on error
         else:
             logging.error(f"{self.session_id}SmartSpeech: TTSProcessor not initialized, cannot generate TTS.")
