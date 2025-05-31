@@ -38,9 +38,14 @@ class PiperTTSEngine(TTSEngineBase):
         Returns:
             bool: True if connection successful, False otherwise
         """
-        if self._is_connected_status and self.websocket and not self.websocket.closed:
-            logging.info(f"{self.session_id}Already connected to Piper TTS server.")
-            return True
+        if self._is_connected_status and self.websocket:
+            if hasattr(self.websocket, 'closed') and not self.websocket.closed:
+                logging.info(f"{self.session_id}Already connected to Piper TTS server.")
+                return True
+            elif not hasattr(self.websocket, 'closed'):
+                # For newer websockets library where 'closed' doesn't exist
+                logging.info(f"{self.session_id}Already connected to Piper TTS server.")
+                return True
         try:
             logging.info(f"{self.session_id}Connecting to Piper TTS server at {self.server_url}")
             self.websocket = await websockets.connect(self.server_url, open_timeout=self.timeout_seconds)
@@ -189,7 +194,12 @@ class PiperTTSEngine(TTSEngineBase):
         """Close the connection to the Piper TTS server."""
         if self.websocket:
             try:
-                if not self.websocket.closed:
+                if hasattr(self.websocket, 'closed'):
+                    if not self.websocket.closed:
+                        await self.websocket.close(code=1000, reason="Normal client disconnect")
+                        logging.info(f"{self.session_id}Piper TTS WebSocket connection closed gracefully.")
+                else:
+                    # For newer websockets library where 'closed' doesn't exist
                     await self.websocket.close(code=1000, reason="Normal client disconnect")
                     logging.info(f"{self.session_id}Piper TTS WebSocket connection closed gracefully.")
             except Exception as e:
@@ -200,10 +210,11 @@ class PiperTTSEngine(TTSEngineBase):
 
     def is_connected(self) -> bool:
         """Check the current connection status to the TTS service."""
-        if self._is_connected_status and self.websocket and self.websocket.closed:
-            # If status is true but websocket says closed, update internal status
-            logging.warning(f"{self.session_id}PiperTTSEngine: Connection status mismatch, websocket is closed.")
-            self._is_connected_status = False
+        if self._is_connected_status and self.websocket:
+            if hasattr(self.websocket, 'closed') and self.websocket.closed:
+                # If status is true but websocket says closed, update internal status
+                logging.warning(f"{self.session_id}PiperTTSEngine: Connection status mismatch, websocket is closed.")
+                self._is_connected_status = False
         return self._is_connected_status
 
     # Original methods like synthesize_and_process and stream_synthesize can be removed

@@ -185,8 +185,19 @@ class VoskSTTEngine(STTEngineBase):
         Checks the current connection status to the STT service.
         """
         # Check websocket state too, in case of abrupt disconnection
-        if self.websocket and self.websocket.closed:
-            self._is_connected_status = False
+        if self.websocket and hasattr(self.websocket, 'closed'):
+            # For older websockets library versions
+            if self.websocket.closed:
+                self._is_connected_status = False
+        elif self.websocket:
+            # For newer websockets library versions
+            try:
+                # Check if we can access any attribute that would raise an exception if disconnected
+                # or use our internal status flag
+                if not self._is_connected_status:
+                    return False
+            except Exception:
+                self._is_connected_status = False
         return self._is_connected_status
 
     # Keep original send method if it's used internally or for other purposes,

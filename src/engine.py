@@ -103,6 +103,10 @@ def parse_params(params):
         else:
             cfg.update(extra_params[flavor])
 
+    # Fallback to local config section if none from API or extra_params
+    if cfg is None:
+        cfg = Config.get(flavor)
+
     return flavor, to, cfg
 
 

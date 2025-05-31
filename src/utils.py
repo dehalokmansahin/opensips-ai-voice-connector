@@ -46,18 +46,29 @@ from config import Config
 # to correctly instantiate SpeechSessionManager with its required engines.
 
 def _create_speech_session_manager(call, cfg):
+    """
+    Creates and returns a SpeechSessionManager instance with initialized STT and TTS engines.
+    
+    Args:
+        call: The call object that contains the RTP queue and other call-specific data.
+        cfg: A ConfigSection object containing configuration for the SmartSpeech flavor.
+             This should contain settings like "url", "host", "port", "TTS_VOICE", etc.
+    
+    Returns:
+        A configured SpeechSessionManager instance ready to handle speech interactions.
+    """
     # cfg here is the session-specific config section for "SmartSpeech" flavor
     # Global Config is accessible via from config import Config
 
     # STT Engine (Vosk)
     # These settings should come from the 'SmartSpeech' (or new name) section of the config
     vosk_url = cfg.get("url", "ws://localhost:2700")
-    vosk_timeout = cfg.getfloat("websocket_timeout", 5.0) # Ensure float
+    vosk_timeout = cfg.getfloat("websocket_timeout", "5.0") # Pass as string to avoid os.getenv TypeError
     stt_engine = VoskSTTEngine(server_url=vosk_url, timeout=vosk_timeout)
 
     # TTS Engine (Piper)
-    piper_host = cfg.get("TTS_HOST", "localhost")
-    piper_port = cfg.getint("TTS_PORT", 8000) # Ensure int
+    piper_host = cfg.get("host", "localhost")
+    piper_port = cfg.getint("port", "8000") # Pass as string to avoid os.getenv TypeError
     # session_id for piper engine can be derived if needed, or passed if available
     # For now, PiperTTSEngine in TTSProcessor was using self.session_id from TTSProcessor
     # Let's assume PiperTTSEngine can get session_id from SpeechSessionManager if needed, or generate its own.
@@ -67,7 +78,7 @@ def _create_speech_session_manager(call, cfg):
     tts_engine = PiperTTSEngine(server_host=piper_host, server_port=piper_port)
 
     tts_voice_id = cfg.get("TTS_VOICE", "tr_TR-fahrettin-medium") # Default from original SmartSpeech
-    tts_input_rate = 22050 # Piper's default output rate
+    tts_input_rate = 22050 # Piper's default output rate is fixed, not from config
 
     # Note: SpeechSessionManager expects the *global* Config object,
     # from which it then extracts its own "SpeechSessionManager" or "SmartSpeech" section.

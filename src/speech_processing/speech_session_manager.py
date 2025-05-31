@@ -61,7 +61,11 @@ class SpeechSessionManager(AIEngine):
             tts_input_rate: The sample rate of audio produced by the tts_engine (e.g., 22050 for Piper).
         """
         self.cfg_root: Config = cfg # Store root config
-        self.session_cfg: Config = Config.get("SpeechSessionManager", cfg, Config.get("SmartSpeech", cfg)) # Use "SpeechSessionManager" or fallback to "SmartSpeech"
+        self.session_cfg: Config = Config.get("SpeechSessionManager", {}) # Use SpeechSessionManager or fallback to SmartSpeech
+        
+        # If SpeechSessionManager section is empty, try SmartSpeech as fallback
+        if not self.session_cfg or len(self.session_cfg) == 0:
+            self.session_cfg = Config.get("SmartSpeech", {})
 
         self.stt_engine: STTEngineBase = stt_engine
         self.tts_engine: TTSEngineBase = tts_engine

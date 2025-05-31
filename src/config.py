@@ -48,7 +48,12 @@ class ConfigSection(dict):
                     return os.getenv(e)
             # no key found - check if env is a list
             return fallback
-        return os.getenv(env, fallback)
+        # os.getenv requires string for default value
+        if fallback is not None and not isinstance(fallback, str):
+            fallback_str = str(fallback)
+        else:
+            fallback_str = fallback
+        return os.getenv(env, fallback_str)
 
     def get(self, option, env=None, fallback=None):
         """ returns the configuration for the required option """
@@ -73,6 +78,26 @@ class ConfigSection(dict):
         if val.lower() in ["no", "false", "off"]:
             return False
         return fallback
+
+    def getfloat(self, option, env=None, fallback=None):
+        """ returns a float value from the configuration """
+        val = self.get(option, env, None)
+        if val is None:
+            return fallback
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return fallback
+
+    def getint(self, option, env=None, fallback=None):
+        """ returns an integer value from the configuration """
+        val = self.get(option, env, None)
+        if val is None:
+            return fallback
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return fallback
 
 
 class Config():
