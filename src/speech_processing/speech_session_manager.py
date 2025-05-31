@@ -2,20 +2,18 @@ import asyncio
 import json
 import logging
 import time
-import random # For simulated LLM responses (placeholder)
-import audioop # For mu-law encoding/decoding if needed (TTS output to PCMU)
-from queue import Empty, Queue
+import random
+from queue import Queue
 from typing import Any, Callable, Awaitable, Optional, Tuple
+from aiortc.sdp import SessionDescription # Added for sdp_object type hint
 
-# Framework /
 import torch
-import torchaudio
-import websockets # Still needed by engines, but not directly by SpeechSessionManager
+import websockets
 
-# Project-specific imports (relative paths)
 from ..ai import AIEngine
 from ..config import Config
-from ..codec import get_codecs, PCMU, UnsupportedCodec
+from ..codec import get_codecs, PCMU, UnsupportedCodec, GenericCodec # Added GenericCodec for get_codec return hint
+from .. import constants
 
 from .audio_processor import AudioProcessor
 from .vad_detector import VADDetector
@@ -24,494 +22,434 @@ from .transcript_handler import TranscriptHandler
 from .tts_processor import TTSProcessor
 from .stt_engine_base import STTEngineBase
 from .tts_engine_base import TTSEngineBase
-# Specific engine implementations are not directly imported here, they are passed in.
-# from .vosk_stt_engine import VoskSTTEngine
-# from .piper_tts_engine import PiperTTSEngine
 
-
-class SpeechSessionManager(AIEngine):
-    """
-    Orchestrates full-duplex speech interaction using injected STT and TTS engines.
-
-    This class, derived from `AIEngine`, manages the entire lifecycle of a speech
-    session. It initializes and coordinates helper classes for audio input processing
-    (`AudioProcessor`), voice activity detection (`VADProcessor`), STT transcript
-    handling (`TranscriptHandler`), and TTS audio generation/playback (`TTSProcessor`).
-    The actual STT and TTS operations are delegated to engine instances provided
-    during initialization, which must adhere to STTEngineBase and TTSEngineBase interfaces.
-    """
-
-    def __init__(self,
-                 call: Any,
-                 cfg: Config,
-                 stt_engine: STTEngineBase,
-                 tts_engine: TTSEngineBase,
-                 tts_voice_id: str, # Added: Voice ID for TTS
-                 tts_input_rate: int # Added: Expected input sample rate for TTSProcessor from tts_engine
-                 ):
-        """
-        Initializes the SpeechSessionManager.
-
-        Args:
-            call: The call object, with `rtp` queue, `sdp`, `client_addr`/`port`.
-            cfg: The application configuration object.
-            stt_engine: An initialized STT engine instance (implementing STTEngineBase).
-            tts_engine: An initialized TTS engine instance (implementing TTSEngineBase).
-            tts_voice_id: The voice ID to be used for TTS synthesis.
-            tts_input_rate: The sample rate of audio produced by the tts_engine (e.g., 22050 for Piper).
-        """
-        self.cfg_root: Config = cfg # Store root config
-        self.session_cfg: Config = Config.get("SpeechSessionManager", {}) # Use SpeechSessionManager or fallback to SmartSpeech
+class SessionConfigurator:
+    """ Loads and holds all session-related configurations. """
+    def __init__(self, global_config: Config, session_id: str, sdp_object: SessionDescription,
+                 tts_voice_id: str, tts_input_rate: int):
+        self.global_config: Config = global_config
+        self.session_id: str = session_id
+        self.sdp_object: SessionDescription = sdp_object
         
-        # If SpeechSessionManager section is empty, try SmartSpeech as fallback
-        if not self.session_cfg or len(self.session_cfg) == 0:
-            self.session_cfg = Config.get("SmartSpeech", {})
+        self.session_cfg: Config = global_config.get("SpeechSessionManager", {})
+        if not self.session_cfg or len(self.session_cfg) == 0: # Fallback
+            self.session_cfg = global_config.get("SmartSpeech", {})
 
-        self.stt_engine: STTEngineBase = stt_engine
-        self.tts_engine: TTSEngineBase = tts_engine
-        # Store tts_voice_id and tts_input_rate for TTSProcessor initialization
-        self.tts_voice_id_cfg: str = tts_voice_id
-        self.tts_input_rate_cfg: int = tts_input_rate
+        # STT
+        self.target_sample_rate: int = int(self.session_cfg.get("stt_target_sample_rate", "sample_rate", 16000))
+        self.stt_channels: int = self.session_cfg.getint("stt_channels", "channels", 1)
+        self.send_eof_to_stt: bool = self.session_cfg.getboolean("stt_send_eof", "send_eof", True)
+        self.debug: bool = self.session_cfg.getboolean("debug", "debug", False)
 
-        self.b2b_key: Optional[str] = call.b2b_key if hasattr(call, 'b2b_key') else None
-        self.session_id: str = f"[Session:{self.b2b_key}] " if self.b2b_key else "[Session:Unknown] "
+        # VAD
+        self.bypass_vad: bool = self.session_cfg.getboolean("bypass_vad", "bypass_vad", False)
+        self.vad_threshold: float = self.session_cfg.getfloat("vad_threshold", "vad_threshold", 0.25)
+        self.vad_min_speech_ms: int = self.session_cfg.getint("vad_min_speech_ms", "vad_min_speech_ms", 150)
+        self.vad_min_silence_ms: int = self.session_cfg.getint("vad_min_silence_ms", "vad_min_silence_ms", 450)
+        self.vad_buffer_chunk_ms: int = self.session_cfg.getint("vad_buffer_chunk_ms", "vad_buffer_chunk_ms", 600)
+        self.speech_detection_threshold: int = self.session_cfg.getint("speech_detection_threshold", "speech_detection_threshold", 1)
+        self.silence_detection_threshold: int = self.session_cfg.getint("silence_detection_threshold", "silence_detection_threshold", 1)
 
-        self.rtp_queue: Queue = call.rtp
+        # Timeouts
+        self.speech_timeout_seconds: float = self.session_cfg.getfloat("speech_timeout_seconds", "speech_timeout_seconds", 10.0)
+        self.silence_timeout_seconds: float = self.session_cfg.getfloat("silence_timeout_seconds", "silence_timeout_seconds", 3.0)
+        self.stale_partial_timeout_seconds: float = self.session_cfg.getfloat("stale_partial_timeout_seconds", "stale_partial_timeout_seconds", 2.5)
+        self.barge_in_threshold_seconds: float = self.session_cfg.getfloat("barge_in_threshold_seconds", "barge_in_threshold_seconds", 1.5)
 
-        self._load_config()
-        self._init_components(call)
+        # TTS
+        self.tts_voice_id: str = tts_voice_id
+        self.tts_input_rate: int = tts_input_rate
+        self.tts_target_output_rate: int = int(self.session_cfg.get("tts_target_output_rate", "tts_target_output_rate", 8000))
 
-        self.receive_task: Optional[asyncio.Task] = None
-        self.tts_task: Optional[asyncio.Task] = None
+        # STT Reconnect
+        self.stt_max_reconnect_attempts: int = self.session_cfg.getint("stt_max_reconnect_attempts", "STT_MAX_RECONNECT_ATTEMPTS", 5)
+        self.stt_receive_error_sleep_s: float = self.session_cfg.getfloat("stt_receive_error_sleep_s", "STT_RECEIVE_ERROR_SLEEP_S", 1.0)
+        self.stt_reconnect_backoff_base: int = self.session_cfg.getint("stt_reconnect_backoff_base", "STT_RECONNECT_BACKOFF_BASE", 2)
+        self.stt_reconnect_max_backoff_s: float = self.session_cfg.getfloat("stt_reconnect_max_backoff_s", "STT_RECONNECT_MAX_BACKOFF_S", 10.0)
+
+        # VAD Final Buffer
+        self.vad_final_buffer_wait_factor: float = self.session_cfg.getfloat("vad_final_buffer_wait_factor", "VAD_FINAL_BUFFER_WAIT_FACTOR", 0.5)
+        self.vad_final_buffer_wait_additive_s: float = self.session_cfg.getfloat("vad_final_buffer_wait_additive_s", "VAD_FINAL_BUFFER_WAIT_ADDITIVE_S", 0.2)
+        self.vad_final_buffer_max_wait_s: float = self.session_cfg.getfloat("vad_final_buffer_max_wait_s", "VAD_FINAL_BUFFER_MAX_WAIT_S", 1.5)
+
+        self.codec: PCMU = self._choose_codec()
+        logging.info(f"{self.session_id}SessionConfigurator initialized. Codec: {self.codec.name if self.codec else 'None'}. Debug: {self.debug}")
+
+    def _choose_codec(self) -> PCMU:
+        codecs = get_codecs(self.sdp_object)
+        for c in codecs:
+            if c.payloadType == 0:
+                logging.info(f"{self.session_id}PCMU codec selected by SessionConfigurator.")
+                return PCMU(c)
+        raise UnsupportedCodec(f"{self.session_id}No supported codec (PCMU/0) found by SessionConfigurator.")
+
+class AudioOrchestrator:
+    def __init__(self, configurator: SessionConfigurator, session_id: str,
+                 on_vad_audio_chunk: Callable[[bytes], Awaitable[None]],
+                 on_barge_in_detected: Callable[[], Awaitable[None]],
+                 on_vad_timeout: Callable[[str], Awaitable[None]],
+                 is_tts_active_func: Callable[[], bool]):
+        self.config = configurator
+        self.session_id = session_id
+        self.on_vad_audio_chunk = on_vad_audio_chunk
+        self.on_barge_in_detected = on_barge_in_detected
+        self.on_vad_timeout = on_vad_timeout
+        self.is_tts_active_func = is_tts_active_func
+
+        self.audio_processor: AudioProcessor = AudioProcessor(
+            target_sample_rate=self.config.target_sample_rate,
+            debug=self.config.debug, session_id=self.session_id)
+        vad_detector = VADDetector(
+            sample_rate=self.config.target_sample_rate, threshold=self.config.vad_threshold,
+            min_speech_duration_ms=self.config.vad_min_speech_ms, min_silence_duration_ms=self.config.vad_min_silence_ms)
+        self.vad_processor: VADProcessor = VADProcessor(
+            vad_detector=vad_detector, target_sample_rate=self.config.target_sample_rate,
+            vad_buffer_chunk_ms=self.config.vad_buffer_chunk_ms,
+            speech_detection_threshold=self.config.speech_detection_threshold,
+            silence_detection_threshold=self.config.silence_detection_threshold,
+            debug=self.config.debug, session_id=self.session_id)
+        self.vad_processor.speech_timeout_seconds = self.config.speech_timeout_seconds
+        self.vad_processor.silence_timeout_seconds = self.config.silence_timeout_seconds
+        if self.config.bypass_vad:
+            self.vad_processor.speech_active = True
+            logging.info(f"{self.session_id}VAD is bypassed in AudioOrchestrator.")
         self.timeout_monitor_task: Optional[asyncio.Task] = None
-        self._is_closing: bool = False
-        self.is_tts_active: bool = False
-
+        self._is_monitoring: bool = False
         self.barge_in_speech_start_time: float = 0.0
         self.barge_in_pending: bool = False
 
-        self._setup_logging()
-
-        logging.info(f"{self.session_id}SpeechSessionManager initialized. VAD Bypass: {self.bypass_vad}, Barge-in threshold: {self.barge_in_threshold_seconds}s")
-
-    def _load_config(self) -> None:
-        """Loads session configurations from the application config."""
-        # STT general settings (engine specific settings are handled by the engine itself)
-        self.target_sample_rate: int = int(self.session_cfg.get("stt_target_sample_rate", "sample_rate", 16000))
-        self.stt_channels: int = self.session_cfg.get("stt_channels", "channels", 1)
-        self.send_eof_to_stt: bool = self.session_cfg.get("stt_send_eof", "send_eof", True)
-        self.debug: bool = self.session_cfg.get("debug", "debug", False)
-
-        # VAD settings
-        self.bypass_vad: bool = self.session_cfg.get("bypass_vad", "bypass_vad", False)
-        self.vad_threshold: float = self.session_cfg.get("vad_threshold", "vad_threshold", 0.25)
-        self.vad_min_speech_ms: int = self.session_cfg.get("vad_min_speech_ms", "vad_min_speech_ms", 150)
-        self.vad_min_silence_ms: int = self.session_cfg.get("vad_min_silence_ms", "vad_min_silence_ms", 450)
-        self.vad_buffer_chunk_ms: int = self.session_cfg.get("vad_buffer_chunk_ms", "vad_buffer_chunk_ms", 600)
-        self.speech_detection_threshold: int = self.session_cfg.get("speech_detection_threshold", "speech_detection_threshold", 1)
-        self.silence_detection_threshold: int = self.session_cfg.get("silence_detection_threshold", "silence_detection_threshold", 1)
-
-        self.speech_timeout_seconds: float = self.session_cfg.get("speech_timeout_seconds", "speech_timeout_seconds", 10.0)
-        self.silence_timeout_seconds: float = self.session_cfg.get("silence_timeout_seconds", "silence_timeout_seconds", 3.0)
-        self.stale_partial_timeout_seconds: float = self.session_cfg.get("stale_partial_timeout_seconds", "stale_partial_timeout_seconds", 2.5)
-        self.barge_in_threshold_seconds: float = self.session_cfg.get("barge_in_threshold_seconds", "barge_in_threshold_seconds", 1.5)
-
-        # TTS general settings (engine specific settings are handled by the engine itself)
-        # self.tts_voice_cfg is passed in __init__
-        self.tts_target_output_rate_cfg: int = int(self.session_cfg.get("tts_target_output_rate", "tts_target_output_rate", 8000))
-
-        logging.info(f"{self.session_id}STT Target Rate: {self.target_sample_rate}Hz, Channels: {self.stt_channels}")
-        logging.info(
-            f"{self.session_id}TTS Config: Voice={self.tts_voice_id_cfg}, InputRate (from engine)={self.tts_input_rate_cfg}Hz, Target Output Rate={self.tts_target_output_rate_cfg}Hz"
-        )
-        # VAD, Timeout, Barge-in logs remain similar to before.
-
-    def _init_components(self, call: Any) -> None:
-        """Initializes all processing components."""
-        self.call: Any = call
-        self.client_addr: Tuple[str, int] = call.client_addr
-        self.client_port: int = call.client_port
-        self.codec: PCMU = self.choose_codec(call.sdp)
-
-        self.audio_processor: AudioProcessor = AudioProcessor(
-            target_sample_rate=self.target_sample_rate, # For STT
-            debug=self.debug,
-            session_id=self.session_id
-        )
-
-        vad_detector_instance = VADDetector( # VAD still uses its own model
-            sample_rate=self.target_sample_rate, # Operates on STT-ready audio
-            threshold=self.vad_threshold,
-            min_speech_duration_ms=self.vad_min_speech_ms,
-            min_silence_duration_ms=self.vad_min_silence_ms
-        )
-
-        self.vad_processor: VADProcessor = VADProcessor(
-            vad_detector=vad_detector_instance,
-            target_sample_rate=self.target_sample_rate,
-            vad_buffer_chunk_ms=self.vad_buffer_chunk_ms,
-            speech_detection_threshold=self.speech_detection_threshold,
-            silence_detection_threshold=self.silence_detection_threshold,
-            debug=self.debug,
-            session_id=self.session_id
-        )
-
-        self.vad_processor.speech_timeout_seconds = self.speech_timeout_seconds
-        self.vad_processor.silence_timeout_seconds = self.silence_timeout_seconds
-
-        if self.bypass_vad:
-            self.vad_processor.speech_active = True
-            logging.info(f"{self.session_id}VAD is bypassed.")
-
-        self.transcript_handler: TranscriptHandler = TranscriptHandler(session_id=self.session_id)
-
-        # STT Engine is already initialized and passed in (self.stt_engine)
-        # TTS Engine is already initialized and passed in (self.tts_engine)
-
-        self.tts_processor: TTSProcessor = TTSProcessor(
-            rtp_queue=self.rtp_queue,
-            tts_engine=self.tts_engine, # Pass the initialized TTS engine
-            tts_voice_id=self.tts_voice_id_cfg,
-            tts_input_rate=self.tts_input_rate_cfg, # Pass the engine's specific input rate
-            tts_target_output_rate=self.tts_target_output_rate_cfg,
-            session_id=self.session_id,
-            debug=self.debug
-        )
-
-        self.transcript_handler.on_final_transcript = self._handle_final_transcript
-        logging.info(f"{self.session_id}All SpeechSessionManager components initialized.")
-
-    def _setup_logging(self) -> None:
-        if self.debug:
-            logging.getLogger().setLevel(logging.DEBUG)
-            logging.debug(f"{self.session_id}Debug logging enabled for SpeechSessionManager.")
-
-    def choose_codec(self, sdp: str) -> PCMU:
-        codecs = get_codecs(sdp)
-        for c in codecs:
-            if c.payloadType == 0:
-                logging.info(f"{self.session_id}PCMU codec selected.")
-                return PCMU(c)
-        raise UnsupportedCodec(f"{self.session_id}No supported codec (PCMU/0) found.")
-
-    async def start(self) -> bool:
-        logging.info(f"{self.session_id}SpeechSessionManager starting...")
-        self._is_closing = False
-
-        try:
-            if not await self.stt_engine.connect():
-                logging.error(f"{self.session_id}Failed to connect STT engine. Cannot start session.")
-                return False
-
-            stt_engine_config = { "config": { "sample_rate": self.target_sample_rate, "num_channels": self.stt_channels } }
-            # Note: This config structure is Vosk-like. Other engines might need different config structures.
-            # This might need to be made more generic or handled by the engine implementation itself if possible.
-            if not await self.stt_engine.send_config(stt_engine_config):
-                logging.error(f"{self.session_id}Failed to send initial config to STT engine. Disconnecting.")
-                await self.stt_engine.disconnect()
-                return False
-
-            self.receive_task = asyncio.create_task(self.receive_transcripts(), name=f"STTReceive-{self.session_id}")
-
-            if not self.bypass_vad:
-                self.timeout_monitor_task = asyncio.create_task(self._monitor_vad_timeouts(), name=f"VADTimeout-{self.session_id}")
-
-            logging.info(f"{self.session_id}SpeechSessionManager started successfully.")
-            return True
-
-        except Exception as e:
-            logging.error(f"{self.session_id}Error during SpeechSessionManager start: {e}", exc_info=True)
-            if self.stt_engine and self.stt_engine.is_connected():
-                await self.stt_engine.disconnect()
-            return False
+    async def process_incoming_audio(self, raw_audio_bytes: bytes) -> None:
+        if not self._is_monitoring: return
+        resampled_tensor, processed_audio_bytes_for_stt = self.audio_processor.process_bytes_audio(raw_audio_bytes)
+        if processed_audio_bytes_for_stt is None: return
+        if self.config.debug: logging.debug(f"{self.session_id}AO: Handling processed audio: {len(processed_audio_bytes_for_stt)} bytes.")
+        if self.config.bypass_vad:
+            if not self.is_tts_active_func(): await self.on_vad_audio_chunk(processed_audio_bytes_for_stt)
+            else: logging.debug(f"{self.session_id}AO: VAD bypassed, TTS active, audio not sent for STT.")
+            return
+        num_samples = resampled_tensor.shape[0] if resampled_tensor is not None else len(processed_audio_bytes_for_stt) // 2
+        was_vad_processed, is_speech_present, vad_output_buffer = await self.vad_processor.add_audio(processed_audio_bytes_for_stt, num_samples)
+        current_time = time.time()
+        if self.is_tts_active_func() and is_speech_present and not self.barge_in_pending:
+            self.barge_in_pending = True; self.barge_in_speech_start_time = current_time
+            logging.info(f"{self.session_id}AO: Barge-in timer started.")
+        if self.barge_in_pending and is_speech_present:
+            if (current_time - self.barge_in_speech_start_time) >= self.config.barge_in_threshold_seconds:
+                logging.info(f"{self.session_id}AO: Barge-in triggered.")
+                await self.on_barge_in_detected(); vad_output_buffer = None
+        elif self.barge_in_pending and not is_speech_present:
+            logging.info(f"{self.session_id}AO: Barge-in timer reset (speech stopped)."); self.barge_in_pending = False
+        if was_vad_processed and vad_output_buffer:
+            if not self.is_tts_active_func() or self.config.bypass_vad : await self.on_vad_audio_chunk(vad_output_buffer)
+            else: logging.debug(f"{self.session_id}AO: VAD audio chunk produced but TTS active and barge-in not triggered.")
+        if self._is_monitoring: await asyncio.sleep(0)
 
     async def _monitor_vad_timeouts(self) -> None:
-        # This method remains largely the same as it interacts with VADProcessor and TranscriptHandler
         try:
-            while not self._is_closing:
-                await asyncio.sleep(0.5)
-                if not self.vad_processor or not self.transcript_handler: continue
+            while self._is_monitoring:
+                await asyncio.sleep(constants.VAD_MONITOR_INTERVAL_S)
+                if not self.vad_processor: continue
                 if self.vad_processor.has_speech_timeout():
-                    logging.warning(f"{self.session_id}Speech timeout. Forcing final transcript.")
-                    await self._force_final_transcript("Speech timeout")
-                    continue
+                    logging.warning(f"{self.session_id}AO: Speech timeout."); await self.on_vad_timeout("Speech timeout"); continue
                 if self.vad_processor.has_silence_timeout():
-                    logging.info(f"{self.session_id}Silence timeout. Forcing final transcript.")
-                    await self._force_final_transcript("Silence timeout")
-                    continue
-                if self.transcript_handler.has_stale_partial(max_unchanged_seconds=self.stale_partial_timeout_seconds):
-                    logging.info(f"{self.session_id}Stale partial. Promoting to final.")
-                    await self._force_final_transcript("Stale partial")
-        except asyncio.CancelledError:
-            logging.info(f"{self.session_id}VAD timeout monitor cancelled.")
-        except Exception as e:
-            logging.error(f"{self.session_id}Error in VAD timeout monitor: {e}", exc_info=True)
+                    logging.info(f"{self.session_id}AO: Silence timeout."); await self.on_vad_timeout("Silence timeout"); continue
+        except asyncio.CancelledError: logging.info(f"{self.session_id}AO: VAD timeout monitor cancelled.")
+        except Exception as e: logging.error(f"{self.session_id}AO: Error in VAD timeout monitor: {e}", exc_info=True)
 
-    async def _force_final_transcript(self, reason: str) -> None:
-        # This method remains largely the same
+    def start_monitoring(self) -> None:
+        self._is_monitoring = True
+        if not self.config.bypass_vad:
+            self.timeout_monitor_task = asyncio.create_task(self._monitor_vad_timeouts(), name=f"VADTimeout-{self.session_id}")
+        logging.info(f"{self.session_id}AudioOrchestrator monitoring started.")
+
+    async def stop_monitoring(self) -> None:
+        self._is_monitoring = False
+        if self.timeout_monitor_task and not self.timeout_monitor_task.done():
+            self.timeout_monitor_task.cancel()
+            try: await self.timeout_monitor_task
+            except asyncio.CancelledError: pass
+        logging.info(f"{self.session_id}AudioOrchestrator monitoring stopped.")
+
+    async def process_final_buffer(self) -> Tuple[bool, Optional[bytes]]:
+        if not self.config.bypass_vad and self.vad_processor: return await self.vad_processor.process_final_buffer()
+        return False, None
+
+    def reset_vad_state(self, preserve_buffer: bool = False) -> None:
+        if self.vad_processor: self.vad_processor.reset_vad_state(preserve_buffer)
+        self.barge_in_pending = False
+
+class TranscriptCoordinator:
+    def __init__(self, stt_engine: STTEngineBase, configurator: SessionConfigurator,
+                 session_id: str, on_final_transcript: Callable[[str], Awaitable[None]]):
+        self.stt_engine = stt_engine; self.config = configurator; self.session_id = session_id
+        self.on_final_transcript_callback = on_final_transcript
+        self.transcript_handler: TranscriptHandler = TranscriptHandler(session_id=self.session_id)
+        self.transcript_handler.on_final_transcript = self._internal_on_final_transcript
+        self.receive_task: Optional[asyncio.Task] = None; self._is_running: bool = False
+
+    async def _internal_on_final_transcript(self, final_text: str): await self.on_final_transcript_callback(final_text)
+
+    async def start(self) -> bool:
+        self._is_running = True; logging.info(f"{self.session_id}TC: Starting STT connection.")
+        try:
+            if not await self.stt_engine.connect():
+                logging.error(f"{self.session_id}TC: Failed to connect STT."); self._is_running = False; return False
+            stt_cfg = {"config": {"sample_rate": self.config.target_sample_rate, "num_channels": self.config.stt_channels}}
+            if not await self.stt_engine.send_config(stt_cfg):
+                logging.error(f"{self.session_id}TC: Failed to send config to STT."); await self.stt_engine.disconnect(); self._is_running = False; return False
+            self.receive_task = asyncio.create_task(self.receive_transcripts_loop(), name=f"STTReceive-{self.session_id}")
+            logging.info(f"{self.session_id}TC: Started successfully."); return True
+        except Exception as e:
+            logging.error(f"{self.session_id}TC: Error during start: {e}", exc_info=True)
+            if self.stt_engine and self.stt_engine.is_connected(): await self.stt_engine.disconnect()
+            self._is_running = False; return False
+
+    async def stop(self) -> bool:
+        logging.info(f"{self.session_id}TC: Stopping STT components."); self._is_running = False
+        if self.config.send_eof_to_stt and self.stt_engine and self.stt_engine.is_connected():
+            try: logging.debug(f"{self.session_id}TC: Sending EOF."); await self.stt_engine.send_eof()
+            except Exception as e: logging.error(f"{self.session_id}TC: Error sending EOF: {e}", exc_info=True)
+        if self.stt_engine and self.stt_engine.is_connected():
+            try: await self.stt_engine.disconnect()
+            except Exception as e: logging.error(f"{self.session_id}TC: Error disconnecting STT: {e}", exc_info=True)
+        if self.receive_task and not self.receive_task.done():
+            self.receive_task.cancel()
+            try: await self.receive_task
+            except asyncio.CancelledError: logging.info(f"{self.session_id}TC: STT receive task cancelled.")
+        logging.info(f"{self.session_id}TC: STT components stopped."); return True
+
+    async def close(self) -> None: await self.stop(); logging.info(f"{self.session_id}TC: Closed.")
+
+    async def send_audio_to_stt(self, audio_bytes: bytes) -> None:
+        if not self._is_running or not self.stt_engine or not self.stt_engine.is_connected(): return
+        try: await self.stt_engine.send_audio(audio_bytes)
+        except Exception as e: logging.error(f"{self.session_id}TC: Error sending audio to STT: {e}", exc_info=True)
+
+    async def receive_transcripts_loop(self) -> None:
+        reconnect_attempts = 0
+        try:
+            while self._is_running:
+                try:
+                    if not self.stt_engine or not self.stt_engine.is_connected():
+                        if not self._is_running: break
+                        logging.warning(f"{self.session_id}TC: STT disconnected. Reconnecting...")
+                        if await self._try_reconnect_stt_engine(reconnect_attempts): reconnect_attempts = 0
+                        else:
+                            reconnect_attempts += 1
+                            if reconnect_attempts >= self.config.stt_max_reconnect_attempts:
+                                logging.error(f"{self.session_id}TC: Max STT reconnect attempts. Stopping."); self._is_running = False; break
+                            continue
+                    message = await self.stt_engine.receive_result()
+                    if not self._is_running and message is None: break
+                    if message is None:
+                        if self.stt_engine and not self.stt_engine.is_connected() and self._is_running:
+                            logging.warning(f"{self.session_id}TC: STT connection closed (recv None).")
+                        continue
+                    reconnect_attempts = 0
+                    if self.config.debug: logging.debug(f"{self.session_id}TC: Raw STT: \"{message[:70]}...\"")
+                    await self.transcript_handler.handle_message(message)
+                except websockets.exceptions.ConnectionClosed as conn_err:
+                    logging.error(f"{self.session_id}TC: STT connection closed: {conn_err}", exc_info=False)
+                    if self.stt_engine: await self.stt_engine.disconnect()
+                    if not self._is_running: break
+                except asyncio.CancelledError: logging.info(f"{self.session_id}TC: receive_transcripts_loop cancelled."); raise
+                except Exception as e:
+                    logging.error(f"{self.session_id}TC: Error in receive_transcripts_loop: {e}", exc_info=True)
+                    if not self._is_running: break
+                    await asyncio.sleep(self.config.stt_receive_error_sleep_s)
+            logging.info(f"{self.session_id}TC: Exiting receive_transcripts_loop.")
+        except asyncio.CancelledError: logging.info(f"{self.session_id}TC: receive_transcripts_loop explicitly cancelled.")
+        except Exception as e: logging.critical(f"{self.session_id}TC: Fatal error in receive_transcripts_loop: {e}", exc_info=True)
+        finally: logging.info(f"{self.session_id}TC: receive_transcripts_loop finally block.")
+
+    async def force_final_transcript(self, reason: str) -> None:
         try:
             if not self.transcript_handler.last_partial_transcript:
-                logging.info(f"{self.session_id}No partial for forced final ({reason}).")
-                if not self.bypass_vad: self.vad_processor.reset_vad_state(preserve_buffer=False)
-                return
+                logging.info(f"{self.session_id}TC: No partial for forced final ({reason})."); return
             partial_text = self.transcript_handler.last_partial_transcript.strip()
-            if not partial_text or len(partial_text) < 2 : # Added min length check
-                logging.info(f"{self.session_id}Partial too short or empty for forced final ({reason}): '{partial_text}'")
-                if not self.bypass_vad: self.vad_processor.reset_vad_state(preserve_buffer=False)
-                self.transcript_handler.clear_transcripts()
-                return
-            logging.info(f"{self.session_id}Forcing final transcript ({reason}): \"{partial_text}\"")
+            if not partial_text or len(partial_text) < constants.MIN_PARTIAL_LENGTH_FOR_FORCED_FINAL:
+                logging.info(f"{self.session_id}TC: Partial too short for forced final ({reason}): '{partial_text}'")
+                self.transcript_handler.clear_transcripts(); return
+            logging.info(f"{self.session_id}TC: Forcing final transcript ({reason}): \"{partial_text}\"")
             self.transcript_handler.last_final_transcript = partial_text
-            if not self.bypass_vad: self.vad_processor.reset_vad_state(preserve_buffer=False)
             self.transcript_handler.clear_transcripts()
             if self.transcript_handler.on_final_transcript:
                 asyncio.create_task(self.transcript_handler.on_final_transcript(partial_text))
-        except Exception as e:
-            logging.error(f"{self.session_id}Error forcing final transcript: {e}", exc_info=True)
+        except Exception as e: logging.error(f"{self.session_id}TC: Error forcing final transcript: {e}", exc_info=True)
 
-    async def stop(self) -> bool:
-        # This method should primarily deal with the STT engine for graceful shutdown of STT.
-        # Full cleanup is in `close`.
-        logging.info(f"{self.session_id}Stopping SpeechSessionManager STT components.")
-        try:
-            await self._send_eof_to_stt_if_enabled()
-            if self.stt_engine.is_connected():
-                await self.stt_engine.disconnect() # Disconnect STT engine
-            await self._cancel_task(self.receive_task, "STTReceiveTask")
-            logging.info(f"{self.session_id}SpeechSessionManager STT components stopped.")
-            return True
-        except Exception as e:
-            logging.error(f"{self.session_id}Error stopping STT components: {e}", exc_info=True)
-            return False
-
-    async def _cancel_task(self, task: Optional[asyncio.Task], task_name: str, timeout: float = 1.0) -> bool:
-        if not task or task.done(): return True
-        try:
-            logging.debug(f"{self.session_id}Cancelling {task_name}.")
-            task.cancel()
-            await asyncio.wait_for(task, timeout=timeout)
-            return True
-        except asyncio.TimeoutError:
-            logging.warning(f"{self.session_id}{task_name} timed out during cancellation.")
-        except asyncio.CancelledError:
-            logging.info(f"{self.session_id}{task_name} was cancelled successfully.")
-        except Exception as e:
-            logging.error(f"{self.session_id}Error managing {task_name}: {e}", exc_info=True)
-        return False
-
-    async def _send_eof_to_stt_if_enabled(self) -> None:
-        if self.send_eof_to_stt and self.stt_engine and self.stt_engine.is_connected():
-            try:
-                logging.debug(f"{self.session_id}Sending EOF to STT engine.")
-                await self.stt_engine.send_eof()
-            except Exception as e:
-                logging.error(f"{self.session_id}Error sending EOF to STT engine: {e}", exc_info=True)
-
-    async def send(self, audio: bytes) -> None:
-        if self._is_closing:
-            logging.warning(f"{self.session_id}Send called while closing. Skipping.")
-            return
-        if not self.stt_engine or not self.stt_engine.is_connected():
-            logging.warning(f"{self.session_id}STT engine not connected. Cannot send audio.")
-            return
-        try:
-            if not isinstance(audio, bytes):
-                logging.warning(f"{self.session_id}Audio type {type(audio)}, expected bytes. Skipping.")
-                return
-            resampled_tensor, processed_audio_bytes_for_stt = self.audio_processor.process_bytes_audio(audio)
-            if processed_audio_bytes_for_stt is None: return
-            await self._handle_processed_audio(resampled_tensor, processed_audio_bytes_for_stt)
-        except Exception as e:
-            logging.error(f"{self.session_id}Error in SpeechSessionManager.send: {e}", exc_info=True)
-
-    async def _handle_processed_audio(self, tensor: Optional[torch.Tensor], audio_bytes_for_stt: bytes) -> None:
-        # This method's logic for VAD and barge-in remains, but STT send uses self.stt_engine
-        if self.debug: logging.debug(f"{self.session_id}Handling processed audio: {len(audio_bytes_for_stt)} bytes.")
-
-        if self.bypass_vad:
-            if not self.is_tts_active:
-                if self.stt_engine and self.stt_engine.is_connected():
-                    await self.stt_engine.send_audio(audio_bytes_for_stt)
-            # ... (logging for VAD bypass)
-        else: # VAD is active
-            num_samples = tensor.shape[0] if tensor is not None else len(audio_bytes_for_stt) // 2
-            was_vad_proc, is_speech, vad_buffer = await self.vad_processor.add_audio(audio_bytes_for_stt, num_samples)
-
-            current_time = time.time()
-            # Barge-in logic (simplified for brevity, assume it's similar to original)
-            if self.is_tts_active and is_speech and not self.barge_in_pending:
-                self.barge_in_pending = True; self.barge_in_speech_start_time = current_time
-                logging.info(f"{self.session_id}Barge-in timer started.")
-
-            if self.barge_in_pending and is_speech:
-                if (current_time - self.barge_in_speech_start_time) >= self.barge_in_threshold_seconds:
-                    logging.info(f"{self.session_id}Barge-in triggered.")
-                    if self.tts_task and not self.tts_task.done():
-                        self.tts_processor.interrupt(); self.tts_task.cancel()
-                        try: await self.tts_task
-                        except asyncio.CancelledError: logging.info(f"{self.session_id}TTS task cancelled by barge-in.")
-                    self.is_tts_active = False
-                    self.transcript_handler.clear_transcripts()
-                    self.vad_processor.reset_vad_state(preserve_buffer=False)
-                    self.barge_in_pending = False
-                    vad_buffer = None # Audio consumed by barge-in start
-            elif self.barge_in_pending and not is_speech:
-                 logging.info(f"{self.session_id}Barge-in timer reset (speech stopped).")
-                 self.barge_in_pending = False
-
-            if was_vad_proc and vad_buffer:
-                if not self.is_tts_active:
-                    if self.stt_engine and self.stt_engine.is_connected():
-                        await self.stt_engine.send_audio(vad_buffer)
-                # ... (logging for sending VAD buffer)
-            if not self._is_closing: await asyncio.sleep(0)
-
-    async def receive_transcripts(self) -> None:
-        # Uses self.stt_engine.receive_result()
-        try:
-            reconnect_attempts = 0; max_reconnect_attempts = 5
-            while not self._is_closing:
-                try:
-                    if not self.stt_engine or not self.stt_engine.is_connected():
-                        logging.warning(f"{self.session_id}STT engine disconnected. Attempting reconnect...")
-                        if await self._try_reconnect_stt_engine(reconnect_attempts, max_reconnect_attempts):
-                            reconnect_attempts = 0
-                        else:
-                            reconnect_attempts +=1
-                            if reconnect_attempts >= max_reconnect_attempts: break
-                            continue
-
-                    message = await self.stt_engine.receive_result()
-                    if self.debug and message: logging.debug(f"{self.session_id}Raw STT response: \"{message[:70]}...\"")
-
-                    if message is None:
-                        if self.stt_engine and not self.stt_engine.is_connected() and not self._is_closing:
-                            logging.warning(f"{self.session_id}STT connection closed after receive_result timeout.")
-                        continue
-
-                    reconnect_attempts = 0
-                    if not await self.transcript_handler.handle_message(message):
-                        logging.warning(f"{self.session_id}Transcript handler failed for: {message[:100]}...")
-                except websockets.exceptions.ConnectionClosed as conn_err: # This might be too specific if not all STT engines use websockets
-                    logging.error(f"{self.session_id}STT connection closed: {conn_err}", exc_info=True)
-                    if self.stt_engine: await self.stt_engine.disconnect() # Ensure engine knows
-                    if self._is_closing: break
-                except asyncio.CancelledError: raise
-                except Exception as e:
-                    logging.error(f"{self.session_id}Error in receive_transcripts: {e}", exc_info=True)
-                    await asyncio.sleep(1)
-            logging.info(f"{self.session_id}Exiting receive_transcripts loop.")
-        except asyncio.CancelledError: logging.info(f"{self.session_id}Receive_transcripts task cancelled.")
-        except Exception as e: logging.critical(f"{self.session_id}Fatal error in receive_transcripts: {e}", exc_info=True)
-
-    async def _try_reconnect_stt_engine(self, current_attempts: int, max_attempts: int) -> bool:
-        # Uses self.stt_engine
-        if current_attempts >= max_attempts: return False
+    async def _try_reconnect_stt_engine(self, current_attempts: int) -> bool:
+        if current_attempts >= self.config.stt_max_reconnect_attempts: return False
         attempt_num = current_attempts + 1
-        backoff_time = min(2 ** attempt_num, 10)
-        logging.info(f"{self.session_id}Reconnecting STT engine (attempt {attempt_num}/{max_attempts}), wait {backoff_time}s.")
+        backoff_time = min(self.config.stt_reconnect_backoff_base ** attempt_num, self.config.stt_reconnect_max_backoff_s)
+        logging.info(f"{self.session_id}TC: Reconnecting STT (attempt {attempt_num}/{self.config.stt_max_reconnect_attempts}), wait {backoff_time}s.")
         await asyncio.sleep(backoff_time)
         try:
             if not await self.stt_engine.connect(): return False
-            stt_cfg = {"config": {"sample_rate": self.target_sample_rate, "num_channels": self.stt_channels}}
+            stt_cfg = {"config": {"sample_rate": self.config.target_sample_rate, "num_channels": self.config.stt_channels}}
             if not await self.stt_engine.send_config(stt_cfg):
-                await self.stt_engine.disconnect()
-                return False
-            logging.info(f"{self.session_id}STT engine reconnected and configured.")
+                await self.stt_engine.disconnect(); return False
+            logging.info(f"{self.session_id}TC: STT engine reconnected and configured.")
             return True
-        except Exception as e:
-            logging.error(f"{self.session_id}Error reconnecting STT engine: {e}", exc_info=True)
-            return False
+        except Exception as e: logging.error(f"{self.session_id}TC: Error reconnecting STT: {e}", exc_info=True); return False
+
+class TTSCoordinator:
+    def __init__(self, tts_engine: TTSEngineBase, configurator: SessionConfigurator,
+                 rtp_queue: Queue, session_id: str):
+        self.tts_engine = tts_engine; self.config = configurator; self.rtp_queue = rtp_queue; self.session_id = session_id
+        self.tts_processor: TTSProcessor = TTSProcessor(
+            rtp_queue=self.rtp_queue, tts_engine=self.tts_engine, tts_voice_id=self.config.tts_voice_id,
+            tts_input_rate=self.config.tts_input_rate, tts_target_output_rate=self.config.tts_target_output_rate,
+            session_id=self.session_id, debug=self.config.debug)
+        self._current_tts_task: Optional[asyncio.Task] = None
+
+    async def synthesize_and_send(self, text: str) -> asyncio.Task:
+        if self._current_tts_task and not self._current_tts_task.done():
+            logging.info(f"{self.session_id}TTSC: TTS already in progress, cancelling previous.")
+            self.interrupt(); await asyncio.sleep(0) # Allow cancellation to register
+        self._current_tts_task = asyncio.create_task(
+            self.tts_processor.generate_and_queue_tts_audio(text), name=f"TTSGen-{self.session_id}-{time.time()}")
+        return self._current_tts_task
+
+    def interrupt(self) -> None:
+        logging.info(f"{self.session_id}TTSC: Interrupt called.")
+        if self.tts_processor: self.tts_processor.interrupt()
+        if self._current_tts_task and not self._current_tts_task.done(): self._current_tts_task.cancel()
+
+    def is_active(self) -> bool: return bool(self._current_tts_task and not self._current_tts_task.done())
 
     async def close(self) -> None:
-        if self._is_closing: logging.info(f"{self.session_id}Close already in progress."); return
-        logging.info(f"{self.session_id}Closing SpeechSessionManager.")
-        self._is_closing = True
-
-        await self._cancel_task(self.tts_task, "TTSGenerationTask")
-        if self.tts_processor: self.tts_processor.interrupt() # Clear RTP queue
-
-        await self._cancel_task(self.timeout_monitor_task, "VADTimeoutMonitor")
-
-        if not self.bypass_vad and hasattr(self, 'vad_processor'): # Check attribute exists
-            try: await self._process_final_vad_buffer()
-            except Exception as e: logging.error(f"{self.session_id}Error final VAD processing: {e}", exc_info=True)
-
-        if hasattr(self, 'transcript_handler'): self._finalize_transcript()
-
-        if self.stt_engine and self.stt_engine.is_connected():
-            try:
-                await self._send_eof_to_stt_if_enabled()
-                await self.stt_engine.disconnect()
-            except Exception as e: logging.error(f"{self.session_id}Error disconnecting STT: {e}", exc_info=True)
-
-        if self.tts_engine and self.tts_engine.is_connected(): # Also disconnect TTS engine
+        logging.info(f"{self.session_id}TTSC: Closing."); self.interrupt()
+        if self.tts_engine and self.tts_engine.is_connected():
             try: await self.tts_engine.disconnect()
-            except Exception as e: logging.error(f"{self.session_id}Error disconnecting TTS: {e}", exc_info=True)
+            except Exception as e: logging.error(f"{self.session_id}TTSC: Error disconnecting TTS engine: {e}")
+        logging.info(f"{self.session_id}TTSC: Closed.")
 
-        await self._cancel_task(self.receive_task, "STTReceiveTask")
-        logging.info(f"{self.session_id}SpeechSessionManager closed.")
+class SpeechSessionManager(AIEngine):
+    def __init__(self, call: Any, cfg: Config, stt_engine: STTEngineBase, tts_engine: TTSEngineBase,
+                 tts_voice_id: str, tts_input_rate: int):
+        self.call_ref = call
+        self.session_id: str = f"[Session:{call.b2b_key}] " if hasattr(call, 'b2b_key') else "[Session:Unknown] "
+        self._is_closing: bool = False
+        self._current_tts_task: Optional[asyncio.Task] = None
+        self.configurator = SessionConfigurator(cfg, self.session_id, call.sdp, tts_voice_id, tts_input_rate)
+        self._setup_logging()
+        self.audio_orchestrator = AudioOrchestrator(
+            configurator=self.configurator, session_id=self.session_id,
+            on_vad_audio_chunk=self._handle_vad_audio_chunk, on_barge_in_detected=self._handle_barge_in,
+            on_vad_timeout=self._handle_vad_timeout,
+            is_tts_active_func=lambda: self.tts_coordinator.is_active() if hasattr(self, 'tts_coordinator') else False)
+        self.transcript_coordinator = TranscriptCoordinator(
+            stt_engine=stt_engine, configurator=self.configurator, session_id=self.session_id,
+            on_final_transcript=self._handle_final_transcript)
+        self.tts_coordinator = TTSCoordinator(
+            tts_engine=tts_engine, configurator=self.configurator, rtp_queue=call.rtp, session_id=self.session_id)
+        logging.info(f"{self.session_id}SSM initialized. VAD Bypass: {self.configurator.bypass_vad}, Barge-in: {self.configurator.barge_in_threshold_seconds}s")
 
-    def _finalize_transcript(self) -> None:
-        # This method remains largely the same
-        if not self.transcript_handler.last_final_transcript and self.transcript_handler.last_partial_transcript:
-            self.transcript_handler.last_final_transcript = self.transcript_handler.last_partial_transcript
-        final_text = self.transcript_handler.last_final_transcript
-        logging.info(f"{self.session_id}Definitive final transcript: \"{final_text if final_text else '(empty)'}\"")
+    def _setup_logging(self) -> None:
+        if self.configurator.debug: logging.getLogger().setLevel(logging.DEBUG)
+        logging.debug(f"{self.session_id}Debug logging for session: {self.configurator.debug}")
 
-    def terminate_call(self) -> None: # Remains the same
-        logging.info(f"{self.session_id}Signaling call termination.")
-        if hasattr(self.call, 'terminated'): self.call.terminated = True
+    async def start(self) -> bool:
+        logging.info(f"{self.session_id}SSM starting session..."); self._is_closing = False
+        if not await self.transcript_coordinator.start():
+            logging.error(f"{self.session_id}SSM: Failed to start TranscriptCoordinator."); return False
+        self.audio_orchestrator.start_monitoring()
+        logging.info(f"{self.session_id}SSM session started successfully."); return True
 
-    def set_log_level(self, level: int) -> None: # Remains the same
-        self.debug = (level == logging.DEBUG)
-        if hasattr(self, 'audio_processor'): self.audio_processor.debug = self.debug
-        if hasattr(self, 'vad_processor'): self.vad_processor.debug = self.debug
-        if hasattr(self, 'tts_processor'): self.tts_processor.debug = self.debug
-        # STT/TTS engine debug levels are managed by their own instances/configs
-        logging.getLogger().setLevel(level if self.debug else logging.INFO) # Adjust global or dedicated logger
-        logging.info(f"{self.session_id}Log level set to {logging.getLevelName(level)}.")
+    async def send(self, audio: bytes) -> None:
+        if self._is_closing: return
+        await self.audio_orchestrator.process_incoming_audio(audio)
 
-    async def _process_final_vad_buffer(self) -> None:
-        # This method remains largely the same, uses self.stt_engine
-        is_speech, buffer_bytes = await self.vad_processor.process_final_buffer()
-        if buffer_bytes and self.stt_engine and self.stt_engine.is_connected():
-            if is_speech:
-                await self.stt_engine.send_audio(buffer_bytes)
-                wait_time = min(len(buffer_bytes) / (2 * self.target_sample_rate) * 0.5 + 0.2, 1.5)
-                await asyncio.sleep(wait_time)
+    async def _handle_vad_audio_chunk(self, audio_bytes: bytes) -> None:
+        if self._is_closing: return
+        await self.transcript_coordinator.send_audio_to_stt(audio_bytes)
 
-    def get_final_transcript(self) -> str: # Remains the same
-        return self.transcript_handler.get_final_transcript()
+    async def _handle_barge_in(self) -> None:
+        if self._is_closing: return
+        logging.info(f"{self.session_id}SSM: Handling barge-in."); self.tts_coordinator.interrupt()
+        if self._current_tts_task and not self._current_tts_task.done(): self._current_tts_task.cancel()
+        self.audio_orchestrator.reset_vad_state(preserve_buffer=False)
+        if hasattr(self.transcript_coordinator, 'transcript_handler'):
+            self.transcript_coordinator.transcript_handler.clear_transcripts()
+        logging.debug(f"{self.session_id}SSM: Barge-in handled.")
+
+    async def _handle_vad_timeout(self, reason: str) -> None:
+        if self._is_closing: return
+        logging.info(f"{self.session_id}SSM: Handling VAD timeout: {reason}.")
+        await self.transcript_coordinator.force_final_transcript(reason)
+        self.audio_orchestrator.reset_vad_state(preserve_buffer=False)
 
     async def _handle_final_transcript(self, final_text: str) -> None:
-        # This method remains largely the same, TTSProcessor already uses the tts_engine
-        logging.info(f"{self.session_id}Handling final transcript: \"{final_text[:100]}...\"")
-        if self.tts_task and not self.tts_task.done():
-            self.is_tts_active = False
-            self.tts_processor.interrupt(); self.tts_task.cancel()
-            try: await self.tts_task
-            except asyncio.CancelledError: logging.info(f"{self.session_id}Lingering TTS task cancelled.")
-        self.tts_task = None; self.is_tts_active = False
-
-        # Simulated LLM response
-        llm_response_text = random.choice(["Merhaba.", "Anlıyorum.", "Lütfen devam edin."])
-        logging.info(f"{self.session_id}Simulated LLM response: \"{llm_response_text}\"")
-
-        if not self.bypass_vad: self.vad_processor.reset_vad_state(preserve_buffer=False)
-        self.barge_in_pending = False
-
-        if self.tts_processor:
+        if self._is_closing: return
+        logging.info(f"{self.session_id}SSM: Handling final transcript: \"{final_text[:100]}...\"")
+        if self.tts_coordinator.is_active():
+            logging.info(f"{self.session_id}SSM: Interrupting active TTS for new final transcript.")
+            self.tts_coordinator.interrupt()
+            if self._current_tts_task and not self._current_tts_task.done():
+                self._current_tts_task.cancel()
+                try: await self._current_tts_task
+                except asyncio.CancelledError: logging.info(f"{self.session_id}SSM: Previous TTS task cancelled.")
+        self._current_tts_task = None
+        llm_response_text = random.choice([f"Reply: {final_text}", "Noted.", "Interesting point."])
+        logging.info(f"{self.session_id}SSM: Simulated LLM response: \"{llm_response_text}\"")
+        self.audio_orchestrator.reset_vad_state(preserve_buffer=False)
+        self.audio_orchestrator.barge_in_pending = False
+        if llm_response_text:
             try:
-                self.is_tts_active = True
-                self.tts_task = asyncio.create_task(
-                    self.tts_processor.generate_and_queue_tts_audio(llm_response_text),
-                    name=f"TTS-{self.session_id}-{time.time()}"
-                )
-                # Simplified done callback for brevity
-                self.tts_task.add_done_callback(lambda t: setattr(self, 'is_tts_active', False) or logging.info(f"{self.session_id}TTS task done (status: {t.exception() is None})."))
-            except Exception as e:
-                logging.error(f"{self.session_id}Error creating TTS task: {e}", exc_info=True)
-                self.is_tts_active = False
+                logging.info(f"{self.session_id}SSM: Starting TTS for: \"{llm_response_text[:50]}...\"")
+                self._current_tts_task = await self.tts_coordinator.synthesize_and_send(llm_response_text)
+            except Exception as e: logging.error(f"{self.session_id}SSM: Error starting TTS: {e}", exc_info=True)
+        else: logging.info(f"{self.session_id}SSM: LLM produced empty response.")
+
+    async def stop(self) -> bool:
+        logging.info(f"{self.session_id}SSM: stop called (delegating to TranscriptCoordinator).")
+        if hasattr(self, 'transcript_coordinator'): return await self.transcript_coordinator.stop()
+        return True
+
+    async def close(self) -> None:
+        if self._is_closing: logging.info(f"{self.session_id}SSM: close already in progress."); return
+        logging.info(f"{self.session_id}SSM: closing session..."); self._is_closing = True
+        if hasattr(self, 'audio_orchestrator'): await self.audio_orchestrator.stop_monitoring()
+        if hasattr(self, 'tts_coordinator'): await self.tts_coordinator.close()
+        if self._current_tts_task and not self._current_tts_task.done():
+             self._current_tts_task.cancel()
+             try: await self._current_tts_task
+             except asyncio.CancelledError: pass
+        if hasattr(self, 'transcript_coordinator'):
+            if hasattr(self, 'audio_orchestrator') and not self.configurator.bypass_vad:
+                try:
+                    is_speech, fb = await self.audio_orchestrator.process_final_buffer()
+                    if fb and is_speech:
+                        logging.debug(f"{self.session_id}SSM: Sending final VAD buffer to STT on close.")
+                        await self.transcript_coordinator.send_audio_to_stt(fb)
+                        await asyncio.sleep(self.configurator.vad_final_buffer_wait_factor)
+                except Exception as e: logging.error(f"{self.session_id}SSM: Error final VAD processing: {e}", exc_info=True)
+            await self.transcript_coordinator.close()
+        if hasattr(self, 'transcript_coordinator') and hasattr(self.transcript_coordinator, 'transcript_handler'):
+             final_text = self.transcript_coordinator.transcript_handler.get_final_transcript()
+             logging.info(f"{self.session_id}SSM: Definitive final transcript on close: \"{final_text if final_text else '(empty)'}\"")
+        logging.info(f"{self.session_id}SSM: session closed.")
+
+    def get_codec(self) -> PCMU:
+        if not hasattr(self, 'configurator'): raise RuntimeError("SessionConfigurator not initialized.")
+        return self.configurator.codec
+
+    def get_final_transcript(self) -> str:
+        if hasattr(self, 'transcript_coordinator') and hasattr(self.transcript_coordinator, 'transcript_handler'):
+            return self.transcript_coordinator.transcript_handler.get_final_transcript()
+        return ""
+
+    def terminate_call(self) -> None:
+        logging.info(f"{self.session_id}SSM: terminate_call invoked by external interface.")
+        if hasattr(self.call_ref, 'terminate'): self.call_ref.terminate()
         else:
-            logging.error(f"{self.session_id}TTSProcessor not available.")
+            logging.warning(f"{self.session_id}SSM: call_ref has no terminate method. Initiating direct close.")
+            if not self._is_closing: asyncio.create_task(self.close())
+
+    def set_log_level(self, level: int) -> None:
+        if hasattr(self, 'configurator'):
+            self.configurator.debug = (level == logging.DEBUG)
+            self._setup_logging()
+            logging.info(f"{self.session_id}Log level set to {logging.getLevelName(level)} via SSM.")
+        else: logging.warning(f"{self.session_id}SSM: Cannot set log level, configurator not initialized.")
+>>>>>>> REPLACE

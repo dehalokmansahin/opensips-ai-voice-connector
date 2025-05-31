@@ -22,9 +22,9 @@
 """
 Module that provides helper functions for AI
 """
-
+from typing import Callable, Any, Dict, Optional
 import re
-from sipmessage import Address
+from src.ai import AIEngine # For type hinting get_ai return
 # from deepgram_api import Deepgram
 # from openai_api import OpenAI
 # from deepgram_native_api import DeepgramNative
@@ -84,113 +84,99 @@ def _create_speech_session_manager(call, cfg):
     # from which it then extracts its own "SpeechSessionManager" or "SmartSpeech" section.
     # The `cfg` passed to this helper is already that specific section.
     # So, we pass the global `Config` to SpeechSessionManager.
-    from config import Config as GlobalConfig
+    from config import Config as GlobalConfig # type: ignore[no-redef]
+    # Assuming 'call' is of a type that SpeechSessionManager expects, possibly src.call.Call
     return SpeechSessionManager(
         call=call,
-        cfg=GlobalConfig, # Pass the global Config object
+        cfg=GlobalConfig,
         stt_engine=stt_engine,
         tts_engine=tts_engine,
         tts_voice_id=tts_voice_id,
         tts_input_rate=tts_input_rate
     )
 
-FLAVORS = {
-    "SmartSpeech": _create_speech_session_manager
-}
-
-
-
 class UnknownSIPUser(Exception):
     """ User is not known """
 
 
-def get_header(params, header):
-    """ Returns a specific line from headers """
-    if 'headers' not in params:
-        return None
-    hdr_lines = [line for line in params['headers'].splitlines()
-                 if re.match(f"{header}:", line, re.I)]
-    if len(hdr_lines) == 0:
-        return None
-    return hdr_lines[0].split(":", 1)[1].strip()
-
-
-def get_to(params):
-    """ Returns the To line parameters """
-    to_line = get_header(params, "To")
-    if not to_line:
-        return None
-    return Address.parse(to_line)
-
-
-def indialog(params):
-    """ indicates whether the message is an in-dialog one """
-    if 'headers' not in params:
-        return False
-    to = get_to(params)
-    if not to:
-        return False
-    params = to.parameters
-    if "tag" in params and len(params["tag"]) > 0:
-        return True
-    return False
-
-
-def get_user(params):
-    """ Returns the User from the SIP headers """
-    to = get_to(params)
-    return to.uri.user.lower() if to.uri else None
-
-
-def _dialplan_match(regex, string):
+def _dialplan_match(regex: str, string_to_match: str) -> Optional[re.Match[str]]:
     """ Checks if a regex matches the string """
     pattern = re.compile(regex)
-    return pattern.match(string)
+    return pattern.match(string_to_match)
 
+from src import sip_utils
 
-def get_ai_flavor_default(user):
-    """ Returns the default algorithm for AI choosing """
-    # remove disabled engines
-    keys = [k for k, _ in FLAVORS.items() if
-            not Config.get(k).getboolean("disabled",
-                                         f"{k.upper()}_DISABLE",
-                                         False)]
-    if user in keys:
-        return user
-    hash_index = hash(user) % len(keys)
-    return keys[hash_index]
+# Define a more specific callable type for flavor factories
+FlavorFactoryType = Callable[[Any, Config], AIEngine] # (call, cfg) -> AIEngine instance
 
+class FlavorRegistry:
+    """ Manages AI flavors """
 
-def get_ai_flavor(params):
-    """ Returns the AI flavor to be used """
+    _FLAVORS: Dict[str, FlavorFactoryType] = { # Type hint for _FLAVORS
+        "SmartSpeech": _create_speech_session_manager
+    }
 
-    user = get_user(params)
-    if not user:
-        raise UnknownSIPUser("cannot parse username")
+    def __init__(self, config: Config) -> None:
+        self.config: Config = config
 
-    # first, get the sections in order and check if they have a dialplan
-    flavor = None
-    for flavor in Config.sections():
-        if flavor not in FLAVORS:
-            continue
-        if Config.get(flavor).getboolean("disabled",
-                                         f"{flavor.upper()}_DISABLE",
-                                         False):
-            continue
-        dialplans = Config.get(flavor).get("match")
-        if not dialplans:
-            continue
-        if isinstance(dialplans, list):
-            for dialplan in dialplans:
-                if _dialplan_match(dialplan, user):
-                    return flavor
-        elif _dialplan_match(dialplans, user):
-            return flavor
-    return get_ai_flavor_default(user)
+    def _get_default_flavor(self, user: str) -> str:
+        """ Returns the default algorithm for AI choosing """
+        keys = [k for k, _ in self._FLAVORS.items() if
+                not self.config.get(k).getboolean("disabled",
+                                             f"{k.upper()}_DISABLE", # type: ignore[str-format]
+                                             False)]
+        if not keys:
+            raise ValueError("No AI flavors available/enabled.")
+        if user in keys:
+            return user
+        # Ensure keys is not empty before modulo, though previous check should cover it.
+        if not keys: # Should be unreachable due to the check above
+             raise ValueError("Internal error: No keys available for default flavor selection after filtering.")
+        hash_index = hash(user) % len(keys)
+        return keys[hash_index]
 
+    def determine_flavor(self, params: Dict[str, Any]) -> str:
+        """ Returns the AI flavor to be used """
+        user = sip_utils.get_user(params)
+        if not user:
+            # Consider logging here or ensuring UnknownSIPUser is handled upstream
+            raise UnknownSIPUser("Cannot parse username from SIP parameters for flavor determination.")
 
-def get_ai(flavor, call, cfg):
+        for flavor_name in self.config.sections():
+            if flavor_name not in self._FLAVORS:
+                continue
+            if self.config.get(flavor_name).getboolean("disabled",
+                                             f"{flavor_name.upper()}_DISABLE", # type: ignore[str-format]
+                                             False):
+                continue
+            dialplans = self.config.get(flavor_name).get("match")
+            if not dialplans:
+                continue
+
+            current_user: str = user # Ensure type for _dialplan_match
+            if isinstance(dialplans, list):
+                for dialplan_regex in dialplans:
+                    if _dialplan_match(str(dialplan_regex), current_user): # Ensure regex is str
+                        return flavor_name
+            elif isinstance(dialplans, str): # Ensure regex is str for single match
+                if _dialplan_match(dialplans, current_user):
+                    return flavor_name
+            # else: dialplans is of an unexpected type, could log warning
+        return self._get_default_flavor(user)
+
+    def get_flavor_factory(self, flavor_name: str) -> Optional[FlavorFactoryType]:
+        """ Returns the factory function for a given flavor name """
+        return self._FLAVORS.get(flavor_name)
+
+# Instantiate the FlavorRegistry
+flavor_registry: FlavorRegistry = FlavorRegistry(Config)
+
+def get_ai(flavor_name: str, call: Any, cfg: Config) -> AIEngine: # Return type is AIEngine
     """ Returns an AI object """
-    return FLAVORS[flavor](call, cfg)
+    factory = flavor_registry.get_flavor_factory(flavor_name)
+    if factory:
+        # Assuming the factory returns an instance compatible with AIEngine
+        return factory(call, cfg)
+    raise ValueError(f"Unknown AI flavor or factory not found: {flavor_name}")
 
 # vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4
