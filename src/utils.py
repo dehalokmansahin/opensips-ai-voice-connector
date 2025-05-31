@@ -98,9 +98,7 @@ FLAVORS = {
     "SmartSpeech": _create_speech_session_manager
 }
 
-# Add Azure if available
-# if has_azure:
-#     FLAVORS["azure"] = AzureAI
+
 
 class UnknownSIPUser(Exception):
     """ User is not known """
