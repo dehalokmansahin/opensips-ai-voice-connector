@@ -2,6 +2,7 @@ import torch
 from silero_vad import load_silero_vad, get_speech_timestamps
 import logging
 from typing import Any # For torch.classes.silero_vad.SileroVAD
+
 class VADDetector:
     """
     Voice Activity Detector (VAD) using the Silero VAD model.
@@ -45,6 +46,7 @@ class VADDetector:
         # Load the Silero VAD model if it hasn't been loaded yet (static caching)
         if not VADDetector._model:
             try:
+                # Assuming silero_vad is installed and accessible
                 VADDetector._model = load_silero_vad()
                 logging.info("Successfully loaded Silero VAD model.")
             except Exception as e:

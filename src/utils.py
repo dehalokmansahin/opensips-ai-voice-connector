@@ -28,7 +28,10 @@ from sipmessage import Address
 from deepgram_api import Deepgram
 from openai_api import OpenAI
 from deepgram_native_api import DeepgramNative
-from speech_session_vosk import SmartSpeech
+# from speech_session_vosk import SmartSpeech # Replaced by SpeechSessionManager
+from src.speech_processing.speech_session_manager import SpeechSessionManager
+from src.speech_processing.vosk_stt_engine import VoskSTTEngine
+from src.speech_processing.piper_tts_engine import PiperTTSEngine
 # Try to import Azure, but don't fail if not available
 try:
     from azure_api import AzureAI
@@ -39,10 +42,53 @@ except ImportError:
 from config import Config
 
 # Initialize FLAVORS dictionary
-FLAVORS = {"deepgram": Deepgram,
-           "openai": OpenAI,
-           "deepgram_native": DeepgramNative,
-           "SmartSpeech": SmartSpeech}
+# For SmartSpeech replacement, we'll define a helper or lambda
+# to correctly instantiate SpeechSessionManager with its required engines.
+
+def _create_speech_session_manager(call, cfg):
+    # cfg here is the session-specific config section for "SmartSpeech" flavor
+    # Global Config is accessible via from config import Config
+
+    # STT Engine (Vosk)
+    # These settings should come from the 'SmartSpeech' (or new name) section of the config
+    vosk_url = cfg.get("url", "ws://localhost:2700")
+    vosk_timeout = cfg.getfloat("websocket_timeout", 5.0) # Ensure float
+    stt_engine = VoskSTTEngine(server_url=vosk_url, timeout=vosk_timeout)
+
+    # TTS Engine (Piper)
+    piper_host = cfg.get("TTS_HOST", "localhost")
+    piper_port = cfg.getint("TTS_PORT", 8000) # Ensure int
+    # session_id for piper engine can be derived if needed, or passed if available
+    # For now, PiperTTSEngine in TTSProcessor was using self.session_id from TTSProcessor
+    # Let's assume PiperTTSEngine can get session_id from SpeechSessionManager if needed, or generate its own.
+    # The PiperTTSEngine created in speech_session_manager.py's _init_components doesn't pass session_id explicitly.
+    # Here, we are creating it before SpeechSessionManager, so it won't have SSM's session_id yet.
+    # For now, let PiperTTSEngine use its default or an empty session_id.
+    tts_engine = PiperTTSEngine(server_host=piper_host, server_port=piper_port)
+
+    tts_voice_id = cfg.get("TTS_VOICE", "tr_TR-fahrettin-medium") # Default from original SmartSpeech
+    tts_input_rate = 22050 # Piper's default output rate
+
+    # Note: SpeechSessionManager expects the *global* Config object,
+    # from which it then extracts its own "SpeechSessionManager" or "SmartSpeech" section.
+    # The `cfg` passed to this helper is already that specific section.
+    # So, we pass the global `Config` to SpeechSessionManager.
+    from config import Config as GlobalConfig
+    return SpeechSessionManager(
+        call=call,
+        cfg=GlobalConfig, # Pass the global Config object
+        stt_engine=stt_engine,
+        tts_engine=tts_engine,
+        tts_voice_id=tts_voice_id,
+        tts_input_rate=tts_input_rate
+    )
+
+FLAVORS = {
+    "deepgram": Deepgram,
+    "openai": OpenAI,
+    "deepgram_native": DeepgramNative,
+    "SmartSpeech": _create_speech_session_manager # Replaced here
+}
 
 # Add Azure if available
 if has_azure:
