@@ -47,48 +47,14 @@ class TranscriptHandler:
             (e.g., JSON decode error).
         """
         try:
-            response = json.loads(message) # Parse the JSON message
+            response = json.loads(message)
             current_time = time.time()
 
-            # Handle partial transcript
-            if "partial" in response:
-                partial_text = response.get("partial", "").strip() # Get partial text, strip whitespace
+            # Delegate partial and final processing to helpers
+            await self._process_partial(response, current_time)
+            await self._process_final(response)
 
-                # Check if partial transcript has changed
-                if partial_text != self.last_partial_transcript:
-                    self.last_partial_transcript = partial_text
-                    self.last_partial_timestamp = current_time
-                    self.partial_unchanged_duration = 0.0
-
-                    if partial_text: # Log non-empty partials
-                        logging.info(f"{self.session_id}Partial transcript: \"{partial_text}\"")
-                    if self.on_partial_transcript and partial_text: # Trigger callback if set and text exists
-                        await self.on_partial_transcript(partial_text)
-                else:
-                    # Partial hasn't changed, update duration
-                    self.partial_unchanged_duration = current_time - self.last_partial_timestamp
-
-            # Handle final transcript
-            if "text" in response:
-                final_text = response.get("text", "").strip() # Get final text, strip whitespace
-                if final_text: # Process only if final text is non-empty
-                    self.last_final_transcript = final_text
-                    # Reset partial tracking since we got a final
-                    self.last_partial_timestamp = 0.0
-                    self.partial_unchanged_duration = 0.0
-
-                    # It's common for final results to also update the last partial,
-                    # ensuring consistency if no further partials arrive.
-                    if final_text != self.last_partial_transcript:
-                        self.last_partial_transcript = final_text
-
-                    logging.info(f"{self.session_id}Final transcript: \"{final_text}\"")
-                    if self.on_final_transcript: # Trigger callback if set
-                        # Run final transcript callback as a separate task to avoid blocking
-                        # the message handling loop if the callback is slow.
-                        asyncio.create_task(self.on_final_transcript(final_text))
-
-            return True # Message processed successfully
+            return True
 
         except json.JSONDecodeError:
             logging.error(f"{self.session_id}Invalid JSON response from STT: {message[:100]}...")
@@ -96,6 +62,35 @@ class TranscriptHandler:
         except Exception as e:
             logging.error(f"{self.session_id}Error processing STT transcript message: {str(e)}", exc_info=True)
             return False
+
+    async def _process_partial(self, response: dict, current_time: float) -> None:
+        """Handle partial transcript updates and callbacks."""
+        partial = response.get("partial", "").strip()
+        if partial != self.last_partial_transcript:
+            self.last_partial_transcript = partial
+            self.last_partial_timestamp = current_time
+            self.partial_unchanged_duration = 0.0
+            if partial:
+                logging.info(f"{self.session_id}Partial transcript: \"{partial}\"")
+                if self.on_partial_transcript:
+                    await self.on_partial_transcript(partial)
+        else:
+            self.partial_unchanged_duration = current_time - self.last_partial_timestamp
+
+    async def _process_final(self, response: dict) -> None:
+        """Handle final transcript updates and callbacks."""
+        final = response.get("text", "").strip()
+        if not final:
+            return
+        self.last_final_transcript = final
+        # Reset partial tracking
+        self.last_partial_timestamp = 0.0
+        self.partial_unchanged_duration = 0.0
+        if final != self.last_partial_transcript:
+            self.last_partial_transcript = final
+        logging.info(f"{self.session_id}Final transcript: \"{final}\"")
+        if self.on_final_transcript:
+            asyncio.create_task(self.on_final_transcript(final))
 
     def has_stale_partial(self, max_unchanged_seconds: float = 2.0) -> bool:
         """
@@ -119,6 +114,14 @@ class TranscriptHandler:
         self.last_partial_timestamp = 0.0
         self.partial_unchanged_duration = 0.0
 
+    def _select_best_transcript(self) -> str:
+        """Choose the most definitive transcript: final over partial, else empty."""
+        if self.last_final_transcript:
+            return self.last_final_transcript
+        if self.last_partial_transcript:
+            return self.last_partial_transcript
+        return ""
+
     def get_final_transcript(self) -> str:
         """
         Retrieves the most definitive transcript available.
@@ -130,18 +133,15 @@ class TranscriptHandler:
         Returns:
             The most definitive transcript string.
         """
-        if self.last_final_transcript:
-            if self.debug_logging_enabled():
-                 logging.debug(f"{self.session_id}Returning final transcript: \"{self.last_final_transcript[:70]}...\"")
-            return self.last_final_transcript
-        elif self.last_partial_transcript:
-            if self.debug_logging_enabled():
-                logging.debug(f"{self.session_id}No final transcript, returning partial: \"{self.last_partial_transcript[:70]}...\"")
-            return self.last_partial_transcript
-        else:
-            if self.debug_logging_enabled():
+        transcript = self._select_best_transcript()
+        if self.debug_logging_enabled():
+            if transcript == self.last_final_transcript:
+                logging.debug(f"{self.session_id}Returning final transcript: \"{transcript[:70]}...\"")
+            elif transcript == self.last_partial_transcript:
+                logging.debug(f"{self.session_id}No final transcript, returning partial: \"{transcript[:70]}...\"")
+            else:
                 logging.debug(f"{self.session_id}No transcript (final or partial) available, returning empty string.")
-            return ""
+        return transcript
 
     def debug_logging_enabled(self) -> bool:
         """Helper to check if DEBUG level logging is enabled for the current logger."""

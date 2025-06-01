@@ -63,12 +63,20 @@ def _create_speech_session_manager(call, cfg):
     # STT Engine (Vosk)
     # These settings should come from the 'SmartSpeech' (or new name) section of the config
     vosk_url = cfg.get("url", "ws://localhost:2700")
-    vosk_timeout = cfg.getfloat("websocket_timeout", "5.0") # Pass as string to avoid os.getenv TypeError
+    # Determine Vosk timeout as float (cfg may be plain dict)
+    try:
+        vosk_timeout = float(cfg.get("websocket_timeout", "5.0"))
+    except (TypeError, ValueError):
+        vosk_timeout = 5.0
     stt_engine = VoskSTTEngine(server_url=vosk_url, timeout=vosk_timeout)
 
     # TTS Engine (Piper)
     piper_host = cfg.get("host", "localhost")
-    piper_port = cfg.getint("port", "8000") # Pass as string to avoid os.getenv TypeError
+    # Determine Piper port as int (cfg may be plain dict)
+    try:
+        piper_port = int(cfg.get("port", "8000"))
+    except (TypeError, ValueError):
+        piper_port = 8000 # default port
     # session_id for piper engine can be derived if needed, or passed if available
     # For now, PiperTTSEngine in TTSProcessor was using self.session_id from TTSProcessor
     # Let's assume PiperTTSEngine can get session_id from SpeechSessionManager if needed, or generate its own.

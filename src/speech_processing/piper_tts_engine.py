@@ -93,10 +93,8 @@ class PiperTTSEngine(TTSEngineBase):
         Synthesizes speech from the given text using the specified voice and format.
         Streams audio chunks as they become available.
         """
-        if not self.is_connected():
-            logging.error(f"{self.session_id}Cannot synthesize: Not connected. Please connect first.")
+        if not self._ensure_connected("synthesize speech"):
             # Yield nothing if not connected, or could raise an error.
-            # An empty generator is one way to handle this.
             if False: # pragma: no cover
                 yield b""
             return
@@ -107,71 +105,13 @@ class PiperTTSEngine(TTSEngineBase):
                 yield b""
             return
 
-        try:
-            # Handle initial message (start or connected)
-            initial_message_data = await self._wait_with_timeout(self.websocket.recv())
-            if not initial_message_data:
-                logging.error(f"{self.session_id}Timed out waiting for initial message from Piper TTS server after request.")
-                return # Stop generation
+        # Initial handshake
+        if not await self._initial_handshake():
+            return
 
-            try:
-                start_data = json.loads(initial_message_data)
-                msg_type = start_data.get("type")
-                if msg_type in ["start", "connected", "audio_start"]: # 'audio_start' observed in some Piper versions
-                    logging.info(f"{self.session_id}TTS stream started: {start_data.get('message', '')}")
-                else:
-                    logging.warning(f"{self.session_id}Unexpected first message from TTS server: {start_data}")
-                    # Depending on strictness, might want to return or raise here.
-            except json.JSONDecodeError:
-                # If the first message isn't JSON, it might be audio data directly (less common for Piper)
-                if isinstance(initial_message_data, bytes):
-                    logging.debug(f"{self.session_id}Received initial binary data, assuming audio.")
-                    yield initial_message_data
-                else:
-                    logging.warning(f"{self.session_id}Received non-JSON/non-binary initial message: {str(initial_message_data)[:70]}...")
-                    return # Stop generation
-
-            # Process subsequent audio stream and control messages
-            while True:
-                message = await self._wait_with_timeout(self.websocket.recv())
-                if message is None: # Timeout
-                    logging.error(f"{self.session_id}Timed out waiting for audio data from Piper TTS server.")
-                    break
-
-                if isinstance(message, str): # JSON control messages
-                    try:
-                        data = json.loads(message)
-                        msg_type = data.get("type")
-
-                        if msg_type == "end" or msg_type == "audio_end": # 'audio_end' observed
-                            logging.info(f"{self.session_id}TTS stream complete: {data.get('message', '')}")
-                            break # End of stream
-                        elif msg_type == "error":
-                            logging.error(f"{self.session_id}TTS error from server: {data.get('message')}")
-                            # Consider raising an exception here
-                            break
-                        else:
-                            logging.debug(f"{self.session_id}Received other JSON message: {data}")
-                    except json.JSONDecodeError:
-                        logging.warning(f"{self.session_id}Received non-JSON text message during stream: {message[:70]}...")
-
-                elif isinstance(message, bytes): # Binary audio data
-                    yield message
-
-        except websockets.exceptions.ConnectionClosed as e:
-            logging.info(f"{self.session_id}TTS WebSocket connection closed during stream with code {e.code}")
-            self._is_connected_status = False
-            self.websocket = None
-        except asyncio.TimeoutError: # Should be caught by _wait_with_timeout, but as a safeguard
-            logging.error(f"{self.session_id}Asyncio timeout error during TTS stream processing.")
-        except Exception as e:
-            logging.error(f"{self.session_id}Error processing TTS stream: {e}", exc_info=True)
-            # Ensure connection is marked as closed on unexpected error
-            await self.disconnect()
-        finally:
-            # This generator should not be responsible for closing the connection by default.
-            # The caller of synthesize_speech should manage connect/disconnect.
-            logging.debug(f"{self.session_id}TTS synthesize_speech generator finished.")
+        # Stream audio chunks and handle control messages
+        async for chunk in self._stream_audio_chunks():
+            yield chunk
 
     async def _wait_with_timeout(self, awaitable):
         """Wait for an awaitable with timeout."""
@@ -188,7 +128,6 @@ class PiperTTSEngine(TTSEngineBase):
             self._is_connected_status = False
             self.websocket = None
             return None
-
 
     async def disconnect(self) -> None:
         """Close the connection to the Piper TTS server."""
@@ -210,19 +149,77 @@ class PiperTTSEngine(TTSEngineBase):
 
     def is_connected(self) -> bool:
         """Check the current connection status to the TTS service."""
-        if self._is_connected_status and self.websocket:
-            if hasattr(self.websocket, 'closed') and self.websocket.closed:
-                # If status is true but websocket says closed, update internal status
-                logging.warning(f"{self.session_id}PiperTTSEngine: Connection status mismatch, websocket is closed.")
-                self._is_connected_status = False
+        if self._is_connected_status and self.websocket and hasattr(self.websocket, 'closed') and self.websocket.closed:
+            logging.warning(f"{self.session_id}PiperTTSEngine: Connection status mismatch, websocket is closed.")
+            self._is_connected_status = False
         return self._is_connected_status
 
-    # Original methods like synthesize_and_process and stream_synthesize can be removed
-    # as their functionality is now covered by TTSEngineBase's synthesize_speech.
-    # The old process_stream is integrated into synthesize_speech.
-    # The old synthesize is now _send_synthesis_request.
-    # The old close is now disconnect.
-    # The old _maybe_await is not directly needed if callbacks are not used in synthesize_speech.
+    # New private helpers
+    def _ensure_connected(self, action: str) -> bool:
+        """Return True if connected, log error otherwise."""
+        if not self.is_connected() or not self.websocket:
+            logging.error(f"{self.session_id}Cannot {action}: Not connected to Piper TTS server.")
+            return False
+        return True
+
+    def _log_debug(self, prefix: str, data: Any) -> None:
+        """Log debug messages only when DEBUG enabled."""
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(f"{self.session_id}{prefix}{data}")
+
+    async def _initial_handshake(self) -> bool:
+        """Receive and process the initial handshake message from Piper server."""
+        init_msg = await self._wait_with_timeout(self.websocket.recv())
+        if not init_msg:
+            logging.error(f"{self.session_id}Timed out waiting for initial Piper TTS message.")
+            return False
+        # Try JSON control
+        try:
+            data = json.loads(init_msg)
+            msg_type = data.get("type")
+            if msg_type in ["start", "connected", "audio_start"]:
+                logging.info(f"{self.session_id}TTS stream started: {data.get('message', '')}")
+            else:
+                logging.warning(f"{self.session_id}Unexpected initial message: {data}")
+        except json.JSONDecodeError:
+            if isinstance(init_msg, bytes):
+                # Received binary data in initial handshake, treating as control-only for now
+                self._log_debug("Received initial binary data, skipping initial data chunk", init_msg[:20])
+            else:
+                logging.warning(f"{self.session_id}Non-JSON initial message: {init_msg[:70]}...")
+                return False
+        return True
+
+    def _process_control_message(self, message: str) -> bool:
+        """Process a JSON control message; return False to end stream."""
+        try:
+            data = json.loads(message)
+            msg_type = data.get("type")
+            if msg_type in ["end", "audio_end"]:
+                logging.info(f"{self.session_id}TTS stream complete: {data.get('message', '')}")
+                return False
+            if msg_type == "error":
+                logging.error(f"{self.session_id}TTS error from server: {data.get('message')}")
+                return False
+            self._log_debug("Received control message: ", data)
+        except json.JSONDecodeError:
+            logging.warning(f"{self.session_id}Non-JSON control message during stream: {message[:70]}...")
+        return True
+
+    async def _stream_audio_chunks(self) -> AsyncGenerator[bytes, None]:
+        """Async generator for streaming audio and processing control messages."""
+        while True:
+            msg = await self._wait_with_timeout(self.websocket.recv())
+            if msg is None:
+                logging.error(f"{self.session_id}Timed out waiting for audio data from Piper server.")
+                break
+            if isinstance(msg, str):
+                if not self._process_control_message(msg):
+                    break
+            elif isinstance(msg, bytes):
+                yield msg
+            else:
+                self._log_debug("Unknown message type received: ", type(msg))
 
     # For compatibility, if any internal logic still uses 'close', we can alias it.
     async def close(self):

@@ -1,7 +1,7 @@
 import torch
 from silero_vad import load_silero_vad, get_speech_timestamps
 import logging
-from typing import Any # For torch.classes.silero_vad.SileroVAD
+from typing import Any, Optional, List # For torch.classes.silero_vad.SileroVAD
 
 class VADDetector:
     """
@@ -56,6 +56,65 @@ class VADDetector:
 
         self.model: Any = VADDetector._model
 
+    # New private helpers for VAD detection steps
+    def _validate_and_squeeze(self, audio_tensor: torch.Tensor) -> Optional[torch.Tensor]:
+        """Ensure tensor is 1D or 2D; return 1D tensor or None if invalid."""
+        if audio_tensor.ndim == 2:
+            return audio_tensor.squeeze(0)
+        if audio_tensor.ndim == 1:
+            return audio_tensor
+        logging.warning(f"{self.__class__.__name__}: Expected 1D or 2D tensor, got {audio_tensor.ndim}D.")
+        return None
+
+    def _is_completely_silent(self, audio_tensor: torch.Tensor) -> bool:
+        """Check if tensor contains only zeros."""
+        if torch.max(torch.abs(audio_tensor)) == 0:
+            logging.debug(f"{self.__class__.__name__}: Silent audio segment.")
+            return True
+        return False
+
+    def _debug_log_tensor_stats(self, audio_tensor: torch.Tensor) -> None:
+        """Log min, max and abs max of tensor for debugging."""
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            min_val = torch.min(audio_tensor).item()
+            max_val = torch.max(audio_tensor).item()
+            abs_max = max(abs(min_val), abs(max_val))
+            logging.debug(f"{self.__class__.__name__}: Audio stats - Length: {audio_tensor.numel()}, Min: {min_val:.4f}, Max: {max_val:.4f}, AbsMax: {abs_max:.4f}")
+
+    def _amplify_quiet_audio(self, audio_tensor: torch.Tensor) -> torch.Tensor:
+        """Amplify audio with very low amplitude to aid detection."""
+        current_abs_max = torch.max(torch.abs(audio_tensor)).item()
+        if 0 < current_abs_max < 0.05:
+            gain = min(0.3 / (current_abs_max + 1e-9), 7.0)
+            audio_tensor = audio_tensor * gain
+            logging.debug(f"{self.__class__.__name__}: Amplified audio with gain {gain:.2f}. New AbsMax: {torch.max(torch.abs(audio_tensor)).item():.4f}")
+        return audio_tensor
+
+    def _add_batch_dim(self, audio_tensor: torch.Tensor) -> torch.Tensor:
+        """Ensure a batch dimension for the VAD model input."""
+        return audio_tensor.unsqueeze(0) if audio_tensor.ndim == 1 else audio_tensor
+
+    def _log_vad_parameters(self) -> None:
+        """Log parameters used for the VAD call."""
+        logging.debug(f"{self.__class__.__name__}: VAD params - threshold={self.threshold}, min_speech_ms={self.min_speech_duration_ms}, min_silence_ms={self.min_silence_duration_ms}, speech_pad_ms=30")
+
+    def _run_silero_vad(self, audio_tensor: torch.Tensor) -> List[Any]:
+        """Invoke Silero VAD and return detected speech timestamps (empty list on error)."""
+        try:
+            return get_speech_timestamps(
+                audio_tensor, self.model,
+                sampling_rate=self.sample_rate,
+                threshold=self.threshold,
+                min_speech_duration_ms=self.min_speech_duration_ms,
+                min_silence_duration_ms=self.min_silence_duration_ms,
+                return_seconds=False,
+                speech_pad_ms=30,
+                visualize_probs=False
+            )
+        except Exception as e:
+            logging.error(f"{self.__class__.__name__}: Error during Silero VAD: {e}", exc_info=True)
+            return []
+
     def is_speech(self, audio_tensor: torch.Tensor) -> bool:
         """
         Determines if the given audio tensor contains speech.
@@ -69,72 +128,28 @@ class VADDetector:
         Returns:
             True if speech is detected in the audio tensor, False otherwise.
         """
-        # Ensure audio_tensor is 1D
-        if audio_tensor.ndim == 2:
-            audio_tensor = audio_tensor.squeeze(0)
-        elif audio_tensor.ndim != 1:
-            logging.warning(f"Expected 1D or 2D audio tensor, got {audio_tensor.ndim}D. Skipping VAD.")
+        # 1) Validate and squeeze tensor dimensions
+        audio_tensor = self._validate_and_squeeze(audio_tensor)
+        if audio_tensor is None:
             return False
 
-        # Handle completely silent audio to prevent VAD errors or misbehavior
-        if torch.max(torch.abs(audio_tensor)) == 0:
-            logging.debug("VAD: Silent audio segment received (all zeros). Returning False.")
+        # 2) Silent audio check
+        if self._is_completely_silent(audio_tensor):
             return False
 
-        # Log basic audio properties for debugging
-        if logging.getLogger().isEnabledFor(logging.DEBUG):
-            min_val = torch.min(audio_tensor).item()
-            max_val = torch.max(audio_tensor).item()
-            abs_max = max(abs(min_val), abs(max_val))
-            logging.debug(
-                f"VAD: Audio tensor details - Length: {len(audio_tensor)}, "
-                f"Min: {min_val:.4f}, Max: {max_val:.4f}, AbsMax: {abs_max:.4f}"
-            )
+        # 3) Debug log tensor stats
+        self._debug_log_tensor_stats(audio_tensor)
 
-        # Amplify very quiet audio. This helps VAD detect speech in low-volume recordings.
-        # This complements normalization in AudioProcessor, targeting a specific quiet range.
-        # Effective abs_max range for this block is [0.005, 0.05) due to AudioProcessor's earlier normalization.
-        current_abs_max = torch.max(torch.abs(audio_tensor)).item() # Re-evaluate abs_max for safety
-        if 0 < current_abs_max < 0.05:  # Only non-silent audio that is still very quiet
-            # Gain calculation aims to bring quiet audio to a more detectable level (e.g., peak around 0.3)
-            # Capped at 7.0 to prevent excessive amplification of noise.
-            gain = min(0.3 / (current_abs_max + 1e-9), 7.0) # Added epsilon for stability with extremely small abs_max
-            audio_tensor = audio_tensor * gain
-            logging.debug(f"VAD: Amplified quiet audio with gain: {gain:.2f}. New AbsMax: {torch.max(torch.abs(audio_tensor)).item():.4f}")
+        # 4) Amplify if too quiet
+        audio_tensor = self._amplify_quiet_audio(audio_tensor)
 
-        # Silero VAD expects a batch dimension, so add it if the tensor is 1D.
-        # This was already done by audio_tensor = audio_tensor.unsqueeze(0) if it was 1D,
-        # but if it was already (1,N) it's fine. Re-affirming for clarity.
-        if audio_tensor.ndim == 1:
-            audio_tensor = audio_tensor.unsqueeze(0) 
-        
-        # Log the parameters being used for the VAD call
-        logging.debug(
-            f"VAD parameters for get_speech_timestamps: "
-            f"threshold={self.threshold}, min_speech_ms={self.min_speech_duration_ms}, "
-            f"min_silence_ms={self.min_silence_duration_ms}, speech_pad_ms=30"
-        )
-        
-        try:
-            # Perform VAD using Silero's get_speech_timestamps
-            speech_timestamps = get_speech_timestamps(
-                audio_tensor, 
-                self.model, 
-                sampling_rate=self.sample_rate,
-                threshold=self.threshold,  # VAD sensitivity
-                min_speech_duration_ms=self.min_speech_duration_ms, # Min duration for a speech segment
-                min_silence_duration_ms=self.min_silence_duration_ms, # Min silence to split segments
-                return_seconds=False,  # Get timestamps in samples, not seconds
-                speech_pad_ms=30,  # Optional padding at start/end of detected speech
-                visualize_probs=False # Set to True to get speech probabilities (for debugging)
-            )
-            
-            logging.debug(f"VAD: Detected speech timestamps: {speech_timestamps}")
-            
-            # If timestamps list is not empty, speech is considered present.
-            return bool(speech_timestamps)
-            
-        except Exception as e:
-            logging.error(f"VAD: Error during Silero VAD processing: {e}", exc_info=True)
-            # In case of an error during VAD processing, assume no speech detected as a fallback.
-            return False
+        # 5) Add batch dimension
+        audio_tensor = self._add_batch_dim(audio_tensor)
+
+        # 6) Run Silero VAD
+        self._log_vad_parameters()
+        speech_timestamps = self._run_silero_vad(audio_tensor)
+
+        # 7) Return detection result
+        logging.debug(f"{self.__class__.__name__}: Detected speech timestamps: {speech_timestamps}")
+        return bool(speech_timestamps)

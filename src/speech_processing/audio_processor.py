@@ -86,21 +86,11 @@ class AudioProcessor:
             logging.debug(f"{self.session_id}Raw input audio: {len(audio)} bytes")
 
         try:
-            # Step 1: Decode PCMU bytes to a float32 NumPy array (8kHz)
-            # Note: pcmu_decoder.decode returns a NumPy array.
-            pcm32_samples_np = self.pcmu_decoder.decode(audio)
-
-            if pcm32_samples_np is None or pcm32_samples_np.size == 0:
-                logging.warning(f"{self.session_id}PCMU decoder returned empty result. Skipping processing.")
+            # Decode and convert to tensor
+            pcm32_samples_np = self._decode_pcmu(audio)
+            if pcm32_samples_np is None:
                 return None, None
-
-            if self.debug:
-                logging.debug(f"{self.session_id}Decoded PCMU to float32 PCM samples: count={len(pcm32_samples_np)}")
-
-            # Step 2: Convert float32 NumPy array to a float32 PyTorch tensor
-            audio_tensor = torch.from_numpy(pcm32_samples_np)
-            if self.debug:
-                logging.debug(f"{self.session_id}Converted NumPy to 8kHz PyTorch tensor: shape={audio_tensor.shape}, dtype={audio_tensor.dtype}, min={audio_tensor.min():.4f}, max={audio_tensor.max():.4f}")
+            audio_tensor = self._to_tensor(pcm32_samples_np)
 
             # Step 3: Clean tensor by removing NaN or Inf values
             audio_tensor = self._clean_tensor(audio_tensor)
@@ -108,16 +98,13 @@ class AudioProcessor:
             # Step 4: Normalize audio levels, especially for very quiet audio
             audio_tensor = self._normalize_audio(audio_tensor)
 
-            # Step 5: Resample the audio tensor from 8kHz to the target sample rate (e.g., 16kHz)
-            resampled_tensor = self.resampler(audio_tensor.unsqueeze(0)).squeeze(0)
-            if self.debug:
-                logging.debug(f"{self.session_id}Resampled tensor to {self.target_sample_rate}Hz: shape={resampled_tensor.shape}, dtype={resampled_tensor.dtype}, min={resampled_tensor.min():.4f}, max={resampled_tensor.max():.4f}")
-
+            # Resample and validate
+            resampled_tensor = self._resample_tensor(audio_tensor)
             if resampled_tensor.shape[0] == 0:
                 logging.warning(f"{self.session_id}Resampling resulted in an empty tensor. Skipping.")
                 return None, None
 
-            # Step 6: Convert the final float32 resampled tensor to 16-bit PCM bytes
+            # Convert to bytes and return
             audio_bytes_out = self.tensor_to_bytes(resampled_tensor)
 
             if self.debug:
@@ -128,6 +115,30 @@ class AudioProcessor:
         except Exception as e:
             logging.error(f"{self.session_id}Error processing audio bytes: {e}", exc_info=True)
             return None, None
+
+    def _decode_pcmu(self, audio: bytes):
+        """Decode PCMU bytes to float32 NumPy array (8kHz)."""
+        pcm32_samples_np = self.pcmu_decoder.decode(audio)
+        if pcm32_samples_np is None or pcm32_samples_np.size == 0:
+            logging.warning(f"{self.session_id}PCMU decoder returned empty result. Skipping processing.")
+            return None
+        if self.debug:
+            logging.debug(f"{self.session_id}Decoded PCMU to float32 PCM samples: count={len(pcm32_samples_np)}")
+        return pcm32_samples_np
+
+    def _to_tensor(self, pcm32_samples_np) -> torch.Tensor:
+        """Convert float32 NumPy array to float32 PyTorch tensor."""
+        audio_tensor = torch.from_numpy(pcm32_samples_np)
+        if self.debug:
+            logging.debug(f"{self.session_id}Converted NumPy to 8kHz PyTorch tensor: shape={audio_tensor.shape}, dtype={audio_tensor.dtype}, min={audio_tensor.min():.4f}, max={audio_tensor.max():.4f}")
+        return audio_tensor
+
+    def _resample_tensor(self, audio_tensor: torch.Tensor) -> torch.Tensor:
+        """Resample 8kHz tensor to target sample rate."""
+        resampled_tensor = self.resampler(audio_tensor.unsqueeze(0)).squeeze(0)
+        if self.debug:
+            logging.debug(f"{self.session_id}Resampled tensor to {self.target_sample_rate}Hz: shape={resampled_tensor.shape}, dtype={resampled_tensor.dtype}, min={resampled_tensor.min():.4f}, max={resampled_tensor.max():.4f}")
+        return resampled_tensor
 
     def _clean_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
         """

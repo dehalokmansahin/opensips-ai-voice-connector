@@ -140,56 +140,15 @@ class VADProcessor:
         if self.debug:
             logging.debug(f"{self.session_id}VAD processing buffer of {len(self._vad_buffer)} bytes.")
 
-        buffer_bytes = bytes(self._vad_buffer)
-        audio_tensor = torch.frombuffer(buffer_bytes, dtype=torch.int16).float() / 32768.0
-
-        self._vad_buffer.clear()
-        self._vad_buffer_size_samples = 0
-        self._last_buffer_flush_time = time.time()
-
+        # Process buffer through helper methods
+        buffer_bytes, audio_tensor = self._prepare_audio_tensor(self._vad_buffer)
+        self._clear_vad_buffer()
         is_speech_in_current_chunk = self.vad.is_speech(audio_tensor)
         current_time = time.time()
+        self._update_vad_state(is_speech_in_current_chunk, current_time)
+        send_chunk_to_stt = self._should_send_to_stt(is_speech_in_current_chunk)
 
-        if is_speech_in_current_chunk:
-            self.consecutive_speech_packets += 1
-            self.consecutive_silence_packets = 0
-            self.last_speech_activity_time = current_time
-            if self.speech_start_time == 0.0:
-                self.speech_start_time = current_time
-
-            if self.debug:
-                logging.debug(
-                    f"{self.session_id}VAD detected speech in chunk "
-                    f"(consecutive_speech={self.consecutive_speech_packets})"
-                )
-
-            if self.consecutive_speech_packets >= self.speech_detection_threshold and not self.speech_active:
-                self.speech_active = True
-                self.speech_start_time = current_time # Re-set speech_start_time when speech becomes active
-                logging.info(
-                    f"{self.session_id}Speech started (VAD active) after "
-                    f"{self.consecutive_speech_packets} consecutive speech chunk(s)."
-                )
-        else: # Current chunk is silent
-            self.consecutive_silence_packets += 1
-            self.consecutive_speech_packets = 0
-
-            if self.debug and self.speech_active: # Log only if speech was active and now it's silent
-                logging.debug(
-                    f"{self.session_id}VAD detected silence in chunk while speech was active "
-                    f"(consecutive_silence={self.consecutive_silence_packets})"
-                )
-
-            if self.consecutive_silence_packets >= self.silence_detection_threshold and self.speech_active:
-                self.speech_active = False
-                self.speech_start_time = 0.0 # Reset when speech becomes inactive
-                logging.info(
-                    f"{self.session_id}Speech ended (VAD inactive) after "
-                    f"{self.consecutive_silence_packets} consecutive silence chunk(s)."
-                )
-
-        send_chunk_to_stt = is_speech_in_current_chunk or self.speech_active
-
+        # Debug final decision
         if self.debug:
             logging.debug(
                 f"{self.session_id}VAD decision: speech_in_chunk={is_speech_in_current_chunk}, "
@@ -240,3 +199,53 @@ class VADProcessor:
         if self.debug:
             logging.debug(f"{self.session_id}No remaining VAD buffer to process.")
         return False, None
+
+    # New private helper methods for buffer processing and VAD state logic
+    def _prepare_audio_tensor(self, buffer: bytearray) -> Tuple[bytes, torch.Tensor]:
+        """Copy VAD buffer to bytes and convert to normalized float tensor."""
+        buffer_bytes = bytes(buffer)
+        buffer_copy = bytearray(buffer_bytes)
+        audio_tensor = torch.frombuffer(buffer_copy, dtype=torch.int16).float() / 32768.0
+        return buffer_bytes, audio_tensor
+
+    def _clear_vad_buffer(self) -> None:
+        """Clear the VAD buffer and reset its metadata."""
+        self._vad_buffer.clear()
+        self._vad_buffer_size_samples = 0
+        self._last_buffer_flush_time = time.time()
+
+    def _update_vad_state(self, is_speech: bool, current_time: float) -> None:
+        """Update speech/silence counters and handle state transitions."""
+        if is_speech:
+            self.consecutive_speech_packets += 1
+            self.consecutive_silence_packets = 0
+            self.last_speech_activity_time = current_time
+            if self.speech_start_time == 0.0:
+                self.speech_start_time = current_time
+            if self.debug:
+                logging.debug(
+                    f"{self.session_id}VAD detected speech in chunk (consecutive_speech={self.consecutive_speech_packets})"
+                )
+            if self.consecutive_speech_packets >= self.speech_detection_threshold and not self.speech_active:
+                self.speech_active = True
+                self.speech_start_time = current_time
+                logging.info(
+                    f"{self.session_id}Speech started (VAD active) after {self.consecutive_speech_packets} consecutive speech chunk(s)."
+                )
+        else:
+            self.consecutive_silence_packets += 1
+            self.consecutive_speech_packets = 0
+            if self.debug and self.speech_active:
+                logging.debug(
+                    f"{self.session_id}VAD detected silence in chunk while speech was active (consecutive_silence={self.consecutive_silence_packets})"
+                )
+            if self.consecutive_silence_packets >= self.silence_detection_threshold and self.speech_active:
+                self.speech_active = False
+                self.speech_start_time = 0.0
+                logging.info(
+                    f"{self.session_id}Speech ended (VAD inactive) after {self.consecutive_silence_packets} consecutive silence chunk(s)."
+                )
+
+    def _should_send_to_stt(self, is_speech: bool) -> bool:
+        """Determine whether to send this chunk to STT."""
+        return is_speech or self.speech_active

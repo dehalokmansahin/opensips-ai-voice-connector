@@ -72,6 +72,37 @@ class TTSProcessor:
         if drained_count > 0 and self.debug:
             logging.debug(f"{self.session_id}TTSProcessor: Drained {drained_count} packets from RTP queue during interruption.")
 
+    def _tensor_from_audio_chunk(self, audio_chunk: bytes) -> torch.Tensor:
+        """Convert PCM s16le bytes to normalized float tensor in [-1.0,1.0]."""
+        buffer = bytearray(audio_chunk)
+        return torch.frombuffer(buffer, dtype=torch.int16).float() / 32768.0
+
+    def _resample_and_clamp(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Resample to target rate if needed and clamp values to [-1,1]."""
+        if self.tts_resampler:
+            tensor = self.tts_resampler(tensor.unsqueeze(0)).squeeze(0)
+        return torch.clamp(tensor, -1.0, 1.0)
+
+    def _tensor_to_pcm_s16le_bytes(self, tensor: torch.Tensor) -> bytes:
+        """Convert normalized float tensor to raw PCM s16le bytes."""
+        return (tensor * 32767.0).to(torch.int16).numpy().tobytes()
+
+    def _pcm_s16le_to_ulaw(self, pcm_bytes: bytes) -> bytes:
+        """Convert raw PCM s16le bytes to μ-law (G.711 u-law) bytes."""
+        return audioop.lin2ulaw(pcm_bytes, 2)
+
+    async def _queue_pcmu_chunks(self, cumulative_pcmu_bytes: bytearray, chunk_size: int) -> None:
+        """Slice cumulative μ-law bytes into fixed-size RTP payloads and enqueue them."""
+        while len(cumulative_pcmu_bytes) >= chunk_size:
+            if self._interrupt_event.is_set():
+                raise asyncio.CancelledError("TTS interrupted by user (before RTP queueing)")
+            payload = cumulative_pcmu_bytes[:chunk_size]
+            self.rtp_queue.put_nowait(bytes(payload))
+            if self.debug:
+                logging.debug(f"{self.session_id}TTSProcessor: Queued {len(payload)} bytes for RTP.")
+            del cumulative_pcmu_bytes[:chunk_size]
+            await asyncio.sleep(0.001)
+
     async def generate_and_queue_tts_audio(self, text_to_speak: str) -> None:
         self._interrupt_event.clear()
 
@@ -113,26 +144,15 @@ class TTSProcessor:
                         logging.info(f"{self.session_id}TTSProcessor: Interruption detected during audio stream.")
                         raise asyncio.CancelledError("TTS interrupted by user (audio stream)")
 
-                    input_tensor = torch.frombuffer(audio_chunk_from_engine, dtype=torch.int16).float() / 32768.0
-
-                    processed_tensor = self.tts_resampler(input_tensor.unsqueeze(0)).squeeze(0) if self.tts_resampler else input_tensor
-                    clamped_tensor = torch.clamp(processed_tensor, -1.0, 1.0)
-                    pcm_s16le_bytes = (clamped_tensor * 32767.0).to(torch.int16).numpy().tobytes()
-
-                    pcmu_chunk_bytes = audioop.lin2ulaw(pcm_s16le_bytes, 2)
+                    # Process raw audio chunk through helper methods
+                    input_tensor = self._tensor_from_audio_chunk(audio_chunk_from_engine)
+                    processed_tensor = self._resample_and_clamp(input_tensor)
+                    pcm_s16le_bytes = self._tensor_to_pcm_s16le_bytes(processed_tensor)
+                    pcmu_chunk_bytes = self._pcm_s16le_to_ulaw(pcm_s16le_bytes)
                     cumulative_pcmu_bytes.extend(pcmu_chunk_bytes)
 
-                    while len(cumulative_pcmu_bytes) >= rtp_chunk_size_bytes:
-                        if self._interrupt_event.is_set():
-                            logging.info(f"{self.session_id}TTSProcessor: Interruption detected before queueing RTP chunk.")
-                            raise asyncio.CancelledError("TTS interrupted by user (before RTP queueing)")
-
-                        rtp_payload = cumulative_pcmu_bytes[:rtp_chunk_size_bytes]
-                        self.rtp_queue.put_nowait(bytes(rtp_payload))
-                        if self.debug:
-                            logging.debug(f"{self.session_id}TTSProcessor: Queued {len(rtp_payload)} bytes for RTP.")
-                        cumulative_pcmu_bytes = cumulative_pcmu_bytes[rtp_chunk_size_bytes:]
-                        await asyncio.sleep(0.001)
+                    # Split and enqueue RTP-sized chunks
+                    await self._queue_pcmu_chunks(cumulative_pcmu_bytes, rtp_chunk_size_bytes)
 
                 if not self._interrupt_event.is_set() and cumulative_pcmu_bytes:
                     final_payload = bytes(cumulative_pcmu_bytes).ljust(rtp_chunk_size_bytes, b'\xff')

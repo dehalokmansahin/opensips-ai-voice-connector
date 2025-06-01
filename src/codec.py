@@ -28,7 +28,7 @@ from opus import OggOpus
 from typing import List, Optional, Tuple, Union, Any, Dict, AsyncGenerator, Type, TYPE_CHECKING
 import asyncio # For asyncio.Queue
 import logging # Added logging import
-from . import constants
+import constants
 
 if TYPE_CHECKING: # To avoid circular import with a full AIEngine import if response type is more specific
     from ..ai import AIEngine # For process_response's 'response' type hint, if it's an AIEngine method

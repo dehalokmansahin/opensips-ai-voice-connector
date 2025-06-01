@@ -38,7 +38,7 @@ from rtp import decode_rtp_packet, generate_rtp_packet
 from utils import get_ai
 from src.ai import AIEngine
 from src.codec import GenericCodec
-from . import constants
+import constants
 
 rtp_cfg = Config.get("rtp")
 min_rtp_port: int = int(rtp_cfg.get("min_port", "RTP_MIN_PORT", "35000"))
@@ -235,7 +235,8 @@ class RTPSender:
                         'sequence_number': sequence_number, 'timestamp': timestamp,
                         'ssrc': ssrc, 'payload': payload_to_send.hex()
                     }
-                    rtp_packet_bytes: bytes = generate_rtp_packet(rtp_packet_dict)
+                    packet_hex: str = generate_rtp_packet(rtp_packet_dict)
+                    rtp_packet_bytes: bytes = bytes.fromhex(packet_hex)
                     marker = 0
 
                     try:
@@ -277,122 +278,6 @@ class RTPSender:
             logging.error(f"[{log_prefix}] Unhandled exception in RTPSender loop: {e}", exc_info=True)
         finally:
             logging.info(f"[{log_prefix}] RTPSender loop finished.")
-    """ Handles generating and sending RTP packets. """
-    # Removed the first, simpler __init__ method. The one below is the correct one.
-    def __init__(self, serversock, client_addr, client_port, codec, rtp_queue, stop_event):
-        self.serversock = serversock
-        self.client_addr = client_addr
-        self.client_port = client_port
-        self.codec = codec
-        self.rtp_queue = rtp_queue
-        self.stop_event = stop_event
-        self.send_task = None
-        self.rtp_sender_stop_timeout = Config.get("rtp").getfloat("rtp_sender_stop_timeout", "RTP_SENDER_STOP_TIMEOUT", 1.0)
-
-    def start(self):
-        self.send_task = asyncio.create_task(self._send_rtp_loop())
-
-    async def stop(self):
-        if self.send_task:
-            try:
-                await asyncio.wait_for(self.send_task, timeout=self.rtp_sender_stop_timeout)
-            except asyncio.TimeoutError:
-                logging.warning("RTPSender task did not finish in time.")
-            except asyncio.CancelledError:
-                logging.info("RTPSender task was cancelled.")
-
-
-    async def _send_rtp_loop(self):
-        """ Sends all RTP packets. """
-        sequence_number = random.randint(0, 10000)
-        timestamp = random.randint(0, 10000) # Initial timestamp
-        ssrc = random.randint(0, 2**32 - 1) # SSRC is 32-bit
-        ts_inc = self.codec.ts_increment
-        ptime = self.codec.ptime
-        payload_type = self.codec.payload_type
-        marker = 1 # First packet should have marker bit set
-        packet_no = 0
-        start_time = datetime.datetime.now()
-
-        logging.info("RTPSender loop started for %s:%d", self.client_addr, self.client_port)
-
-        try:
-            while not self.stop_event.is_set():
-                payload_to_send = None
-                try:
-                    # Wait for an item from the queue, but with a timeout
-                    # This allows checking stop_event periodically if queue is empty
-                    payload_to_send = await asyncio.wait_for(self.rtp_queue.get(), timeout=float(ptime) / 1000.0)
-                    self.rtp_queue.task_done()
-                except asyncio.TimeoutError:
-                    # Queue was empty for ptime duration, check if we should send silence
-                    if self.stop_event.is_set(): break # Exit if stopping
-                    # The original logic implies sending silence if not paused.
-                    # However, CallSession.paused is not directly available here.
-                    # This needs to be coordinated, e.g. Call tells RTPSender to pause/resume queue processing
-                    # or a special "PAUSE" item is put in queue.
-                    # For now, let's assume if queue is empty, we might send silence.
-                    # This part needs careful review with CallSession's pause logic.
-                    # The original `send_rtp` in Call class checked `self.terminated` and `self.paused`
-                    # We need a similar mechanism here, or the AI engine should manage silence/pausing.
-                    # For now, let's assume the AI engine or CallSession manages what goes into rtp_queue.
-                    # If queue is empty, we just wait for next item or stop_event.
-                    # The original code sent silence if not paused.
-                    # This implies RTPSender needs to know pause state or AI sends silence.
-                    # Let's assume AI sends silence if it wants to.
-                    # If self.terminated, it was handled in original. Call should handle this.
-                    continue # Go back to check stop_event and wait for queue
-                except Empty: # Should not happen with asyncio.Queue.get()
-                    continue
-
-
-                if payload_to_send:
-                    rtp_packet_dict = {
-                        'version': constants.RTP_VERSION, # Use constant
-                        'padding': 0,
-                        'extension': 0,
-                        'csi_count': 0,
-                        'marker': marker,
-                        'payload_type': payload_type,
-                        'sequence_number': sequence_number,
-                        'timestamp': timestamp,
-                        'ssrc': ssrc,
-                        'payload': payload_to_send.hex()
-                    }
-                    rtp_packet_bytes = generate_rtp_packet(rtp_packet_dict)
-                    marker = 0 # Reset marker after first packet with payload
-
-                    try:
-                        self.serversock.sendto(rtp_packet_bytes, (self.client_addr, self.client_port))
-                    except Exception as e:
-                        logging.error("Error sending RTP packet: %s to %s:%s", e, self.client_addr, self.client_port)
-                        # If sendto fails, client might have disconnected.
-                        # Consider adding logic to stop if errors persist.
-                        # For now, just log and continue.
-
-                    sequence_number = (sequence_number + 1) % (2**16) # Sequence number wraps around
-
-                timestamp = (timestamp + ts_inc) % (2**32) # Timestamp wraps around
-                packet_no += 1
-
-                # Pacing: wait until it's time to send the next packet
-                next_time = start_time + datetime.timedelta(milliseconds=ptime * packet_no)
-                now = datetime.datetime.now()
-                wait_time = (next_time - now).total_seconds()
-
-                if wait_time > 0:
-                    try:
-                        await asyncio.wait_for(self.stop_event.wait(), timeout=wait_time)
-                        if self.stop_event.is_set(): break # Exit if stop_event is set during wait
-                    except asyncio.TimeoutError:
-                        pass # Normal, means we waited the full time
-        except asyncio.CancelledError:
-            logging.info("RTPSender loop cancelled for %s:%d", self.client_addr, self.client_port)
-            raise # Re-raise CancelledError to ensure task cleanup
-        except Exception as e:
-            logging.exception("Exception in RTPSender loop for %s:%d: %s", self.client_addr, self.client_port, e)
-        finally:
-            logging.info("RTPSender loop finished for %s:%d", self.client_addr, self.client_port)
 
 
 class CallSession:
@@ -545,7 +430,7 @@ class Call():
         self.rtp_receiver: RTPReceiver = RTPReceiver(
             serversock=self.serversock, client_addr=self.client_addr, client_port=self.client_port,
             paused_callback=lambda: self.call_session.paused,
-            ai_send_callback=lambda audio_chunk: asyncio.create_task(self.ai_engine_instance.send(audio_chunk)),
+            ai_send_callback=lambda audio_chunk: self.ai_engine_instance.send(audio_chunk),
             loop=self.loop, call_ref=self
         )
 
