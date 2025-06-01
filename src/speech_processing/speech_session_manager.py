@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import time
-import random
 from queue import Queue
 from typing import Any, Callable, Awaitable, Optional, Tuple
 from aiortc.sdp import SessionDescription # Added for sdp_object type hint
@@ -14,6 +13,7 @@ from ..ai import AIEngine
 from ..config import Config
 from ..codec import get_codecs, PCMU, UnsupportedCodec, GenericCodec # Added GenericCodec for get_codec return hint
 from .. import constants
+from ..llm_client import LLMClient
 
 from .audio_processor import AudioProcessor
 from .vad_detector import VADDetector
@@ -60,6 +60,13 @@ class SessionConfigurator:
         self.tts_voice_id: str = tts_voice_id
         self.tts_input_rate: int = tts_input_rate
         self.tts_target_output_rate: int = int(self.session_cfg.get("tts_target_output_rate", "tts_target_output_rate", 8000))
+
+        # LLM
+        self.llm_server_uri: str = self.session_cfg.get("llm_server_uri", "ws://localhost:8765")
+        self.llm_system_prompt: str = self.session_cfg.get("llm_system_prompt", 
+                                                          "Sen Garanti BBVA sesli asistanısın. Ürettiğin cevaplar içerisinde * gibi özel karakterler kullanma. Text-to-speech için uygun bir format kullan.")
+        self.llm_max_tokens: int = self.session_cfg.getint("llm_max_tokens", None, 256)
+        self.llm_temperature: float = self.session_cfg.getfloat("llm_temperature", None, 0.7)
 
         # STT Reconnect
         self.stt_max_reconnect_attempts: int = self.session_cfg.getint("stt_max_reconnect_attempts", "STT_MAX_RECONNECT_ATTEMPTS", 5)
@@ -411,19 +418,38 @@ class SpeechSessionManager(AIEngine):
         self.call_ref = call
         self.session_id: str = f"[Session:{call.b2b_key}] " if hasattr(call, 'b2b_key') else "[Session:Unknown] "
         self._is_closing: bool = False
+        
+        # TTS Queue System - Cümlelerin sırayla işlenmesi için
+        self._tts_queue: asyncio.Queue = asyncio.Queue()
+        self._tts_processor_task: Optional[asyncio.Task] = None
         self._current_tts_task: Optional[asyncio.Task] = None
+        self._tts_generation_counter: int = 0
+        
         self.configurator = SessionConfigurator(cfg, self.session_id, call.sdp, tts_voice_id, tts_input_rate)
         self._setup_logging()
         self.audio_orchestrator = AudioOrchestrator(
             configurator=self.configurator, session_id=self.session_id,
             on_vad_audio_chunk=self._handle_vad_audio_chunk, on_barge_in_detected=self._handle_barge_in,
             on_vad_timeout=self._handle_vad_timeout,
-            is_tts_active_func=lambda: self.tts_coordinator.is_active() if hasattr(self, 'tts_coordinator') else False)
+            is_tts_active_func=lambda: (
+                (self.tts_coordinator.is_active() if hasattr(self, 'tts_coordinator') else False) or
+                (not self._tts_queue.empty() if hasattr(self, '_tts_queue') else False) or
+                (self._current_tts_task and not self._current_tts_task.done() if hasattr(self, '_current_tts_task') and self._current_tts_task else False)
+            ))
         self.transcript_coordinator = TranscriptCoordinator(
             stt_engine=stt_engine, configurator=self.configurator, session_id=self.session_id,
             on_final_transcript=self._handle_final_transcript)
         self.tts_coordinator = TTSCoordinator(
             tts_engine=tts_engine, configurator=self.configurator, rtp_queue=call.rtp_queue, session_id=self.session_id)
+        
+        # Initialize LLM client
+        self.llm_client = LLMClient(
+            server_uri=self.configurator.llm_server_uri,
+            sentence_callback=self._handle_llm_sentence,
+            session_id=self.session_id,
+            debug=self.configurator.debug
+        )
+        
         logging.info(f"{self.session_id}SSM initialized. VAD Bypass: {self.configurator.bypass_vad}, Barge-in: {self.configurator.barge_in_threshold_seconds}s")
 
     def _setup_logging(self) -> None:
@@ -435,7 +461,79 @@ class SpeechSessionManager(AIEngine):
         if not await self.transcript_coordinator.start():
             logging.error(f"{self.session_id}SSM: Failed to start TranscriptCoordinator."); return False
         self.audio_orchestrator.start_monitoring()
+        
+        # TTS Queue Processor'ı başlat
+        self._tts_processor_task = asyncio.create_task(self._process_tts_queue(), name=f"TTSQueue-{self.session_id}")
+        
         logging.info(f"{self.session_id}SSM session started successfully."); return True
+
+    async def _process_tts_queue(self) -> None:
+        """TTS cümlelerini sırayla işler - bir cümle tamamen bitmeden diğerine geçmez."""
+        logging.info(f"{self.session_id}SSM: TTS queue processor started.")
+        
+        try:
+            while not self._is_closing:
+                try:
+                    # Queue'dan sonraki cümleyi al (timeout ile)
+                    sentence, generation_id = await asyncio.wait_for(
+                        self._tts_queue.get(), timeout=1.0
+                    )
+                    
+                    if self._is_closing:
+                        break
+                        
+                    logging.info(f"{self.session_id}SSM: Processing TTS sentence (ID:{generation_id}): \"{sentence[:50]}...\"")
+                    
+                    try:
+                        # TTS task'ı başlat ve TAMAMEN bitirmesini bekle
+                        self._current_tts_task = await self.tts_coordinator.synthesize_and_send(sentence)
+                        if self._current_tts_task:
+                            await self._current_tts_task  # TTS'in tamamen bitmesini bekle
+                            logging.debug(f"{self.session_id}SSM: TTS sentence completed (ID:{generation_id})")
+                        
+                        # Task tamamlandığında temizle
+                        self._current_tts_task = None
+                        
+                        # Queue'dan item'ı çıkar
+                        self._tts_queue.task_done()
+                        
+                    except asyncio.CancelledError:
+                        logging.info(f"{self.session_id}SSM: TTS sentence cancelled (ID:{generation_id})")
+                        self._tts_queue.task_done()
+                        # Barge-in durumunda queue'yu temizle
+                        await self._clear_tts_queue()
+                        break
+                    except Exception as e:
+                        logging.error(f"{self.session_id}SSM: Error processing TTS sentence (ID:{generation_id}): {e}", exc_info=True)
+                        self._tts_queue.task_done()
+                        
+                except asyncio.TimeoutError:
+                    # Timeout - normal, döngüyü devam ettir
+                    continue
+                    
+        except asyncio.CancelledError:
+            logging.info(f"{self.session_id}SSM: TTS queue processor cancelled.")
+        except Exception as e:
+            logging.error(f"{self.session_id}SSM: Fatal error in TTS queue processor: {e}", exc_info=True)
+        finally:
+            logging.info(f"{self.session_id}SSM: TTS queue processor stopped.")
+
+    async def _clear_tts_queue(self) -> None:
+        """TTS queue'sunu temizle (barge-in durumunda)."""
+        cleared_count = 0
+        try:
+            while not self._tts_queue.empty():
+                try:
+                    self._tts_queue.get_nowait()
+                    self._tts_queue.task_done()
+                    cleared_count += 1
+                except asyncio.QueueEmpty:
+                    break
+        except Exception as e:
+            logging.error(f"{self.session_id}SSM: Error clearing TTS queue: {e}")
+        
+        if cleared_count > 0:
+            logging.info(f"{self.session_id}SSM: Cleared {cleared_count} pending TTS sentences from queue.")
 
     async def send(self, audio: bytes) -> None:
         if self._is_closing: return
@@ -452,17 +550,28 @@ class SpeechSessionManager(AIEngine):
     async def _handle_barge_in(self) -> None:
         if self._is_closing: return
         logging.info(f"{self.session_id}SSM: Handling barge-in.")
-        self._perform_barge_in()
+        await self._perform_barge_in()
 
-    def _perform_barge_in(self) -> None:
+    async def _perform_barge_in(self) -> None:
         """Interrupt TTS, reset VAD, and clear transcripts."""
+        # TTS interrupt et
         self.tts_coordinator.interrupt()
+        
+        # Aktif TTS task'ı iptal et
         if self._current_tts_task and not self._current_tts_task.done():
             self._current_tts_task.cancel()
+            
+        # TTS queue'sunu temizle
+        await self._clear_tts_queue()
+        
+        # VAD state'i sıfırla
         self.audio_orchestrator.reset_vad_state(preserve_buffer=False)
+        
+        # Transcript'leri temizle
         if hasattr(self.transcript_coordinator, 'transcript_handler'):
             self.transcript_coordinator.transcript_handler.clear_transcripts()
-        logging.debug(f"{self.session_id}SSM: Barge-in performed.")
+            
+        logging.debug(f"{self.session_id}SSM: Barge-in performed - TTS queue cleared.")
 
     async def _handle_vad_timeout(self, reason: str) -> None:
         if self._is_closing: return
@@ -481,7 +590,7 @@ class SpeechSessionManager(AIEngine):
 
     async def _process_final_transcript(self, final_text: str) -> None:
         """Handle final transcript: interrupt active TTS, generate response, reset state, and start new TTS."""
-        # Interrupt and cancel any ongoing TTS
+        # Aktif TTS'i interrupt et ve queue'yu temizle
         if self.tts_coordinator.is_active():
             logging.info(f"{self.session_id}SSM: Interrupting active TTS for new final transcript.")
             self.tts_coordinator.interrupt()
@@ -491,26 +600,72 @@ class SpeechSessionManager(AIEngine):
                     await self._current_tts_task
                 except asyncio.CancelledError:
                     logging.info(f"{self.session_id}SSM: Previous TTS task cancelled.")
+                    
+        # TTS queue'sunu temizle
+        await self._clear_tts_queue()
         self._current_tts_task = None
-        # Simulate LLM response
-        llm_response_text = random.choice([
-            f"Reply: {final_text}",
-            "Teşekkürler garanti bankasını aradığınız için teşekkür ederiz",
-            "Değerli müşterimiz kredi kartınızın son 4 hanesini tekrar söyleyebilir misiniz? Kartınızla ilgili bilgilerinizi tekrar söyleyebilir misiniz?"
-        ])
-        logging.info(f"{self.session_id}SSM: Simulated LLM response: \"{llm_response_text}\"")
+        
+        # Yeni generation ID
+        self._tts_generation_counter += 1
+        current_generation = self._tts_generation_counter
+        
+        # Generate LLM response using streaming client
+        logging.info(f"{self.session_id}SSM: Generating LLM response (Gen:{current_generation}) for: \"{final_text}\"")
+        
         # Reset VAD and barge-in flags
         self.audio_orchestrator.reset_vad_state(preserve_buffer=False)
         self.audio_orchestrator.barge_in_pending = False
-        # Start TTS for the response
-        if llm_response_text:
-            try:
-                logging.info(f"{self.session_id}SSM: Starting TTS for: \"{llm_response_text[:50]}...\"")
-                self._current_tts_task = await self.tts_coordinator.synthesize_and_send(llm_response_text)
-            except Exception as e:
-                logging.error(f"{self.session_id}SSM: Error starting TTS: {e}", exc_info=True)
-        else:
-            logging.info(f"{self.session_id}SSM: LLM produced empty response.")
+        
+        # Generate streaming LLM response (sentences will be processed via _handle_llm_sentence)
+        try:
+            success = await self.llm_client.generate_response(
+                system_prompt="""
+                    Sen Garanti BBVA IVR hattında, Türkçe TTS için konuşma metni üreten bir dil modelisin.
+
+                    Kurallar:
+                    1. Kısa-orta uzunlukta, net ve resmi cümleler yaz (en çok 20 kelime).
+                    2. Türkçe imlâyı tam uygula (ç, ğ, ı, ö, ş, ü).
+                    3. Tarihleri “2 Haziran 2025”, saatleri “14.30” biçiminde yaz.
+                    4. Kritik sayıları tam ver: “₺250”, “1234”.
+                    5. Gereksiz sembol, yabancı kelime, ünlem ve jargon kullanma.
+                    6. Yalnızca TTS’ye okunacak metni döndür; fazladan açıklama ekleme.
+    
+                    """,
+                user_prompt=final_text,
+                max_tokens=self.configurator.llm_max_tokens,
+                temperature=self.configurator.llm_temperature
+            )
+            if not success:
+                logging.error(f"{self.session_id}SSM: LLM generation failed")
+                # Fallback to a default response
+                await self._handle_llm_sentence("Üzgünüm, şu anda yardımcı olamıyorum. Lütfen daha sonra tekrar deneyin.")
+        except Exception as e:
+            logging.error(f"{self.session_id}SSM: Error generating LLM response: {e}", exc_info=True)
+            await self._handle_llm_sentence("Üzgünüm, bir hata oluştu. Lütfen tekrar deneyin.")
+
+    async def _handle_llm_sentence(self, sentence: str) -> None:
+        """Handle individual sentences from LLM streaming response - queue'ya ekle."""
+        if self._is_closing:
+            return
+            
+        try:
+            # Cümleyi temizle - özel karakterleri kaldır
+            cleaned_sentence = sentence.strip()
+            cleaned_sentence = cleaned_sentence.replace("*", "").replace("**", "")
+            cleaned_sentence = " ".join(cleaned_sentence.split())  # Çoklu boşlukları temizle
+            
+            if not cleaned_sentence:
+                logging.debug(f"{self.session_id}SSM: Empty sentence after cleaning, skipping.")
+                return
+                
+            current_generation = self._tts_generation_counter
+            logging.info(f"{self.session_id}SSM: Queuing TTS sentence (Gen:{current_generation}): \"{cleaned_sentence[:50]}...\"")
+            
+            # Cümleyi TTS queue'suna ekle (sırayla işlenecek)
+            await self._tts_queue.put((cleaned_sentence, current_generation))
+            
+        except Exception as e:
+            logging.error(f"{self.session_id}SSM: Error queuing TTS sentence: {e}", exc_info=True)
 
     async def stop(self) -> bool:
         logging.info(f"{self.session_id}SSM: stop called (delegating to TranscriptCoordinator).")
@@ -520,6 +675,18 @@ class SpeechSessionManager(AIEngine):
     async def close(self) -> None:
         if self._is_closing: logging.info(f"{self.session_id}SSM: close already in progress."); return
         logging.info(f"{self.session_id}SSM: closing session..."); self._is_closing = True
+        
+        # TTS Queue Processor'ı durdur
+        if self._tts_processor_task and not self._tts_processor_task.done():
+            self._tts_processor_task.cancel()
+            try: 
+                await self._tts_processor_task
+            except asyncio.CancelledError: 
+                logging.debug(f"{self.session_id}SSM: TTS queue processor cancelled.")
+        
+        # TTS queue'sunu temizle
+        await self._clear_tts_queue()
+        
         if hasattr(self, 'audio_orchestrator'): await self.audio_orchestrator.stop_monitoring()
         if hasattr(self, 'tts_coordinator'): await self.tts_coordinator.close()
         if self._current_tts_task and not self._current_tts_task.done():

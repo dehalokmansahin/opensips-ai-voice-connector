@@ -34,7 +34,7 @@ services:
   # OpenSIPS Servisi
   opensips:
     # Seçenek 1: Hazır OpenSIPS imajı kullanın (versiyonu ihtiyacınıza göre seçin)
-    image: opensips/opensips:3.4
+    image: opensips/opensips:3.6
     # Seçenek 2: Eğer OpenSIPS için kendi Dockerfile'ınız varsa:
     # build: ./path/to/opensips/docker/context # Gerçek yolu belirtin
     container_name: opensips
@@ -72,6 +72,14 @@ services:
       - opensips_network
     restart: unless-stopped
 
+  llm-turkish-server:
+    image: dehalokmansahin/llm-turkish-server:latest
+    container_name: llm-turkish-server
+    ports:
+      - "8765:8765"
+    networks:
+      - opensips_network
+    restart: unless-stopped
 networks:
   opensips_network:
     driver: bridge # Konteynerlerin birbirleriyle konuşabilmesi için ağ
