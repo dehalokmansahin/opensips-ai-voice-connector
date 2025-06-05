@@ -175,11 +175,28 @@ class AudioProcessor:
             torch.Tensor: The (potentially) normalized audio tensor.
         """
         audio_max = torch.max(torch.abs(tensor))
+        
+        # Hızlı gürültü analizi
+        rms = torch.sqrt(torch.mean(tensor ** 2))
+        sorted_amplitudes = torch.sort(torch.abs(tensor))[0]
+        if len(sorted_amplitudes) > 10:  # Dizinin en az 10 eleman içerdiğinden emin ol
+            noise_floor = sorted_amplitudes[int(len(sorted_amplitudes) * 0.1)]  # 10th percentile
+            snr = 20 * torch.log10(rms / (noise_floor + 1e-10))
+            
+            # Her ses parçası için gürültü seviyesini logla
+            logging.debug(f"{self.session_id}Audio processor noise analysis - rms: {rms:.4f}, max: {audio_max:.4f}, noise_floor: {noise_floor:.4f}, SNR: {snr:.2f}")
 
+        # Sessiz ses için normalizasyon
         if audio_max < 0.005:
             gain = min(0.2 / (audio_max + 1e-10), 5.0)
             tensor = tensor * gain
-            if self.debug:
-                logging.debug(f"{self.session_id}Applied normalization with gain: {gain:.2f}")
+            logging.debug(f"{self.session_id}Applied normalization with gain: {gain:.2f}")
+        
+        # Gürültülü ortam belirtisi - zaten normalize edilmiş ses için yumuşatma
+        # Gürültülü ses genellikle yüksek RMS ama düşük dinamik aralığa sahiptir
+        if rms > 0.05 and audio_max < 0.3:
+            # Soft gürültü azaltma için hafif bir yumuşatma uygula
+            tensor = tensor * 0.8
+            logging.info(f"{self.session_id}Applied soft noise reduction (high RMS but low peak)")
 
         return tensor

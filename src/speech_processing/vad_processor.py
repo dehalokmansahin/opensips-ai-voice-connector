@@ -226,12 +226,27 @@ class VADProcessor:
                 logging.debug(
                     f"{self.session_id}VAD detected speech in chunk (consecutive_speech={self.consecutive_speech_packets})"
                 )
-            if self.consecutive_speech_packets >= self.speech_detection_threshold and not self.speech_active:
-                self.speech_active = True
-                self.speech_start_time = current_time
-                logging.info(
-                    f"{self.session_id}Speech started (VAD active) after {self.consecutive_speech_packets} consecutive speech chunk(s)."
-                )
+            # Gürültülü ortamlarda yanlış tespitleri önlemek için daha yüksek eşik değeri kullan
+            speech_threshold = self.speech_detection_threshold
+            if hasattr(self.vad, 'threshold') and self.vad.threshold > 0.35:
+                # Eşik değeri yüksekse (gürültülü ortam), daha fazla doğrulama iste
+                speech_threshold = max(2, self.speech_detection_threshold)
+                
+            if self.consecutive_speech_packets >= speech_threshold and not self.speech_active:
+                # Çok kısa süreli konuşmaları reddetmek için minimum süre kontrolü
+                speech_duration_ms = (current_time - self.speech_start_time) * 1000
+                min_speech_duration_ms = 200  # En az 200ms sürmeli
+                
+                if speech_duration_ms >= min_speech_duration_ms:
+                    self.speech_active = True
+                    logging.info(
+                        f"{self.session_id}Speech started (VAD active) after {self.consecutive_speech_packets} consecutive speech chunk(s)."
+                    )
+                else:
+                    if self.debug:
+                        logging.debug(
+                            f"{self.session_id}Ignored very short speech detection ({speech_duration_ms:.1f}ms < {min_speech_duration_ms}ms)"
+                        )
         else:
             self.consecutive_silence_packets += 1
             self.consecutive_speech_packets = 0

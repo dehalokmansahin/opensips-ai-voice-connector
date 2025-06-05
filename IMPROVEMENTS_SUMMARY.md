@@ -12,6 +12,10 @@ Based on the provided logs, the main issues identified were:
 
 4. **State management problems**: VAD state wasn't properly synchronized with transcript handling.
 
+5. **Ambient noise and microphone level variations**: Different environments caused inconsistent VAD performance.
+
+6. **Echo from TTS audio**: The TTS voice would sometimes echo back through the microphone and be detected as user speech.
+
 ## Key Improvements Implemented
 
 ### 1. **Timeout-Based Final Transcript Generation**
@@ -59,9 +63,37 @@ silence_timeout_seconds: 3.0      # Maximum silence after speech
 stale_partial_timeout_seconds: 2.5 # Maximum unchanged partial time
 ```
 
+### 6. **Adaptive VAD with Ambient Noise Calibration**
+
+Added a new `AdaptiveVADDetector` that extends the standard Silero VAD with:
+
+- **Dynamic threshold adjustment**: Automatically calibrates VAD sensitivity based on audio characteristics
+- **Noise floor analysis**: Measures background noise levels to optimize detection
+- **Signal-to-noise ratio (SNR) calculation**: Adjusts thresholds based on SNR
+- **Audio history tracking**: Maintains a sliding window of recent audio to inform calibration
+
+**Implementation:**
+- New `AdaptiveVADDetector` class that extends `VADDetector`
+- Configurable calibration window and parameters
+- Detailed logging of calibration decisions
+
+### 7. **Echo Cancellation for TTS Audio**
+
+Added echo cancellation to prevent TTS audio from being detected as user speech:
+
+- **TTS audio registration**: Tracks TTS audio to identify potential echoes
+- **WebRTC VAD integration**: Uses webrtcvad as a secondary confirmation for speech during potential echo periods
+- **Cooldown periods**: Implements silence periods after TTS to avoid false detections
+- **TTS state tracking**: Coordinates between TTS and VAD components
+
+**Implementation:**
+- Integration between `TTSProcessor` and `AdaptiveVADDetector`
+- WebRTC VAD for echo verification
+- Configurable cooldown periods and aggressiveness settings
+
 ## Code Changes Summary
 
-### Files Modified:
+### Files Modified/Added:
 
 1. **`src/speech_session_vosk.py`**:
    - Enhanced `VADProcessor` class with timing and timeout detection
@@ -75,6 +107,24 @@ stale_partial_timeout_seconds: 2.5 # Maximum unchanged partial time
    - Updated documentation with new features and configuration options
    - Added performance tuning recommendations
 
+3. **`src/speech_processing/adaptive_vad.py`** (New):
+   - Created `AdaptiveVADDetector` class extending `VADDetector`
+   - Implemented calibration logic for ambient noise adaptation
+   - Added echo cancellation using webrtcvad
+   - Added TTS audio registration and tracking
+
+4. **`src/speech_processing/tts_processor.py`**:
+   - Added integration with VAD for echo cancellation
+   - Added TTS state notification (start/end)
+
+5. **`src/speech_processing/speech_session_manager.py`**:
+   - Updated to use `AdaptiveVADDetector` when enabled
+   - Added configuration for adaptive VAD parameters
+   - Enhanced TTS-VAD coordination
+
+6. **`requirements.txt`**:
+   - Added webrtcvad dependency for echo cancellation
+
 ### Key Methods Added/Modified:
 
 - `VADProcessor.has_speech_timeout()`
@@ -83,6 +133,11 @@ stale_partial_timeout_seconds: 2.5 # Maximum unchanged partial time
 - `TranscriptHandler.clear_transcripts()`
 - `SmartSpeech._monitor_vad_timeouts()`
 - `SmartSpeech._force_final_transcript()`
+- `AdaptiveVADDetector._update_calibration()`
+- `AdaptiveVADDetector._should_ignore_due_to_echo()`
+- `AdaptiveVADDetector.register_tts_audio()`
+- `AdaptiveVADDetector.tts_finished()`
+- `TTSProcessor.generate_and_queue_tts_audio()` - Updated to notify VAD of TTS activity
 
 ## Testing Recommendations
 
@@ -91,6 +146,9 @@ stale_partial_timeout_seconds: 2.5 # Maximum unchanged partial time
 3. **Test stale partial handling**: Create scenarios where Vosk provides partials but no finals
 4. **Test barge-in functionality**: Interrupt TTS with speech
 5. **Test error recovery**: Disconnect/reconnect Vosk server during operation
+6. **Test adaptive calibration**: Test in both quiet and noisy environments
+7. **Test echo cancellation**: Ensure TTS audio doesn't trigger false VAD detections
+8. **Test microphone sensitivity**: Try with different microphone input levels
 
 ## Configuration Examples
 
@@ -114,6 +172,14 @@ speech_detection_threshold: 2
 silence_detection_threshold: 2
 ```
 
+### For Echo Cancellation and Adaptive VAD:
+```yaml
+use_adaptive_vad: true
+auto_calibration: true
+webrtc_aggressiveness: 2  # 0-3, higher is more aggressive
+calibration_window_ms: 5000
+```
+
 ## Expected Behavior After Improvements
 
 1. **Consistent TTS activation**: Even when Vosk doesn't provide final transcripts, the system will generate them via timeouts
@@ -121,6 +187,9 @@ silence_detection_threshold: 2
 3. **Improved stability**: Better error recovery and state management
 4. **Enhanced logging**: More detailed logs for troubleshooting
 5. **Configurable behavior**: Tunable parameters for different environments
+6. **Adaptive noise handling**: Better performance across different environments
+7. **Reduced false activations**: Echo cancellation prevents TTS audio from being detected as user speech
+8. **More consistent detection**: Calibration adjusts for quiet or loud speakers
 
 ## Monitoring and Debugging
 
@@ -130,5 +199,9 @@ silence_detection_threshold: 2
 - `Stale partial transcript detected. Promoting to final.`
 - `Forcing final transcript from partial due to [reason]`
 - `VAD timeout monitor task cancelled.`
+- `High noise environment detected. Increasing threshold to X.XX`
+- `Low noise environment detected. Decreasing threshold to X.XX`
+- `Registered TTS audio with VAD detector for echo cancellation`
+- `WebRTC VAD detected X/Y speech frames during TTS/cooldown`
 
-These improvements should resolve the primary issue where speech would end but TTS would never activate, providing a much more robust and responsive voice interaction system. 
+These improvements should significantly enhance the robustness of the voice activity detection system, especially in varying acoustic environments and when dealing with TTS audio echoes. 

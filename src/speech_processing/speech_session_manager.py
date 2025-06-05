@@ -17,6 +17,7 @@ from ..llm_client import LLMClient
 
 from .audio_processor import AudioProcessor
 from .vad_detector import VADDetector
+from .adaptive_vad import AdaptiveVADDetector
 from .vad_processor import VADProcessor
 from .transcript_handler import TranscriptHandler
 from .tts_processor import TTSProcessor
@@ -49,6 +50,12 @@ class SessionConfigurator:
         self.vad_buffer_chunk_ms: int = self.session_cfg.getint("vad_buffer_chunk_ms", "vad_buffer_chunk_ms", 600)
         self.speech_detection_threshold: int = self.session_cfg.getint("speech_detection_threshold", "speech_detection_threshold", 1)
         self.silence_detection_threshold: int = self.session_cfg.getint("silence_detection_threshold", "silence_detection_threshold", 1)
+
+        # Adaptive VAD and Echo Cancellation
+        self.use_adaptive_vad: bool = self.session_cfg.getboolean("use_adaptive_vad", "use_adaptive_vad", True)
+        self.auto_calibration: bool = self.session_cfg.getboolean("auto_calibration", "auto_calibration", True)
+        self.webrtc_aggressiveness: int = self.session_cfg.getint("webrtc_aggressiveness", "webrtc_aggressiveness", 2)
+        self.calibration_window_ms: int = self.session_cfg.getint("calibration_window_ms", "calibration_window_ms", 5000)
 
         # Timeouts
         self.speech_timeout_seconds: float = self.session_cfg.getfloat("speech_timeout_seconds", "speech_timeout_seconds", 10.0)
@@ -106,9 +113,27 @@ class AudioOrchestrator:
         self.audio_processor: AudioProcessor = AudioProcessor(
             target_sample_rate=self.config.target_sample_rate,
             debug=self.config.debug, session_id=self.session_id)
-        vad_detector = VADDetector(
-            sample_rate=self.config.target_sample_rate, threshold=self.config.vad_threshold,
-            min_speech_duration_ms=self.config.vad_min_speech_ms, min_silence_duration_ms=self.config.vad_min_silence_ms)
+            
+        # Use AdaptiveVADDetector if enabled in config, otherwise fall back to standard VADDetector
+        if self.config.use_adaptive_vad:
+            logging.info(f"{self.session_id}Using AdaptiveVADDetector with auto_calibration={self.config.auto_calibration}")
+            vad_detector = AdaptiveVADDetector(
+                sample_rate=self.config.target_sample_rate, 
+                initial_threshold=self.config.vad_threshold,
+                min_speech_duration_ms=self.config.vad_min_speech_ms, 
+                min_silence_duration_ms=self.config.vad_min_silence_ms,
+                calibration_window_ms=self.config.calibration_window_ms,
+                webrtc_aggressiveness=self.config.webrtc_aggressiveness,
+                auto_calibration=self.config.auto_calibration)
+        else:
+            logging.info(f"{self.session_id}Using standard VADDetector")
+            vad_detector = VADDetector(
+                sample_rate=self.config.target_sample_rate, 
+                threshold=self.config.vad_threshold,
+                min_speech_duration_ms=self.config.vad_min_speech_ms, 
+                min_silence_duration_ms=self.config.vad_min_silence_ms)
+                
+        self.vad_detector = vad_detector
         self.vad_processor: VADProcessor = VADProcessor(
             vad_detector=vad_detector, target_sample_rate=self.config.target_sample_rate,
             vad_buffer_chunk_ms=self.config.vad_buffer_chunk_ms,
@@ -368,13 +393,32 @@ class TranscriptCoordinator:
 
 class TTSCoordinator:
     def __init__(self, tts_engine: TTSEngineBase, configurator: SessionConfigurator,
-                 rtp_queue: Queue, session_id: str):
-        self.tts_engine = tts_engine; self.config = configurator; self.rtp_queue = rtp_queue; self.session_id = session_id
+                 rtp_queue: Queue, session_id: str, vad_detector: Optional[Any] = None):
+        """
+        Initializes the TTSCoordinator.
+
+        Args:
+            tts_engine: An instance of a TTSEngineBase implementation for speech synthesis.
+            configurator: The SessionConfigurator with speech configuration parameters.
+            rtp_queue: Queue where TTS audio packets will be placed.
+            session_id: The session identifier for this call.
+            vad_detector: Optional VAD detector for echo cancellation.
+        """
+        self.tts_engine: TTSEngineBase = tts_engine
+        self.config: SessionConfigurator = configurator
+        self.session_id: str = session_id
         self.tts_processor: TTSProcessor = TTSProcessor(
-            rtp_queue=self.rtp_queue, tts_engine=self.tts_engine, tts_voice_id=self.config.tts_voice_id,
-            tts_input_rate=self.config.tts_input_rate, tts_target_output_rate=self.config.tts_target_output_rate,
-            session_id=self.session_id, debug=self.config.debug)
+            rtp_queue=rtp_queue,
+            tts_engine=self.tts_engine,
+            tts_voice_id=self.config.tts_voice_id,
+            tts_input_rate=self.config.tts_input_rate,
+            tts_target_output_rate=self.config.tts_target_output_rate,
+            session_id=self.session_id,
+            debug=self.config.debug,
+            vad_detector=vad_detector
+        )
         self._current_tts_task: Optional[asyncio.Task] = None
+        logging.info(f"{self.session_id}TTSCoordinator initialized with voice '{self.config.tts_voice_id}'")
 
     async def synthesize_and_send(self, text: str) -> asyncio.Task:
         if self._cancel_current_tts():
@@ -440,7 +484,9 @@ class SpeechSessionManager(AIEngine):
             stt_engine=stt_engine, configurator=self.configurator, session_id=self.session_id,
             on_final_transcript=self._handle_final_transcript)
         self.tts_coordinator = TTSCoordinator(
-            tts_engine=tts_engine, configurator=self.configurator, rtp_queue=call.rtp_queue, session_id=self.session_id)
+            tts_engine=tts_engine, configurator=self.configurator, rtp_queue=call.rtp_queue, session_id=self.session_id,
+            vad_detector=self.audio_orchestrator.vad_detector
+        )
         
         # Initialize LLM client
         self.llm_client = LLMClient(
@@ -625,10 +671,10 @@ class SpeechSessionManager(AIEngine):
                     Kurallar:
                     1. Kısa-orta uzunlukta, net ve resmi cümleler yaz (en çok 20 kelime).
                     2. Türkçe imlâyı tam uygula (ç, ğ, ı, ö, ş, ü).
-                    3. Tarihleri “2 Haziran 2025”, saatleri “14.30” biçiminde yaz.
-                    4. Kritik sayıları tam ver: “₺250”, “1234”.
+                    3. Tarihleri "2 Haziran 2025", saatleri "14.30" biçiminde yaz.
+                    4. Kritik sayıları tam ver: "₺250", "1234".
                     5. Gereksiz sembol, yabancı kelime, ünlem ve jargon kullanma.
-                    6. Yalnızca TTS’ye okunacak metni döndür; fazladan açıklama ekleme.
+                    6. Yalnızca TTS'ye okunacak metni döndür; fazladan açıklama ekleme.
     
                     """,
                 user_prompt=final_text,

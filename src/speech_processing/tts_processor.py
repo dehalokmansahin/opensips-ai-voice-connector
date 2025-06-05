@@ -3,8 +3,9 @@ import audioop
 import torch
 import torchaudio
 import logging
+import time
 from queue import Queue, Empty
-from typing import Optional
+from typing import Optional, Any, Callable, Dict, List, Tuple
 
 from .tts_engine_base import TTSEngineBase
 
@@ -20,7 +21,11 @@ class TTSProcessor:
                  tts_input_rate: int, # Expected sample rate from TTSEngineBase
                  tts_target_output_rate: int = 8000,
                  session_id: str = "",
-                 debug: bool = False):
+                 debug: bool = False,
+                 audio_queue: asyncio.Queue = None,
+                 on_tts_start: Callable[[], None] = None,
+                 on_tts_end: Callable[[], None] = None,
+                 vad_detector: Optional[Any] = None):
         """
         Initializes the TTSProcessor.
 
@@ -32,6 +37,10 @@ class TTSProcessor:
             tts_target_output_rate: The target sample rate for the output audio (e.g., 8000 Hz for PCMU).
             session_id: An identifier for the current session, used for contextual logging.
             debug: If True, enables detailed debug logging for TTS processing.
+            audio_queue: An asyncio.Queue where generated audio chunks will be placed.
+            on_tts_start: Optional callback function to be called when TTS generation starts.
+            on_tts_end: Optional callback function to be called when TTS generation ends.
+            vad_detector: Optional VAD detector to register TTS audio for echo cancellation.
         """
         self.rtp_queue: Queue = rtp_queue
         self.tts_engine: TTSEngineBase = tts_engine
@@ -40,6 +49,10 @@ class TTSProcessor:
         self.tts_target_output_rate: int = tts_target_output_rate
         self.session_id: str = session_id
         self.debug: bool = debug
+        self.audio_queue: asyncio.Queue = audio_queue
+        self.on_tts_start: Optional[Callable[[], None]] = on_tts_start
+        self.on_tts_end: Optional[Callable[[], None]] = on_tts_end
+        self.vad_detector: Optional[Any] = vad_detector
 
         self.tts_resampler: Optional[torchaudio.transforms.Resample] = None
         if self.tts_input_rate != self.tts_target_output_rate:
@@ -103,24 +116,36 @@ class TTSProcessor:
             del cumulative_pcmu_bytes[:chunk_size]
             await asyncio.sleep(0.001)
 
-    async def generate_and_queue_tts_audio(self, text_to_speak: str) -> None:
+    async def generate_and_queue_tts_audio(self, text: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """
+        Generates TTS audio from the given text and queues it to the RTP queue.
+
+        Args:
+            text: The text to be converted to speech.
+            metadata: Optional metadata for the TTS generation.
+
+        Returns:
+            bool: True if the TTS generation was successful, False otherwise.
+        """
         self._interrupt_event.clear()
+        
+        if self._interrupt_event.is_set():
+            logging.info(f"{self.session_id}TTSProcessor: TTS generation cancelled at entry due to prior interrupt signal.")
+            return False
 
-        async with self.tts_processing_lock:
-            if self.debug:
-                logging.debug(f"{self.session_id}TTSProcessor: Generating audio for text: \"{text_to_speak[:70]}...\"")
+        if metadata is None:
+            metadata = {}
+        
+        generation_id = metadata.get('generation_id', 'unknown')
+        logging.info(f"{self.session_id}TTSProcessor: Starting TTS generation (ID:{generation_id}) for text: '{text}'")
+        
+        if self.on_tts_start:
+            try:
+                self.on_tts_start()
+            except Exception as e:
+                logging.error(f"{self.session_id}TTSProcessor: Error in TTS start callback: {e}", exc_info=True)
 
-            if self._interrupt_event.is_set():
-                logging.info(f"{self.session_id}TTSProcessor: TTS generation cancelled at entry due to prior interrupt signal.")
-                return
-
-            if not self.rtp_queue.empty():
-                q_size = self.rtp_queue.qsize()
-                logging.info(f"{self.session_id}TTSProcessor: Draining {q_size} stale packets from RTP queue before new TTS playback.")
-                while not self.rtp_queue.empty():
-                    try: self.rtp_queue.get_nowait()
-                    except Empty: break
-
+        try:
             tts_success = False
             engine_was_connected_by_us = False
             try:
@@ -128,7 +153,7 @@ class TTSProcessor:
                     logging.info(f"{self.session_id}TTSProcessor: TTS engine not connected. Attempting to connect.")
                     if not await self.tts_engine.connect():
                         logging.error(f"{self.session_id}TTSProcessor: Failed to connect TTS engine.")
-                        return
+                        return False
                     engine_was_connected_by_us = True
 
                 cumulative_pcmu_bytes = bytearray()
@@ -136,7 +161,7 @@ class TTSProcessor:
 
                 # Requesting raw PCM s16le from the engine. Resampling is handled here.
                 async for audio_chunk_from_engine in self.tts_engine.synthesize_speech(
-                    text=text_to_speak,
+                    text=text,
                     voice=self.tts_voice_id,
                     output_format="pcm_s16le" # Standard format for further processing
                 ):
@@ -178,8 +203,31 @@ class TTSProcessor:
                      logging.info(f"{self.session_id}TTSProcessor: Finished. Interruption signal was active.")
 
             if tts_success and not self._interrupt_event.is_set():
-                logging.info(f"{self.session_id}TTSProcessor: Successfully generated and queued: \"{text_to_speak[:70]}...\"")
+                logging.info(f"{self.session_id}TTSProcessor: Successfully generated and queued: \"{text[:70]}...\"")
             elif self._interrupt_event.is_set() and not tts_success : # Already logged CancelledError
-                logging.info(f"{self.session_id}TTSProcessor: Generation interrupted for: \"{text_to_speak[:70]}...\"")
+                logging.info(f"{self.session_id}TTSProcessor: Generation interrupted for: \"{text[:70]}...\"")
             elif not tts_success:
-                 logging.warning(f"{self.session_id}TTSProcessor: Generation failed for: \"{text_to_speak[:70]}...\"")
+                 logging.warning(f"{self.session_id}TTSProcessor: Generation failed for: \"{text[:70]}...\"")
+
+            if tts_success and self.vad_detector is not None and hasattr(self.vad_detector, 'register_tts_audio'):
+                try:
+                    self.vad_detector.register_tts_audio(processed_tensor)
+                    logging.debug(f"{self.session_id}TTSProcessor: Registered TTS audio with VAD detector for echo cancellation")
+                except Exception as e:
+                    logging.warning(f"{self.session_id}TTSProcessor: Failed to register TTS audio with VAD: {e}")
+
+        finally:
+            if self.on_tts_end:
+                try:
+                    self.on_tts_end()
+                except Exception as e:
+                    logging.error(f"{self.session_id}TTSProcessor: Error in TTS end callback: {e}", exc_info=True)
+                    
+            if self.vad_detector is not None and hasattr(self.vad_detector, 'tts_finished'):
+                try:
+                    self.vad_detector.tts_finished()
+                    logging.debug(f"{self.session_id}TTSProcessor: Notified VAD detector that TTS has finished")
+                except Exception as e:
+                    logging.warning(f"{self.session_id}TTSProcessor: Failed to notify VAD about TTS completion: {e}")
+
+        return tts_success
