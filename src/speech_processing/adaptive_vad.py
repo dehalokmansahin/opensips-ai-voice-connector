@@ -294,85 +294,105 @@ class AdaptiveVADDetector(VADDetector):
         # Adjust threshold based on audio characteristics
         new_threshold = self.threshold
         
-        # Gürültü seviyesi değişimini hızlandırmak için önceki logları oku
+        # --- Noise Trend Analysis ---
+        # If high noise is detected consecutively, we might want to adjust the threshold more aggressively.
+        # `noise_trend_strength` acts as a multiplier for threshold adjustments.
         consecutive_noise_detections = 0
-        noise_trend_strength = 1.0  # Başlangıç çarpanı
+        noise_trend_strength = 1.0  # Default: no acceleration
         
-        # Son 3 kalibrasyon noktasını kontrol et
+        # Check the last 3 calibration results stored in history
         if len(self.calibration_history) >= 3:
+            # Iterate over the last (up to) 3 calibration records
             for i in range(min(3, len(self.calibration_history))):
-                idx = len(self.calibration_history) - 1 - i
-                if idx >= 0 and 'is_high_noise' in self.calibration_history[idx][2]:
-                    if self.calibration_history[idx][2]['is_high_noise']:
+                history_index = len(self.calibration_history) - 1 - i
+                if history_index >= 0 and 'is_high_noise' in self.calibration_history[history_index][2]:
+                    if self.calibration_history[history_index][2]['is_high_noise']:
                         consecutive_noise_detections += 1
             
-            # Eğer son 3 kalibrasyonda sürekli gürültü tespit edildiyse, değişim hızını artır
-            if consecutive_noise_detections >= 2:
-                noise_trend_strength = 1.5  # Daha hızlı değişim
-            if consecutive_noise_detections == 3:
-                noise_trend_strength = 2.0  # Çok daha hızlı değişim
-        
-        # HIGH NOISE ENVIRONMENT DETECTION - İYİLEŞTİRİLMİŞ MANTIK
-        # Düşük SNR değerlerinde daha hassas olmak için gürültü tespit kriterleri güncellendi
+            # If high noise is detected in at least 2 of the last 3 calibrations, increase trend strength.
+            # This makes the threshold adapt faster to persistently noisy conditions.
+            if consecutive_noise_detections >= 2: # If 2 out of 3 recent calibrations detected high noise
+                noise_trend_strength = 1.5  # Moderate acceleration
+            if consecutive_noise_detections == 3: # If all 3 recent calibrations detected high noise
+                noise_trend_strength = 2.0  # Strong acceleration
+
+        # --- High Noise Environment Detection Logic ---
+        # The goal is to identify if the current calibration window predominantly contains noise.
+        # This is determined by a combination of noise floor, SNR, RMS, and dynamic range.
+        # These thresholds are empirically derived and may need tuning for different environments/microphones.
         is_high_noise = (
-            (noise_floor > 0.018) or                     # Gürültü tabanı eşiği
-            (snr < 20 and rms_concat > 0.009) or               # SNR < 20 (was 18), RMS > 0.009
-            (rms_concat > 0.05 and dynamic_range < 10)         # Yüksek RMS düşük dinamik aralık
+            (noise_floor > 0.018) or                     # Condition 1: Noise floor itself is high (e.g., constant background hum).
+                                                         # 0.018 represents a noticeable continuous noise level.
+            (snr < 20 and rms_concat > 0.009) or        # Condition 2: Low Signal-to-Noise Ratio (SNR < 20dB)
+                                                         # AND the overall signal energy (RMS) isn't extremely low.
+                                                         # This catches situations where noise is relatively loud compared to any potential speech.
+                                                         # RMS > 0.009 ensures we don't flag very quiet environments with low SNR as noisy.
+            (rms_concat > 0.05 and dynamic_range < 10)   # Condition 3: High overall signal energy (RMS > 0.05)
+                                                         # BUT low dynamic range (< 10). This can indicate loud, compressed noise
+                                                         # where peak and floor are close.
         )
         
-        # Düşük RMS değerlerinde gürültü tespitini engellemek için bir eşik, ancak biraz daha düşürüyoruz
-        if rms_concat < 0.008:  # Çok düşük ses seviyelerinde gürültü olarak değerlendirme (0.010 -> 0.008)
+        # Override: If the overall RMS of the calibration window is very low,
+        # it's unlikely to be a problematic "high noise" environment, even if SNR or dynamic range is low.
+        # This prevents overly aggressive threshold increases in very quiet settings.
+        if rms_concat < 0.008:  # Threshold for "very low RMS" (previously 0.010)
             is_high_noise = False
         
-        # Gürültü tespit mantığını logla
         logging.info(f"NOISE DETECTION - conditions: noise_floor > 0.018: {noise_floor > 0.018}, snr < 20 and rms_concat > 0.009: {snr < 20 and rms_concat > 0.009}, rms_concat > 0.05 and dynamic_range < 10: {rms_concat > 0.05 and dynamic_range < 10}")
         logging.info(f"NOISE DETECTION - result: is_high_noise: {is_high_noise}, current threshold: {self.threshold:.2f}")
         
-        # Düşük/yüksek gürültü eşikleri
+        # --- Threshold Adjustment Based on Noise Level ---
         if is_high_noise:
-            # Eşik artışını sınırla: maximum değerin %80'ini geçmesin
-            if self.threshold < self.max_threshold * 0.9:  # Sınır yükseltildi (0.8 -> 0.9)
-                # Kademeli artış: SNR'ye göre uyarlanmış artış miktarı
+            # In a high noise environment, increase the VAD threshold to be less sensitive.
+            # The increase is capped to prevent the threshold from becoming excessively high.
+            if self.threshold < self.max_threshold * 0.9:  # Don't increase if already very high (90% of max_threshold)
+                # The amount of increase depends on the SNR and the noise_trend_strength.
+                # Very low SNR (<5dB) in a noisy environment triggers a more significant increase.
                 if isinstance(snr, torch.Tensor) and snr.item() < 5:
-                    noise_increase = 0.08 * noise_trend_strength  # Çok düşük SNR için daha agresif artış
+                    noise_increase = 0.08 * noise_trend_strength  # Aggressive increase for very low SNR
                 else:
-                    noise_increase = 0.05 * noise_trend_strength  # Normal artış
+                    noise_increase = 0.05 * noise_trend_strength  # Standard increase
                 
                 new_threshold = min(self.threshold + noise_increase, self.max_threshold)
                 logging.info(f"High noise environment detected. Increasing threshold to {new_threshold:.2f} (noise_floor={noise_floor:.4f}, SNR={snr:.2f}, trend_strength={noise_trend_strength:.1f})")
             else:
-                # Eşik çok yüksekse, mevcut değerde tut
-                logging.info(f"Threshold already high ({self.threshold:.2f}). Maintaining current level.")
+                # Threshold is already high, maintain current level.
+                logging.info(f"Threshold already high ({self.threshold:.2f}). Maintaining current level in noisy environment.")
                 
-        # Low noise environment - decrease threshold to improve sensitivity
-        elif (noise_floor < 0.01 and snr > 20) or (rms_concat < 0.0025):  # Düşük gürültü eşikleri daha da hassas hale getirildi
-            # Daha hızlı azalma: yüksek eşikler için daha büyük azalma adımları
-            decrease_step = 0.05
-            if self.threshold > 0.5:  # Eşik çok yüksekse daha hızlı düşür
-                decrease_step = 0.1
-            elif self.threshold > 0.4:  # Orta yüksek eşikler için de hızlı düşür
-                decrease_step = 0.08
+        # Low noise environment: Decrease threshold to improve sensitivity.
+        # Condition: (low noise_floor AND good snr) OR very low overall energy (rms_concat).
+        elif (noise_floor < 0.01 and snr > 20) or (rms_concat < 0.0025):
+            # Adjust decrease step based on current threshold to allow faster normalization from high values.
+            decrease_step = 0.05  # Standard decrease
+            if self.threshold > 0.5:  # If threshold is very high
+                decrease_step = 0.1   # Larger step to decrease faster
+            elif self.threshold > 0.4: # If threshold is moderately high
+                decrease_step = 0.08  # Moderate step
                 
             new_threshold = max(self.threshold - decrease_step, self.min_threshold)
             logging.info(f"Low noise environment detected. Decreasing threshold to {new_threshold:.2f}")
             
-        # Very quiet audio overall - decrease threshold slightly
+        # Very quiet audio overall (low peak energy): Decrease threshold slightly.
+        # This helps catch softer speech if the environment is generally very quiet.
         elif peak_concat < 0.1:
-            new_threshold = max(self.threshold - 0.02, self.min_threshold)
-            logging.info(f"Very quiet audio detected. Decreasing threshold to {new_threshold:.2f}")
+            new_threshold = max(self.threshold - 0.02, self.min_threshold) # Smaller step for minor adjustment
+            logging.info(f"Very quiet audio detected (peak < 0.1). Decreasing threshold to {new_threshold:.2f}")
             
-        # Very loud audio - increase threshold slightly
+        # Very loud audio (high peak energy but not necessarily "high noise" by other metrics): Increase threshold slightly.
+        # This might be to make the VAD less sensitive to minor sounds if the dominant sound is very loud speech,
+        # or to prevent triggering on loud non-speech sounds if they weren't caught by is_high_noise.
         elif peak_concat > 0.8:
             new_threshold = min(self.threshold + 0.05, self.max_threshold)
-            logging.info(f"Very loud audio detected. Increasing threshold to {new_threshold:.2f}")
+            logging.info(f"Very loud audio detected (peak > 0.8). Increasing threshold to {new_threshold:.2f}")
             
-        # Update threshold if it changed
+        # --- Update Threshold ---
         if new_threshold != self.threshold:
             self.threshold = new_threshold
             
-            # Geçmişe kaydetmeden önce tüm değerlerin Python tipinde olduğundan emin ol
+            # Store calibration history if threshold changes.
+            # Ensure all stored values are Python native types (float) for easier serialization/logging if needed.
             try:
-                # Tensor tipindeki değerleri Python float'a dönüştür
+                # Convert tensor values to Python floats
                 rms_value = float(rms_concat) if isinstance(rms_concat, torch.Tensor) else float(rms_concat)
                 peak_value = float(peak_concat) if isinstance(peak_concat, torch.Tensor) else float(peak_concat)
                 noise_floor_value = float(noise_floor) if isinstance(noise_floor, torch.Tensor) else float(noise_floor)
@@ -393,16 +413,21 @@ class AdaptiveVADDetector(VADDetector):
                 # Hata olsa bile geçmişi kaydetmemeyi tercih et, ana işlevselliği etkilemesin
             
         # Her 30 saniyede bir eşik değerini varsayılana doğru hafifçe yaklaştır (yeni)
-        # Bu, uzun süre sonra normal koşullara geri dönmeyi sağlar
-        if len(self.calibration_history) > 0 and (time.time() - self.calibration_history[-1][0]) > 30: # Check last calibration time
-            base_threshold = 0.30  # Hedeflenen temel eşik değeri
-            
-            # Eşik değeri temelden çok farklıysa, yavaşça yaklaştır
+        # --- Gradual Normalization ---
+        # If the VAD threshold has been pushed to an extreme (high or low) due to specific conditions
+        # and then the audio characteristics remain stable for a while (e.g., 30 seconds since last calibration update),
+        # this logic gently nudges the threshold back towards a central baseline (0.30).
+        # This helps to prevent the VAD from getting "stuck" in a very insensitive or very sensitive state
+        # if the environment changes slowly or after a transient event.
+        if len(self.calibration_history) > 0 and (time.time() - self.calibration_history[-1][0]) > 30: # Check time since last *change*
+            base_threshold = 0.30  # Target baseline threshold
+
+            # If current threshold is significantly different from baseline
             if abs(self.threshold - base_threshold) > 0.05:
-                # Normalleştirme adımı eşiğin ne kadar farklı olduğuna bağlı olsun
-                norm_step = 0.03  # Temel adım
-                if abs(self.threshold - base_threshold) > 0.15:
-                    norm_step = 0.05  # Büyük fark varsa daha hızlı normalleştir
+                # Adjust normalization step based on how far the current threshold is from the baseline.
+                norm_step = 0.03  # Standard normalization step
+                if abs(self.threshold - base_threshold) > 0.15: # If very far
+                    norm_step = 0.05  # Use a larger step for faster normalization
                 
                 if self.threshold > base_threshold:
                     self.threshold = max(self.threshold - norm_step, base_threshold)
@@ -411,12 +436,22 @@ class AdaptiveVADDetector(VADDetector):
                     self.threshold = min(self.threshold + norm_step, base_threshold)
                     logging.info(f"Gradual normalization: Increasing threshold to {self.threshold:.2f} towards {base_threshold}")
             
-        self.last_calibration_time = time.time()
+        self.last_calibration_time = time.time() # Record time of this calibration attempt
 
     def is_speech(self, audio_tensor: torch.Tensor) -> bool:
         """
         Enhanced method to determine if the given audio tensor contains speech.
         Includes calibration, adaptation, echo cancellation, and debouncing.
+
+        The decision process is as follows:
+        1. Echo Cancellation: If TTS is active or in cooldown, ignore audio unless WebRTC VAD strongly suggests speech.
+        2. Low Energy Bypass: If audio RMS is very low, assume silence.
+        3. Calibration: Update adaptive VAD threshold based on recent audio history.
+        4. Extreme Noise Bypass: If calibrated to detect extreme noise and current audio is not a strong peak, assume silence.
+        5. Core VAD Decision: Use the parent VAD (e.g., Silero) with the currently adapted threshold.
+        6. Debouncing: Smooth the raw VAD decisions to prevent rapid toggling.
+        7. WebRTC Double-Check (High Noise): If debounced state is speech, but environment is noisy (high threshold),
+           cross-check with WebRTC VAD. If WebRTC VAD disagrees and RMS is low, revert to silence.
 
         Args:
             audio_tensor: A PyTorch tensor containing the audio data.
@@ -424,87 +459,94 @@ class AdaptiveVADDetector(VADDetector):
         Returns:
             True if speech is detected in the audio tensor, False otherwise.
         """
-        # Skip speech detection during TTS playback or cooldown period
+        # 1. Echo Cancellation Check
         if self._should_ignore_due_to_echo(audio_tensor):
             logging.debug("Ignoring audio due to active TTS or cooldown period")
             return False
             
-        # Calculate current frame metrics immediately for all checks
+        # Calculate current frame metrics for immediate checks
         rms = torch.sqrt(torch.mean(audio_tensor ** 2)).item()
         peak = torch.max(torch.abs(audio_tensor)).item()
         
-        # Çok düşük ses seviyelerinde gürültü tespitini tamamen atla
-        if rms < 0.006:
+        # 2. Low Energy Bypass: Quickly discard frames with extremely low energy.
+        if rms < 0.006: # Threshold for "too low for reliable detection"
             logging.debug(f"Audio level too low for reliable detection, RMS={rms:.4f}. Skipping VAD.")
             return False
             
-        # Update calibration based on current audio
-        self._update_calibration(audio_tensor)
+        # 3. Update adaptive VAD calibration based on current audio
+        self._update_calibration(audio_tensor) # This updates self.threshold
         
-        # Check if we're in an extreme noise situation - RMS ve peak değerlerini burada kullan
+        # 4. Extreme Noise Handling
+        # Check if the calibration history suggests a persistent extreme noise environment.
         is_extreme_noise = False
         if len(self.calibration_history) >= 3:
             high_noise_count = 0
+            # Count recent 'is_high_noise' flags from calibration history
             for i in range(min(3, len(self.calibration_history))):
                 idx = len(self.calibration_history) - 1 - i
                 if idx >= 0 and 'is_high_noise' in self.calibration_history[idx][2]:
                     if self.calibration_history[idx][2]['is_high_noise']:
                         high_noise_count += 1
             
-            # Üst üste 3 kez yüksek gürültü tespit edildiyse ve mevcut eşik değeri yüksekse ve RMS değeri belli bir eşiğin üzerindeyse
+            # Condition for extreme noise:
+            # - Consistently high noise detected in last 3 calibrations.
+            # - Current VAD threshold is already high (> 0.45).
+            # - Current frame RMS is above a minimum level (not complete silence).
             is_extreme_noise = high_noise_count == 3 and self.threshold > 0.45 and rms > 0.012
             
             if is_extreme_noise:
                 logging.info(f"EXTREME NOISE ENVIRONMENT DETECTED! Threshold: {self.threshold:.2f}, RMS: {rms:.4f}")
         
-        # Aşırı gürültülü ortamlarda konuşma tespitini atla - false positive'leri önler
-        if is_extreme_noise and rms > 0.012 and peak < 0.7:
+        # If in extreme noise and current audio peak is not high enough, bypass further speech detection.
+        # This helps prevent false positives from loud, non-speech noise.
+        if is_extreme_noise and rms > 0.012 and peak < 0.7: # Peak threshold (0.7) to allow very loud speech through
             logging.debug(f"Bypassing speech detection in extreme noise environment. RMS={rms:.4f}, Peak={peak:.4f}")
             return False
         
-        # Log current frame noise metrics
+        # Log current frame metrics before core VAD decision
         logging.debug(f"Current frame: RMS={rms:.4f}, Peak={peak:.4f}, VAD Threshold={self.threshold:.2f}")
         
-        # Get raw speech detection from parent class
-        raw_speech_detected = super().is_speech(audio_tensor)
+        # 5. Core VAD Decision (using parent class, e.g., SileroVAD, with adapted threshold)
+        raw_speech_detected = super().is_speech(audio_tensor) # Uses self.threshold
         
-        # Apply debouncing to prevent rapid on/off switching in noisy environments
+        # 6. Debouncing Logic
+        # Smooths the raw VAD output to prevent rapid toggling due to transient noises or speech patterns.
         if raw_speech_detected:
             self.consecutive_speech_frames += 1
             self.consecutive_silence_frames = 0
-            
-            # If we have enough consecutive speech frames, confirm it's speech
             if self.consecutive_speech_frames >= self.speech_debounce_frames:
-                if not self.debounced_speech_state:
+                if not self.debounced_speech_state: # Log only on state change
                     logging.debug(f"Speech confirmed after {self.consecutive_speech_frames} consecutive frames")
                 self.debounced_speech_state = True
         else:
             self.consecutive_silence_frames += 1
             self.consecutive_speech_frames = 0
-            
-            # If we have enough consecutive silence frames, confirm it's silence
             if self.consecutive_silence_frames >= self.silence_debounce_frames:
-                if self.debounced_speech_state:
+                if self.debounced_speech_state: # Log only on state change
                     logging.debug(f"Silence confirmed after {self.consecutive_silence_frames} consecutive frames")
                 self.debounced_speech_state = False
                 
-        # Yüksek gürültülü ortamlarda (ama ekstrem değil) ekstra doğrulama yap
+        # 7. WebRTC Double-Check in High Noise (but not "extreme")
+        # If the debounced state is speech AND the adaptive threshold is high (indicating a noisy environment)
+        # AND it's not an "extreme noise" situation (which was handled above),
+        # then perform an additional check using WebRTC VAD.
         if self.debounced_speech_state and self.threshold > 0.4 and not is_extreme_noise:
-            # WebRTC VAD ile çift kontrol
-            if self.webrtc_vad and audio_tensor.shape[0] >= 320:
+            if self.webrtc_vad and audio_tensor.shape[0] >= 320: # WebRTC VAD needs at least 10ms (160 samples * 2 bytes)
                 audio_bytes = (audio_tensor * 32767).to(torch.int16).numpy().tobytes()
-                frame_size = 320  # 20ms at 16kHz
+                frame_size_bytes = 320 * 2 # 20ms at 16kHz, 16-bit PCM (2 bytes per sample)
                 
-                # Sadece ilk frame'i kontrol et, hızlı karar vermek için
                 try:
-                    frame = audio_bytes[0:2*frame_size]
-                    webrtc_speech = self.webrtc_vad.is_speech(frame, self.sample_rate)
-                    
-                    # WebRTC speech false ise ve RMS düşükse, bizim de false dönmemizi sağla (gürültüyü filtrele)
-                    if not webrtc_speech and rms < 0.04:  # Düşük RMS değerlerinde daha sıkı filtrele
-                        logging.debug(f"WebRTC VAD contradicts Silero VAD in high noise environment, filtering out false positive")
-                        return False
-                except Exception as e:
+                    # Check only the first 20ms frame for quick decision
+                    frame_to_check = audio_bytes[0:frame_size_bytes]
+                    if len(frame_to_check) == frame_size_bytes: # Ensure we have enough bytes
+                        webrtc_is_speech = self.webrtc_vad.is_speech(frame_to_check, self.sample_rate)
+
+                        # If WebRTC VAD considers it non-speech AND current frame RMS is relatively low,
+                        # override the main VAD's decision to reduce false positives in noisy conditions.
+                        if not webrtc_is_speech and rms < 0.04: # RMS threshold for this override
+                            logging.debug(f"WebRTC VAD contradicts Silero VAD in high noise environment (WebRTC: no speech, RMS: {rms:.4f}). Filtering out potential false positive.")
+                            return False
+                except Exception as e: # Catch errors from WebRTC VAD (e.g., invalid frame length)
                     logging.warning(f"WebRTC VAD double-check error: {e}")
                 
         return self.debounced_speech_state 

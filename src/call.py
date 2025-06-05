@@ -292,7 +292,7 @@ class CallSession:
         self.ai_engine: AIEngine = ai_engine
         self.rtp_queue: asyncio.Queue[bytes] = rtp_queue
         self.paused: bool = False
-        self.terminated: bool = False
+        self.terminated: bool = False # Should be managed by stop_event and Call.close()
         self.mi_conn: OpenSIPSMI = mi_conn
         self.b2b_key: str = b2b_key
         self.stop_event: asyncio.Event = stop_event
@@ -318,18 +318,31 @@ class CallSession:
     def pause_session(self) -> None:
         if self.paused: return
         logging.info(f"[{self.log_prefix}] Pausing session.")
-        self.paused = True
+        self.paused = True # This flag gates RTPReceiver and affects RTPSender
         if hasattr(self.ai_engine, 'pause') and callable(self.ai_engine.pause):
-             asyncio.create_task(self.ai_engine.pause())
-        # Logic for RTPSender to send silence or not is handled by RTPSender checking self.call_ref.call_session.paused
+            # Ensure this is awaited if it's an async operation
+            asyncio.create_task(self._call_ai_pause()) # Create task to avoid blocking here
+        # RTPSender checks self.call_ref.call_session.paused to send silence
 
+    async def _call_ai_pause(self):
+        try:
+            await self.ai_engine.pause()
+        except Exception as e:
+            logging.error(f"[{self.log_prefix}] Error during ai_engine.pause(): {e}", exc_info=True)
 
-    def resume_session(self) -> None:
+    def resume_session(self) -> None: # Keep this sync for now, matching Call.resume()
         if not self.paused: return
         logging.info(f"[{self.log_prefix}] Resuming session.")
-        self.paused = False
+        self.paused = False # This flag gates RTPReceiver and affects RTPSender
         if hasattr(self.ai_engine, 'resume') and callable(self.ai_engine.resume):
-            asyncio.create_task(self.ai_engine.resume())
+            # Ensure this is awaited if it's an async operation
+            asyncio.create_task(self._call_ai_resume()) # Create task to avoid blocking here
+
+    async def _call_ai_resume(self):
+        try:
+            await self.ai_engine.resume()
+        except Exception as e:
+            logging.error(f"[{self.log_prefix}] Error during ai_engine.resume(): {e}", exc_info=True)
 
     async def close_ai(self) -> None:
         if self.ai_engine:
@@ -341,16 +354,22 @@ class CallSession:
 
     def terminate_call_sip(self) -> None:
         """ Initiates SIP call termination via MI. """
-        if not self.terminated:
+        # self.terminated is problematic if not managed carefully with stop_event
+        # Rely on stop_event as the primary signal for termination.
+        if not self.stop_event.is_set(): # Check stop_event instead of self.terminated
             logging.info(f"[{self.log_prefix}] Terminating SIP call via MI.")
-            self.terminated = True
-            self.stop_event.set()
+            # self.terminated = True # This flag's utility is reduced if stop_event is the main driver
+            self.stop_event.set() # Signal all components to stop
             try:
+                # Consider making MI call non-blocking if it can be, or run in executor
+                # For now, assuming it's relatively quick.
                 self.mi_conn.execute("ua_session_terminate", {"key": self.b2b_key})
-            except OpenSIPSMIException as e: # Catch specific MI error
+            except OpenSIPSMI.OpenSIPSMIException as e: # Catch specific MI error
                 logging.error(f"[{self.log_prefix}] MI error sending ua_session_terminate: {e}", exc_info=True)
             except Exception as e: # Catch any other unexpected error
                 logging.error(f"[{self.log_prefix}] Unexpected error sending ua_session_terminate: {e}", exc_info=True)
+        else:
+            logging.info(f"[{self.log_prefix}] SIP call termination already in progress or completed (stop_event set).")
 
 
 class Call():

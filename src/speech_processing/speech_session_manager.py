@@ -70,16 +70,33 @@ class SessionConfigurator:
 
         # LLM
         self.llm_server_uri: str = self.session_cfg.get("llm_server_uri", "ws://localhost:8765")
-        self.llm_system_prompt: str = self.session_cfg.get("llm_system_prompt", 
-                                                          "Sen Garanti BBVA sesli asistanısın. Ürettiğin cevaplar içerisinde * gibi özel karakterler kullanma. Text-to-speech için uygun bir format kullan.")
-        self.llm_max_tokens: int = self.session_cfg.getint("llm_max_tokens", None, 256)
-        self.llm_temperature: float = self.session_cfg.getfloat("llm_temperature", None, 0.7)
+        # Updated default system prompt to the more detailed one previously hardcoded in SpeechSessionManager
+        self.llm_system_prompt: str = self.session_cfg.get("llm_system_prompt", "llm_system_prompt", """
+                    Sen Garanti BBVA IVR hattında, Türkçe TTS için konuşma metni üreten bir dil modelisin.
+
+                    Kurallar:
+                    1. Kısa-orta uzunlukta, net ve resmi cümleler yaz (en çok 20 kelime).
+                    2. Türkçe imlâyı tam uygula (ç, ğ, ı, ö, ş, ü).
+                    3. Tarihleri "2 Haziran 2025", saatleri "14.30" biçiminde yaz.
+                    4. Kritik sayıları tam ver: "₺250", "1234".
+                    5. Gereksiz sembol, yabancı kelime, ünlem ve jargon kullanma.
+                    6. Yalnızca TTS'ye okunacak metni döndür; fazladan açıklama ekleme.
+
+                    """)
+        self.llm_max_tokens: int = self.session_cfg.getint("llm_max_tokens", "llm_max_tokens", 256) # Ensure default is passed if key missing
+        self.llm_temperature: float = self.session_cfg.getfloat("llm_temperature", "llm_temperature", 0.7) # Ensure default is passed
+        self.llm_connect_timeout: float = self.session_cfg.getfloat("llm_connect_timeout", "llm_connect_timeout", 10.0) # Default 10s
+        self.llm_response_timeout: float = self.session_cfg.getfloat("llm_response_timeout", "llm_response_timeout", 10.0) # Default 10s
 
         # STT Reconnect
         self.stt_max_reconnect_attempts: int = self.session_cfg.getint("stt_max_reconnect_attempts", "STT_MAX_RECONNECT_ATTEMPTS", 5)
         self.stt_receive_error_sleep_s: float = self.session_cfg.getfloat("stt_receive_error_sleep_s", "STT_RECEIVE_ERROR_SLEEP_S", 1.0)
         self.stt_reconnect_backoff_base: int = self.session_cfg.getint("stt_reconnect_backoff_base", "STT_RECONNECT_BACKOFF_BASE", 2)
         self.stt_reconnect_max_backoff_s: float = self.session_cfg.getfloat("stt_reconnect_max_backoff_s", "STT_RECONNECT_MAX_BACKOFF_S", 10.0)
+        self.stt_receive_timeout_seconds: float = self.session_cfg.getfloat("stt_receive_timeout_seconds", "stt_receive_timeout_seconds", 10.0) # Default 10s
+
+        # TTS Timeouts
+        self.tts_synthesis_total_timeout_seconds: float = self.session_cfg.getfloat("tts_synthesis_total_timeout_seconds", "tts_synthesis_total_timeout_seconds", 30.0) # Default 30s for overall synthesis
 
         # VAD Final Buffer
         self.vad_final_buffer_wait_factor: float = self.session_cfg.getfloat("vad_final_buffer_wait_factor", "VAD_FINAL_BUFFER_WAIT_FACTOR", 0.5)
@@ -149,8 +166,13 @@ class AudioOrchestrator:
         self._is_monitoring: bool = False
         self.barge_in_speech_start_time: float = 0.0
         self.barge_in_pending: bool = False
+        self._is_paused: bool = False # Added for explicit pause state
 
     async def process_incoming_audio(self, raw_audio_bytes: bytes) -> None:
+        if self._is_paused:
+            logging.debug(f"{self.session_id}AO: Processing paused, dropping incoming audio.")
+            return
+
         # High-level audio processing pipeline
         prep = await self._prepare_audio_for_stt(raw_audio_bytes)
         if prep is None:
@@ -233,16 +255,42 @@ class AudioOrchestrator:
     def start_monitoring(self) -> None:
         self._is_monitoring = True
         if not self.config.bypass_vad:
-            self.timeout_monitor_task = asyncio.create_task(self._monitor_vad_timeouts(), name=f"VADTimeout-{self.session_id}")
+            if self.timeout_monitor_task and not self.timeout_monitor_task.done():
+                logging.warning(f"{self.session_id}AO: start_monitoring called but task already exists.")
+            else:
+                self.timeout_monitor_task = asyncio.create_task(self._monitor_vad_timeouts(), name=f"VADTimeout-{self.session_id}")
         logging.info(f"{self.session_id}AudioOrchestrator monitoring started.")
 
     async def stop_monitoring(self) -> None:
-        self._is_monitoring = False
+        self._is_monitoring = False # Ensure loop condition in _monitor_vad_timeouts becomes false
         if self.timeout_monitor_task and not self.timeout_monitor_task.done():
             self.timeout_monitor_task.cancel()
-            try: await self.timeout_monitor_task
-            except asyncio.CancelledError: pass
+            try:
+                await self.timeout_monitor_task
+            except asyncio.CancelledError:
+                logging.info(f"{self.session_id}AO: VAD timeout monitor task successfully cancelled.")
+            except Exception as e:
+                logging.error(f"{self.session_id}AO: Error awaiting cancelled VAD timeout monitor: {e}", exc_info=True)
+        self.timeout_monitor_task = None # Clear the task
         logging.info(f"{self.session_id}AudioOrchestrator monitoring stopped.")
+
+    async def pause_processing(self) -> None:
+        """Pauses audio processing and VAD monitoring."""
+        if self._is_paused:
+            logging.debug(f"{self.session_id}AO: Already paused.")
+            return
+        self._is_paused = True
+        await self.stop_monitoring() # Stop VAD timeout checks
+        logging.info(f"{self.session_id}AudioOrchestrator processing paused.")
+
+    async def resume_processing(self) -> None:
+        """Resumes audio processing and VAD monitoring."""
+        if not self._is_paused:
+            logging.debug(f"{self.session_id}AO: Already resumed or not paused.")
+            return
+        self._is_paused = False
+        self.start_monitoring() # Restart VAD timeout checks
+        logging.info(f"{self.session_id}AudioOrchestrator processing resumed.")
 
     async def process_final_buffer(self) -> Tuple[bool, Optional[bytes]]:
         if not self.config.bypass_vad and self.vad_processor: return await self.vad_processor.process_final_buffer()
@@ -338,24 +386,70 @@ class TranscriptCoordinator:
                             if reconnect_attempts >= self.config.stt_max_reconnect_attempts:
                                 logging.error(f"{self.session_id}TC: Max STT reconnect attempts. Stopping."); self._is_running = False; break
                             continue
-                    message = await self.stt_engine.receive_result()
-                    if not self._is_running and message is None: break
+
+                    # Wait for STT result with timeout
+                    message = await asyncio.wait_for(
+                        self.stt_engine.receive_result(),
+                        timeout=self.config.stt_receive_timeout_seconds
+                    )
+
+                    if not self._is_running and message is None: # If stopping and STT engine properly returns None on close
+                        break
+
+                    # If message is None, it might mean the STT engine closed the stream from its end (e.g. end of utterance)
+                    # or the connection is somehow closed without an exception.
                     if message is None:
+                        # If the engine itself says it's not connected, let the reconnect logic handle it.
                         if self.stt_engine and not self.stt_engine.is_connected() and self._is_running:
-                            logging.warning(f"{self.session_id}TC: STT connection closed (recv None).")
-                        continue
-                    reconnect_attempts = 0
+                            logging.warning(f"{self.session_id}TC: STT connection likely closed (receive_result returned None and engine reports not connected). Will attempt reconnect.")
+                        # If message is None but engine still thinks it's connected, it might be an end-of-speech signal from STT.
+                        # Depending on STTEngineBase contract, this might be normal.
+                        # For now, we assume 'None' without ConnectionClosed means the stream ended gracefully or needs a check.
+                        # If it needs a check and is_connected is still true, the next loop iteration will re-evaluate.
+                        # If it's an issue, timeout or other errors should ideally occur.
+                        # If this 'None' is unexpected, it might warrant a forced disconnect to ensure robust reconnection.
+                        # However, for now, we continue to allow the main loop's connection check to handle it.
+                        logging.debug(f"{self.session_id}TC: receive_result returned None. Current engine connected state: {self.stt_engine.is_connected() if self.stt_engine else 'N/A'}")
+                        if self.stt_engine and self.stt_engine.is_connected() and self._is_running:
+                             # If STT returns None but claims to be connected, this might be an issue or specific engine behavior.
+                             # We'll let it loop and potentially timeout or fail on next receive if it's a true stall.
+                             # If it's a graceful end of stream from STT (e.g. after final transcript), this is fine.
+                             pass # Continue, let transcript_handler decide if it's an issue.
+                        else: # Not connected, so loop will try to reconnect
+                            continue
+
+                    reconnect_attempts = 0 # Reset on successful message
                     if self.config.debug: logging.debug(f"{self.session_id}TC: Raw STT: \"{message[:70]}...\"")
                     await self.transcript_handler.handle_message(message)
+
+                except asyncio.TimeoutError:
+                    logging.warning(f"{self.session_id}TC: STT receive timeout after {self.config.stt_receive_timeout_seconds}s.")
+                    if not self._is_running: break
+                    # Assume connection is stalled or problematic.
+                    # Force a disconnect to make the reconnection logic take over.
+                    if self.stt_engine and self.stt_engine.is_connected():
+                        logging.warning(f"{self.session_id}TC: STT receive timeout while engine connected. Forcing disconnect to trigger reconnect.")
+                        await self.stt_engine.disconnect()
+                    # No need to increment reconnect_attempts here, the main loop's check will handle it.
+                    continue # Let the loop re-evaluate connection status.
+
                 except websockets.exceptions.ConnectionClosed as conn_err:
                     logging.error(f"{self.session_id}TC: STT connection closed: {conn_err}", exc_info=False)
-                    if self.stt_engine: await self.stt_engine.disconnect()
+                    if self.stt_engine: await self.stt_engine.disconnect() # Ensure state is updated
                     if not self._is_running: break
-                except asyncio.CancelledError: logging.info(f"{self.session_id}TC: receive_transcripts_loop cancelled."); raise
+                    # Reconnection will be attempted by the loop's main check
+
+                except asyncio.CancelledError:
+                    logging.info(f"{self.session_id}TC: receive_transcripts_loop cancelled."); raise
+
                 except Exception as e:
                     logging.error(f"{self.session_id}TC: Error in receive_transcripts_loop: {e}", exc_info=True)
                     if not self._is_running: break
+                    # For generic errors, also ensure STT engine is disconnected if it seems problematic
+                    if self.stt_engine and self.stt_engine.is_connected():
+                        await self.stt_engine.disconnect()
                     await asyncio.sleep(self.config.stt_receive_error_sleep_s)
+
             logging.info(f"{self.session_id}TC: Exiting receive_transcripts_loop.")
         except asyncio.CancelledError: logging.info(f"{self.session_id}TC: receive_transcripts_loop explicitly cancelled.")
         except Exception as e: logging.critical(f"{self.session_id}TC: Fatal error in receive_transcripts_loop: {e}", exc_info=True)
@@ -415,7 +509,8 @@ class TTSCoordinator:
             tts_target_output_rate=self.config.tts_target_output_rate,
             session_id=self.session_id,
             debug=self.config.debug,
-            vad_detector=vad_detector
+            vad_detector=vad_detector,
+            synthesis_timeout_seconds=self.config.tts_synthesis_total_timeout_seconds # Pass timeout
         )
         self._current_tts_task: Optional[asyncio.Task] = None
         logging.info(f"{self.session_id}TTSCoordinator initialized with voice '{self.config.tts_voice_id}'")
@@ -493,10 +588,12 @@ class SpeechSessionManager(AIEngine):
             server_uri=self.configurator.llm_server_uri,
             sentence_callback=self._handle_llm_sentence,
             session_id=self.session_id,
-            debug=self.configurator.debug
+            debug=self.configurator.debug,
+            connect_timeout=self.configurator.llm_connect_timeout,
+            response_timeout=self.configurator.llm_response_timeout
         )
         
-        logging.info(f"{self.session_id}SSM initialized. VAD Bypass: {self.configurator.bypass_vad}, Barge-in: {self.configurator.barge_in_threshold_seconds}s")
+        logging.info(f"{self.session_id}SSM initialized. VAD Bypass: {self.configurator.bypass_vad}, Barge-in: {self.configurator.barge_in_threshold_seconds}s, LLM Connect Timeout: {self.configurator.llm_connect_timeout}s, LLM Response Timeout: {self.configurator.llm_response_timeout}s")
 
     def _setup_logging(self) -> None:
         if self.configurator.debug: logging.getLogger().setLevel(logging.DEBUG)
@@ -665,18 +762,7 @@ class SpeechSessionManager(AIEngine):
         # Generate streaming LLM response (sentences will be processed via _handle_llm_sentence)
         try:
             success = await self.llm_client.generate_response(
-                system_prompt="""
-                    Sen Garanti BBVA IVR hattında, Türkçe TTS için konuşma metni üreten bir dil modelisin.
-
-                    Kurallar:
-                    1. Kısa-orta uzunlukta, net ve resmi cümleler yaz (en çok 20 kelime).
-                    2. Türkçe imlâyı tam uygula (ç, ğ, ı, ö, ş, ü).
-                    3. Tarihleri "2 Haziran 2025", saatleri "14.30" biçiminde yaz.
-                    4. Kritik sayıları tam ver: "₺250", "1234".
-                    5. Gereksiz sembol, yabancı kelime, ünlem ve jargon kullanma.
-                    6. Yalnızca TTS'ye okunacak metni döndür; fazladan açıklama ekleme.
-    
-                    """,
+                system_prompt=self.configurator.llm_system_prompt, # Use prompt from configurator
                 user_prompt=final_text,
                 max_tokens=self.configurator.llm_max_tokens,
                 temperature=self.configurator.llm_temperature
@@ -782,3 +868,21 @@ class SpeechSessionManager(AIEngine):
             self._setup_logging()
             logging.info(f"{self.session_id}Log level set to {logging.getLevelName(level)} via SSM.")
         else: logging.warning(f"{self.session_id}SSM: Cannot set log level, configurator not initialized.")
+
+    async def pause(self):
+        """Pauses the SpeechSessionManager's audio processing."""
+        logging.info(f"{self.session_id}SSM: Pausing session...")
+        if hasattr(self, 'audio_orchestrator') and self.audio_orchestrator:
+            await self.audio_orchestrator.pause_processing()
+        # Note: TranscriptCoordinator currently doesn't have explicit pause.
+        # It will stop receiving new audio chunks from AudioOrchestrator.
+        # TTS is interrupt-driven by new transcripts or barge-in, so less critical to "pause" actively.
+        logging.info(f"{self.session_id}SSM: Session paused.")
+
+    async def resume(self):
+        """Resumes the SpeechSessionManager's audio processing."""
+        logging.info(f"{self.session_id}SSM: Resuming session...")
+        if hasattr(self, 'audio_orchestrator') and self.audio_orchestrator:
+            await self.audio_orchestrator.resume_processing()
+        # Note: TranscriptCoordinator will start receiving audio chunks again if AudioOrchestrator resumes.
+        logging.info(f"{self.session_id}SSM: Session resumed.")

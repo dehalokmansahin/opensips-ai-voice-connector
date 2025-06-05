@@ -54,4 +54,14 @@ class AIEngine(ABC):
         """ returns the chosen codec """
         return self.codec
 
+    @abstractmethod
+    async def pause(self):
+        """ Pauses the AI engine's processing for the current session. """
+        pass
+
+    @abstractmethod
+    async def resume(self):
+        """ Resumes the AI engine's processing for the current session. """
+        pass
+
 # vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4
