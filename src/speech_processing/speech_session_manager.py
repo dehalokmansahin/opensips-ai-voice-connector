@@ -200,23 +200,22 @@ class AudioOrchestrator:
         return await self.vad_processor.add_audio(bytes_for_stt, num_samples)
 
     async def _handle_bypass_vad(self, bytes_for_stt: bytes) -> bool:
-        """If bypass VAD is enabled, send or drop immediately, return True if handled."""
+        """Handle bypassed VAD scenario."""
         if self.config.bypass_vad:
-            if not self.is_tts_active_func():
-                await self.on_vad_audio_chunk(bytes_for_stt)
-            else:
-                logging.debug(f"{self.session_id}AO: VAD bypassed, TTS active, audio not sent for STT.")
+            await self.on_vad_audio_chunk(bytes_for_stt)
             return True
         return False
 
     async def _prepare_audio_for_stt(self, raw_audio_bytes: bytes) -> Optional[Tuple[torch.Tensor, bytes]]:
-        """Decode and prepare audio for STT, returning tensor and bytes or None."""
-        resampled_tensor, bytes_for_stt = self.audio_processor.process_bytes_audio(raw_audio_bytes)
-        if bytes_for_stt is None:
+        """Prepare audio for STT processing."""
+        try:
+            resampled_tensor, bytes_for_stt = await asyncio.to_thread(
+                self.audio_processor.process_audio_for_stt, raw_audio_bytes
+            )
+            return resampled_tensor, bytes_for_stt
+        except Exception as e:
+            logging.error(f"{self.session_id}AO: Error preparing audio for STT: {e}", exc_info=True)
             return None
-        if self.config.debug:
-            logging.debug(f"{self.session_id}AO: Handling processed audio: {len(bytes_for_stt)} bytes.")
-        return resampled_tensor, bytes_for_stt
 
     async def _monitor_vad_timeouts(self) -> None:
         try:

@@ -1,0 +1,141 @@
+version: '3.8'
+
+# Docker Compose Override for OpenSIPS AI Voice Connector
+# This file provides environment-based configuration to eliminate hardcoded IPs
+# and enable flexible deployment across different environments.
+
+services:
+  opensips:
+    environment:
+      # MI (Management Interface) Configuration
+      - MI_IP=${MI_IP:-0.0.0.0}
+      - MI_PORT=${MI_PORT:-8088}
+      
+      # Event Interface Configuration  
+      - EVENT_IP=${EVENT_IP:-0.0.0.0}
+      - EVENT_PORT=${EVENT_PORT:-8089}
+      
+      # SIP Configuration
+      - OS_SIP_PORT=${OS_SIP_PORT:-5060}
+      
+      # Service Discovery - Use service names instead of IPs
+      - OAVC_SERVICE_NAME=${OAVC_SERVICE_NAME:-opensips-ai-voice-connector}
+      - OPENSIPS_SERVICE_NAME=${OPENSIPS_SERVICE_NAME:-opensips}
+      
+    # Expose MI and Event ports for inter-service communication
+    ports:
+      - "${MI_PORT:-8088}:${MI_PORT:-8088}/udp"
+      - "${EVENT_PORT:-8089}:${EVENT_PORT:-8089}/udp"
+      - "${OS_SIP_PORT:-5060}:${OS_SIP_PORT:-5060}/udp"
+    
+    # Health check for OpenSIPS service
+    healthcheck:
+      test: ["CMD", "opensips-cli", "-x", "mi", "ps"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  opensips-ai-voice-connector:
+    environment:
+      # Connect to OpenSIPS using service name
+      - MI_IP=${OPENSIPS_SERVICE_NAME:-opensips}
+      - MI_PORT=${MI_PORT:-8088}
+      
+      # Event listener configuration
+      - EVENT_IP=${EVENT_IP:-0.0.0.0}
+      - EVENT_PORT=${EVENT_PORT:-8089}
+      
+      # RTP Configuration
+      - RTP_MIN_PORT=${RTP_MIN_PORT:-35000}
+      - RTP_MAX_PORT=${RTP_MAX_PORT:-35100}
+      - RTP_BIND_IP=${RTP_BIND_IP:-0.0.0.0}
+      - RTP_IP=${RTP_IP:-opensips-ai-voice-connector}
+      
+      # AI Service Configuration
+      - AI_SERVICE_URL=${AI_SERVICE_URL:-ws://ai-service:2700}
+      - TTS_SERVICE_URL=${TTS_SERVICE_URL:-http://tts-service:8000}
+      - STT_SERVICE_URL=${STT_SERVICE_URL:-ws://stt-service:2701}
+      
+      # Logging Configuration
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DEBUG_MODE=${DEBUG_MODE:-false}
+      
+    # Expose RTP port range for media
+    ports:
+      - "${RTP_MIN_PORT:-35000}-${RTP_MAX_PORT:-35100}:${RTP_MIN_PORT:-35000}-${RTP_MAX_PORT:-35100}/udp"
+    
+    # Health check for OAVC service
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(('0.0.0.0', ${EVENT_PORT:-8089})); s.close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    
+    # Ensure OpenSIPS is healthy before starting OAVC
+    depends_on:
+      opensips:
+        condition: service_healthy
+
+  # Optional: AI Service (if running in same compose stack)
+  ai-service:
+    image: ${AI_SERVICE_IMAGE:-your-ai-service:latest}
+    environment:
+      - WEBSOCKET_PORT=2700
+      - MODEL_PATH=${AI_MODEL_PATH:-/models/default}
+    ports:
+      - "2700:2700"
+    volumes:
+      - ai-models:/models
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:2700/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Optional: TTS Service
+  tts-service:
+    image: ${TTS_SERVICE_IMAGE:-your-tts-service:latest}
+    environment:
+      - HTTP_PORT=8000
+      - VOICE_MODEL=${TTS_VOICE_MODEL:-default}
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Optional: STT Service  
+  stt-service:
+    image: ${STT_SERVICE_IMAGE:-your-stt-service:latest}
+    environment:
+      - WEBSOCKET_PORT=2701
+      - MODEL_PATH=${STT_MODEL_PATH:-/models/whisper}
+    ports:
+      - "2701:2701"
+    volumes:
+      - stt-models:/models
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:2701/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+# Named volumes for persistent data
+volumes:
+  ai-models:
+    driver: local
+  stt-models:
+    driver: local
+
+# Custom network for service communication
+networks:
+  default:
+    name: oavc-network
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${DOCKER_SUBNET:-172.20.0.0/16} 

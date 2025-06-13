@@ -230,13 +230,25 @@ def _handle_notify(call_obj: Optional[Call], key: str, method: str, params: Dict
 
 
 def _handle_bye(call_obj: Optional[Call], key: str, method: str, params: Dict[str, Any]) -> None:
-    """ Handles BYE requests. """
+    """Handles BYE requests.
+
+    Per SIP rules we must immediately acknowledge the BYE with 200 OK on the same leg.
+    Even if the application later tears down resources, OpenSIPS expects this reply via
+    the MI interface, otherwise it will log transaction-mismatch errors.
+    """
+
+    # Always acknowledge first
+    try:
+        mi_reply(key, method, 200, 'OK')
+    except Exception as e:
+        logging.error("Failed to send MI 200 OK reply for BYE %s: %s", key, e, exc_info=True)
+
+    # Proceed with call clean-up if we still track the call
     if call_obj:
         asyncio.create_task(call_obj.close())
         calls.pop(key, None)
     else:
         logging.warning("BYE received for non-existent call key: %s", key)
-        mi_reply(key, method, 481, 'Call/Transaction Does Not Exist')
 
 
 def _handle_unsupported_method(key: str, method: str, params: Dict[str, Any]) -> None:
@@ -349,7 +361,8 @@ async def async_run() -> None:
     event_handler_obj: OpenSIPSEventHandler = OpenSIPSEventHandler(mi_conn, "datagram", ip=host_ip, port=port)
     event_subscription: Any = None # To store the subscription object
     try:
-        event_subscription = event_handler_obj.async_subscribe("E_UA_SESSION", udp_handler)
+        # Await the async subscription to ensure we are actually listening before proceeding
+        event_subscription = await event_handler_obj.async_subscribe("E_UA_SESSION", udp_handler)
     except OpenSIPSEventException as e:
         logging.critical("Fatal: Error subscribing to OpenSIPS event E_UA_SESSION: %s", e, exc_info=True)
         return

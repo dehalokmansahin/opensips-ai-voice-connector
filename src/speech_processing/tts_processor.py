@@ -13,6 +13,7 @@ class TTSProcessor:
     """
     Handles Text-to-Speech (TTS) audio generation, processing, and queuing.
     This class is now engine-agnostic, using TTSEngineBase for synthesis.
+    Heavy audio processing operations are offloaded to thread pool for better async performance.
     """
     def __init__(self,
                  rtp_queue: Queue,
@@ -85,24 +86,58 @@ class TTSProcessor:
         if drained_count > 0 and self.debug:
             logging.debug(f"{self.session_id}TTSProcessor: Drained {drained_count} packets from RTP queue during interruption.")
 
-    def _tensor_from_audio_chunk(self, audio_chunk: bytes) -> torch.Tensor:
-        """Convert PCM s16le bytes to normalized float tensor in [-1.0,1.0]."""
+    def _tensor_from_audio_chunk_sync(self, audio_chunk: bytes) -> torch.Tensor:
+        """Synchronous version of tensor conversion for thread execution."""
         buffer = bytearray(audio_chunk)
         return torch.frombuffer(buffer, dtype=torch.int16).float() / 32768.0
 
-    def _resample_and_clamp(self, tensor: torch.Tensor) -> torch.Tensor:
-        """Resample to target rate if needed and clamp values to [-1,1]."""
+    async def _tensor_from_audio_chunk(self, audio_chunk: bytes) -> torch.Tensor:
+        """Convert PCM s16le bytes to normalized float tensor in [-1.0,1.0] using thread pool."""
+        return await asyncio.to_thread(self._tensor_from_audio_chunk_sync, audio_chunk)
+
+    def _resample_and_clamp_sync(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Synchronous version of resampling and clamping for thread execution."""
         if self.tts_resampler:
             tensor = self.tts_resampler(tensor.unsqueeze(0)).squeeze(0)
         return torch.clamp(tensor, -1.0, 1.0)
 
-    def _tensor_to_pcm_s16le_bytes(self, tensor: torch.Tensor) -> bytes:
-        """Convert normalized float tensor to raw PCM s16le bytes."""
+    async def _resample_and_clamp(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Resample to target rate if needed and clamp values to [-1,1] using thread pool."""
+        return await asyncio.to_thread(self._resample_and_clamp_sync, tensor)
+
+    def _tensor_to_pcm_s16le_bytes_sync(self, tensor: torch.Tensor) -> bytes:
+        """Synchronous version of tensor to PCM conversion for thread execution."""
         return (tensor * 32767.0).to(torch.int16).numpy().tobytes()
 
-    def _pcm_s16le_to_ulaw(self, pcm_bytes: bytes) -> bytes:
-        """Convert raw PCM s16le bytes to μ-law (G.711 u-law) bytes."""
+    async def _tensor_to_pcm_s16le_bytes(self, tensor: torch.Tensor) -> bytes:
+        """Convert normalized float tensor to raw PCM s16le bytes using thread pool."""
+        return await asyncio.to_thread(self._tensor_to_pcm_s16le_bytes_sync, tensor)
+
+    def _pcm_s16le_to_ulaw_sync(self, pcm_bytes: bytes) -> bytes:
+        """Synchronous version of PCM to μ-law conversion for thread execution."""
         return audioop.lin2ulaw(pcm_bytes, 2)
+
+    async def _pcm_s16le_to_ulaw(self, pcm_bytes: bytes) -> bytes:
+        """Convert raw PCM s16le bytes to μ-law (G.711 u-law) bytes using thread pool."""
+        return await asyncio.to_thread(self._pcm_s16le_to_ulaw_sync, pcm_bytes)
+
+    async def _process_audio_chunk_pipeline(self, audio_chunk_from_engine: bytes) -> bytes:
+        """
+        Complete audio processing pipeline for a single chunk using async thread execution.
+        
+        Args:
+            audio_chunk_from_engine: Raw audio bytes from TTS engine
+            
+        Returns:
+            Processed μ-law encoded bytes ready for RTP
+        """
+        # Process raw audio chunk through helper methods (all async now)
+        input_tensor = await self._tensor_from_audio_chunk(audio_chunk_from_engine)
+        processed_tensor = await self._resample_and_clamp(input_tensor)
+        pcm_s16le_bytes = await self._tensor_to_pcm_s16le_bytes(processed_tensor)
+        pcmu_chunk_bytes = await self._pcm_s16le_to_ulaw(pcm_s16le_bytes)
+        
+        return pcmu_chunk_bytes
 
     async def _queue_pcmu_chunks(self, cumulative_pcmu_bytes: bytearray, chunk_size: int) -> None:
         """Slice cumulative μ-law bytes into fixed-size RTP payloads and enqueue them."""
@@ -119,6 +154,7 @@ class TTSProcessor:
     async def generate_and_queue_tts_audio(self, text: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
         """
         Generates TTS audio from the given text and queues it to the RTP queue.
+        All heavy audio processing operations are now performed asynchronously.
 
         Args:
             text: The text to be converted to speech.
@@ -169,11 +205,8 @@ class TTSProcessor:
                         logging.info(f"{self.session_id}TTSProcessor: Interruption detected during audio stream.")
                         raise asyncio.CancelledError("TTS interrupted by user (audio stream)")
 
-                    # Process raw audio chunk through helper methods
-                    input_tensor = self._tensor_from_audio_chunk(audio_chunk_from_engine)
-                    processed_tensor = self._resample_and_clamp(input_tensor)
-                    pcm_s16le_bytes = self._tensor_to_pcm_s16le_bytes(processed_tensor)
-                    pcmu_chunk_bytes = self._pcm_s16le_to_ulaw(pcm_s16le_bytes)
+                    # Process audio chunk using async pipeline
+                    pcmu_chunk_bytes = await self._process_audio_chunk_pipeline(audio_chunk_from_engine)
                     cumulative_pcmu_bytes.extend(pcmu_chunk_bytes)
 
                     # Split and enqueue RTP-sized chunks
@@ -199,35 +232,35 @@ class TTSProcessor:
                     logging.info(f"{self.session_id}TTSProcessor: Disconnecting TTS engine as it was connected by this process.")
                     await self.tts_engine.disconnect()
 
-                if self._interrupt_event.is_set():
-                     logging.info(f"{self.session_id}TTSProcessor: Finished. Interruption signal was active.")
-
-            if tts_success and not self._interrupt_event.is_set():
-                logging.info(f"{self.session_id}TTSProcessor: Successfully generated and queued: \"{text[:70]}...\"")
-            elif self._interrupt_event.is_set() and not tts_success : # Already logged CancelledError
-                logging.info(f"{self.session_id}TTSProcessor: Generation interrupted for: \"{text[:70]}...\"")
-            elif not tts_success:
-                 logging.warning(f"{self.session_id}TTSProcessor: Generation failed for: \"{text[:70]}...\"")
-
-            if tts_success and self.vad_detector is not None and hasattr(self.vad_detector, 'register_tts_audio'):
-                try:
-                    self.vad_detector.register_tts_audio(processed_tensor)
-                    logging.debug(f"{self.session_id}TTSProcessor: Registered TTS audio with VAD detector for echo cancellation")
-                except Exception as e:
-                    logging.warning(f"{self.session_id}TTSProcessor: Failed to register TTS audio with VAD: {e}")
-
-        finally:
             if self.on_tts_end:
                 try:
                     self.on_tts_end()
                 except Exception as e:
                     logging.error(f"{self.session_id}TTSProcessor: Error in TTS end callback: {e}", exc_info=True)
-                    
-            if self.vad_detector is not None and hasattr(self.vad_detector, 'tts_finished'):
-                try:
-                    self.vad_detector.tts_finished()
-                    logging.debug(f"{self.session_id}TTSProcessor: Notified VAD detector that TTS has finished")
-                except Exception as e:
-                    logging.warning(f"{self.session_id}TTSProcessor: Failed to notify VAD about TTS completion: {e}")
 
-        return tts_success
+            if tts_success:
+                logging.info(f"{self.session_id}TTSProcessor: TTS generation completed successfully (ID:{generation_id}).")
+            else:
+                logging.warning(f"{self.session_id}TTSProcessor: TTS generation failed or was interrupted (ID:{generation_id}).")
+
+            return tts_success
+
+        except Exception as e:
+            logging.error(f"{self.session_id}TTSProcessor: Unexpected error in TTS generation: {e}", exc_info=True)
+            return False
+
+    async def close(self) -> None:
+        """
+        Closes the TTSProcessor and cleans up resources.
+        """
+        logging.info(f"{self.session_id}TTSProcessor: Closing...")
+        self.interrupt()
+        
+        try:
+            if self.tts_engine and self.tts_engine.is_connected():
+                await self.tts_engine.disconnect()
+                logging.info(f"{self.session_id}TTSProcessor: TTS engine disconnected.")
+        except Exception as e:
+            logging.error(f"{self.session_id}TTSProcessor: Error disconnecting TTS engine: {e}", exc_info=True)
+        
+        logging.info(f"{self.session_id}TTSProcessor: Closed successfully.")
