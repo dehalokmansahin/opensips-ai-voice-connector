@@ -29,6 +29,7 @@ services:
       - opensips
       - vosk-server # opensips-ai-voice-connector başlamadan önce rtpproxy ve vosk'un hazır olmasını bekle
       - piper-tts-server
+      - llama-server # Custom LLaMA LLM servisi
     restart: unless-stopped # Konteyner durursa yeniden başlatmayı dene
 
   # OpenSIPS Servisi
@@ -72,6 +73,33 @@ services:
       - opensips_network
     restart: unless-stopped
 
+  # Custom LLaMA Model Server
+  llama-server:
+    image: llama-server:latest
+    container_name: llama-model-server
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./model:/app/model  # Model dosyalarınızın bulunduğu dizin
+    networks:
+      - opensips_network
+    restart: unless-stopped
+    environment:
+      - MODEL_DIR=/app/model
+      - PORT=8765
+    # GPU support (uncomment if you have NVIDIA GPU)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
 networks:
   opensips_network:
     driver: bridge # Konteynerlerin birbirleriyle konuşabilmesi için ağ
+
+volumes:
+  model_data:
+    driver: local

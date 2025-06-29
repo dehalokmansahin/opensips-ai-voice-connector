@@ -1,3 +1,4 @@
+# Core dependencies
 deepgram-sdk
 aiortc
 openai
@@ -5,18 +6,37 @@ opensips==0.1.5
 sipmessage==0.5.0
 requests==2.32.3
 websockets==15.0.1
+
+# Audio processing
 numpy==2.2.5
 soundfile==0.12.1
 scipy==1.15.2
-torch===2.7.0
+torch==2.7.0
 torchaudio==2.7.0
 silero-vad==5.1.2
 g711==1.6.5
 wyoming==1.6.0
-pytest==8.2.1
-pytest-asyncio==0.23.6
+
+# Pipecat framework (local installation)
+# pipecat will be installed from local ./pipecat directory
+
+# HTTP client
+aiohttp==3.9.1
+
+# Logging
 structlog==24.1.0
 loguru==0.7.2
 pyloudnorm==0.1.1
-soxr==0.3.7
-aiohttp==3.9.1
+
+# Audio resampling (with NumPy 2.x compatibility stub)
+# soxr==0.3.7  # Commented out due to NumPy 2.x compatibility issues
+
+# Testing
+pytest==8.2.1
+pytest-asyncio==0.23.6
+
+# Additional dependencies for our services
+asyncio-mqtt==0.16.2
+python-multipart==0.0.9
+uvicorn==0.27.0
+fastapi==0.108.0
