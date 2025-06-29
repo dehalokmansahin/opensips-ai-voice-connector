@@ -1,11 +1,13 @@
 """
 Custom LLaMA WebSocket LLM Service
 Kendi LLaMA model serveriniz ile entegrasyon
+Streaming sentence segmentation ile TTS optimizasyonu
 """
 
 import asyncio
 import json
 import websockets
+import re
 from typing import AsyncGenerator, Optional
 import structlog
 from pipecat.frames.frames import (
@@ -17,8 +19,56 @@ from pipecat.frames.frames import (
 
 logger = structlog.get_logger()
 
+class StreamingSentenceSegmenter:
+    """Streaming text'i cümle bazında segmentlere ayırır"""
+    
+    def __init__(self):
+        self.buffer = ""
+        self.sentence_endings = re.compile(r'[.!?]+')
+        
+    def add_chunk(self, chunk: str) -> list[str]:
+        """
+        Chunk ekle ve tamamlanan cümleleri döndür
+        
+        Args:
+            chunk: Yeni text chunk'ı
+            
+        Returns:
+            list[str]: Tamamlanan cümleler listesi
+        """
+        self.buffer += chunk
+        sentences = []
+        
+        # Noktalama işaretlerini ara
+        matches = list(self.sentence_endings.finditer(self.buffer))
+        
+        if matches:
+            # Son match'in sonuna kadar olan kısmı al
+            last_match = matches[-1]
+            end_pos = last_match.end()
+            
+            # Cümleyi çıkar
+            sentence = self.buffer[:end_pos].strip()
+            if sentence:
+                sentences.append(sentence)
+            
+            # Buffer'ı güncelle
+            self.buffer = self.buffer[end_pos:].strip()
+        
+        return sentences
+    
+    def get_remaining(self) -> str:
+        """Buffer'da kalan metni döndür"""
+        remaining = self.buffer.strip()
+        self.buffer = ""
+        return remaining
+    
+    def reset(self):
+        """Segmenter'ı sıfırla"""
+        self.buffer = ""
+
 class LlamaWebsocketLLMService:
-    """Custom LLaMA WebSocket LLM Service"""
+    """Custom LLaMA WebSocket LLM Service with Sentence Segmentation"""
     
     def __init__(self, url: str = "ws://llama-server:8765"):
         """
@@ -61,19 +111,20 @@ class LlamaWebsocketLLMService:
     
     async def generate_response_streaming(self, prompt: str, context: list = None) -> AsyncGenerator[str, None]:
         """
-        Streaming response generation
+        Streaming response generation with sentence segmentation
         
         Args:
             prompt: User input text
             context: Conversation context (optional)
             
         Yields:
-            str: Generated text chunks
+            str: Generated text chunks (sentence by sentence)
         """
         start_time = asyncio.get_event_loop().time()
+        segmenter = StreamingSentenceSegmenter()
         
         try:
-            logger.info("Generating LLaMA response", prompt=prompt[:50])
+            logger.info("Generating LLaMA response with sentence segmentation", prompt=prompt[:50])
             
             # WebSocket bağlantısı kur
             async with websockets.connect(self.url) as websocket:
@@ -93,7 +144,8 @@ class LlamaWebsocketLLMService:
                 logger.debug("Request sent to LLaMA server", request=request_data)
                 
                 first_token = True
-                response_text = ""
+                first_sentence = True
+                total_response = ""
                 
                 # Streaming response al
                 async for message in websocket:
@@ -108,16 +160,36 @@ class LlamaWebsocketLLMService:
                         # Response chunk'ı işle
                         if "chunk" in data and data["chunk"]:
                             chunk = data["chunk"]
-                            response_text += chunk
-                            logger.debug("Received chunk", chunk=chunk[:30])
-                            yield chunk
+                            total_response += chunk
+                            
+                            # Chunk'ı segmenter'a ekle
+                            completed_sentences = segmenter.add_chunk(chunk)
+                            
+                            # Tamamlanan cümleleri yield et
+                            for sentence in completed_sentences:
+                                if sentence.strip():
+                                    if first_sentence:
+                                        first_sentence_time = (asyncio.get_event_loop().time() - start_time) * 1000
+                                        logger.info("First sentence completed", 
+                                                   sentence=sentence[:50],
+                                                   latency_ms=round(first_sentence_time, 1))
+                                        first_sentence = False
+                                    
+                                    logger.debug("Yielding completed sentence", sentence=sentence[:50])
+                                    yield sentence
                         
                         # Stream tamamlandı
                         elif "done" in data and data["done"]:
+                            # Kalan buffer'ı kontrol et
+                            remaining = segmenter.get_remaining()
+                            if remaining:
+                                logger.debug("Yielding remaining text", text=remaining[:50])
+                                yield remaining
+                            
                             total_time = (asyncio.get_event_loop().time() - start_time) * 1000
                             logger.info("LLaMA response completed", 
                                        total_latency_ms=round(total_time, 1),
-                                       response_length=len(response_text))
+                                       response_length=len(total_response))
                             break
                             
                     except json.JSONDecodeError as e:
@@ -139,13 +211,13 @@ class LlamaWebsocketLLMService:
     
     async def process_frame(self, frame: Frame) -> AsyncGenerator[Frame, None]:
         """
-        Pipecat frame processing
+        Pipecat frame processing with sentence-based streaming
         
         Args:
             frame: Input frame
             
         Yields:
-            Frame: Output frames
+            Frame: Output frames (sentence by sentence)
         """
         if isinstance(frame, TextFrame):
             user_text = frame.text.strip()
@@ -153,18 +225,24 @@ class LlamaWebsocketLLMService:
             if not user_text:
                 return
             
-            logger.info("Processing LLM request", text=user_text[:50])
+            logger.info("Processing LLM request with sentence segmentation", text=user_text[:50])
             
             # Start response
             yield LLMFullResponseStartFrame()
             
-            # Generate streaming response
+            # Generate streaming response sentence by sentence
             try:
-                async for chunk in self.generate_response_streaming(user_text):
-                    if chunk.strip():
-                        yield TextFrame(text=chunk)
+                sentence_count = 0
+                async for sentence in self.generate_response_streaming(user_text):
+                    if sentence.strip():
+                        sentence_count += 1
+                        logger.info("Sending sentence to TTS", 
+                                   sentence_num=sentence_count,
+                                   sentence=sentence[:50])
+                        yield TextFrame(text=sentence)
                 
                 # End response
+                logger.info("LLM response completed", total_sentences=sentence_count)
                 yield LLMFullResponseEndFrame()
                 
             except Exception as e:

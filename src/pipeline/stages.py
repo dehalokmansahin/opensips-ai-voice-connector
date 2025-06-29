@@ -23,7 +23,7 @@ from pipecat.frames.frames import (
 # Absolute imports
 from services.vosk_websocket import VoskWebsocketSTTService
 from services.piper_websocket import PiperWebsocketTTSService
-from services.ollama_llm import OllamaLLMService
+from services.llama_websocket import LlamaWebsocketLLMService
 
 logger = structlog.get_logger()
 
@@ -92,7 +92,7 @@ class STTProcessor(BaseProcessor):
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self._stt_service = VoskWebsocketSTTService()
+        self._stt_service = VoskWebsocketSTTService(url="ws://vosk-server:2700")
         self._is_started = False
         logger.info("STTProcessor initialized (simplified)")
     
@@ -120,13 +120,13 @@ class STTProcessor(BaseProcessor):
         await self.push_frame(frame, direction)
 
 class LLMProcessor(BaseProcessor):
-    """Large Language Model processor using Ollama Llama3.2:3b"""
+    """Large Language Model processor using LLaMA WebSocket"""
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self._llm_service = OllamaLLMService()
+        self._llm_service = LlamaWebsocketLLMService(url="ws://llm-turkish-server:8765")
         self._is_started = False
-        logger.info("LLMProcessor initialized with Ollama Llama3.2:3b")
+        logger.info("LLMProcessor initialized with LLaMA WebSocket")
     
     async def process_frame(self, frame: Frame, direction=None) -> None:
         """Frame'leri işle"""
@@ -168,7 +168,7 @@ class TTSProcessor(BaseProcessor):
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self._tts_service = PiperWebsocketTTSService()
+        self._tts_service = PiperWebsocketTTSService(url="ws://piper-tts-server:8000/tts")
         self._is_started = False
         logger.info("TTSProcessor initialized with Piper WebSocket")
     

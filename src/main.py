@@ -8,6 +8,7 @@ import sys
 import os
 import asyncio
 import signal
+import socket
 from pathlib import Path
 
 # Python path setup
@@ -40,6 +41,116 @@ import configparser
 # Setup logging
 logger = structlog.get_logger()
 
+class SIPCallHandler:
+    """SIP Call Handler - OpenSIPS'den gelen çağrıları işler"""
+    
+    def __init__(self, host="0.0.0.0", port=8088):
+        self.host = host
+        self.port = port
+        self.socket = None
+        self.running = False
+        
+    async def start(self):
+        """SIP handler'ı başlat"""
+        try:
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.socket.bind((self.host, self.port))
+            self.socket.setblocking(False)
+            self.running = True
+            
+            logger.info("SIP Call Handler started", host=self.host, port=self.port)
+            
+            # Listen for incoming SIP messages
+            while self.running:
+                try:
+                    loop = asyncio.get_event_loop()
+                    data, addr = await loop.sock_recvfrom(self.socket, 4096)
+                    
+                    # Process SIP message
+                    await self.handle_sip_message(data.decode('utf-8'), addr)
+                    
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error("Error in SIP handler", error=str(e))
+                    await asyncio.sleep(0.1)
+                    
+        except Exception as e:
+            logger.error("Failed to start SIP handler", error=str(e))
+            raise
+    
+    async def handle_sip_message(self, message: str, addr):
+        """SIP mesajını işle"""
+        try:
+            logger.info("Received SIP message", 
+                       from_addr=f"{addr[0]}:{addr[1]}", 
+                       message_preview=message[:200])
+            
+            # Basic SIP INVITE handling
+            if "INVITE" in message and "sip:" in message:
+                logger.info("Processing SIP INVITE call")
+                
+                # Extract basic call information
+                lines = message.split('\n')
+                call_id = None
+                from_header = None
+                to_header = None
+                
+                for line in lines:
+                    if line.startswith('Call-ID:'):
+                        call_id = line.split(':', 1)[1].strip()
+                    elif line.startswith('From:'):
+                        from_header = line.split(':', 1)[1].strip()
+                    elif line.startswith('To:'):
+                        to_header = line.split(':', 1)[1].strip()
+                
+                # Send SIP 200 OK response
+                response = self.create_sip_200_ok(call_id, from_header, to_header)
+                await self.send_sip_response(response, addr)
+                
+                logger.info("Sent SIP 200 OK response", call_id=call_id)
+                
+            elif "BYE" in message:
+                logger.info("Processing SIP BYE")
+                # Send 200 OK for BYE
+                response = "SIP/2.0 200 OK\r\n\r\n"
+                await self.send_sip_response(response, addr)
+                
+        except Exception as e:
+            logger.error("Error handling SIP message", error=str(e))
+    
+    def create_sip_200_ok(self, call_id, from_header, to_header):
+        """SIP 200 OK response oluştur"""
+        response = f"""SIP/2.0 200 OK
+Via: SIP/2.0/UDP {self.host}:{self.port}
+Call-ID: {call_id or 'unknown'}
+From: {from_header or 'unknown'}
+To: {to_header or 'unknown'}
+CSeq: 1 INVITE
+Contact: <sip:{self.host}:{self.port}>
+Content-Type: application/sdp
+Content-Length: 0
+
+"""
+        return response
+    
+    async def send_sip_response(self, response: str, addr):
+        """SIP response gönder"""
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.sock_sendto(self.socket, response.encode('utf-8'), addr)
+            logger.debug("Sent SIP response", to_addr=f"{addr[0]}:{addr[1]}")
+        except Exception as e:
+            logger.error("Error sending SIP response", error=str(e))
+    
+    async def stop(self):
+        """SIP handler'ı durdur"""
+        self.running = False
+        if self.socket:
+            self.socket.close()
+        logger.info("SIP Call Handler stopped")
+
 class OpenSIPSAIVoiceConnector:
     """OpenSIPS AI Voice Connector Ana Sınıfı"""
     
@@ -48,6 +159,7 @@ class OpenSIPSAIVoiceConnector:
         self.config = configparser.ConfigParser()
         self.pipeline_manager = None
         self.services = {}
+        self.sip_handler = None
         self.running = False
         
         logger.info("OpenSIPS AI Voice Connector initializing", config_file=self.config_file)
@@ -61,7 +173,7 @@ class OpenSIPSAIVoiceConnector:
             # Log some key config values
             if 'llm' in self.config:
                 logger.info("LLM config", 
-                           url=self.config.get('llm', 'url', fallback='http://ollama:11434/api/generate'),
+                           url=self.config.get('llm', 'url', fallback='ws://llm-turkish-server:8765'),
                            model=self.config.get('llm', 'model', fallback='llama3.2:3b'))
             
             if 'stt' in self.config:
@@ -82,7 +194,7 @@ class OpenSIPSAIVoiceConnector:
             logger.info("Initializing AI services...")
             
             # LLM Service
-            llm_url = self.config.get('llm', 'url', fallback='ws://llama-server:8765')
+            llm_url = self.config.get('llm', 'url', fallback='ws://llm-turkish-server:8765')
             self.services['llm'] = LlamaWebsocketLLMService(url=llm_url)
             
             # STT Service  
@@ -116,19 +228,17 @@ class OpenSIPSAIVoiceConnector:
     async def start_call_handler(self):
         """Call handler'ı başlat"""
         try:
-            logger.info("Starting call handler...")
+            logger.info("Starting SIP call handler...")
             
             # SIP configuration
             sip_port = int(self.config.get('sip', 'port', fallback='8088'))
             sip_host = self.config.get('sip', 'host', fallback='0.0.0.0')
             
-            # Call handler setup - basit bir implementasyon
-            logger.info("Call handler ready", host=sip_host, port=sip_port)
+            # Initialize SIP handler
+            self.sip_handler = SIPCallHandler(host=sip_host, port=sip_port)
             
-            # Burada gerçek SIP call handling implementasyonu olacak
-            # Şimdilik placeholder
-            while self.running:
-                await asyncio.sleep(1)
+            # Start SIP handler
+            await self.sip_handler.start()
                 
         except Exception as e:
             logger.error("Call handler error", error=str(e))
@@ -151,6 +261,7 @@ class OpenSIPSAIVoiceConnector:
             logger.info("   ✅ STT (Vosk WebSocket)")
             logger.info("   ✅ TTS (Piper WebSocket)")
             logger.info("   ✅ Pipeline Manager")
+            logger.info("   ✅ SIP Call Handler")
             
             # Start call handler
             await self.start_call_handler()
@@ -164,6 +275,11 @@ class OpenSIPSAIVoiceConnector:
         """Servisi durdur"""
         logger.info("Stopping OpenSIPS AI Voice Connector...")
         self.running = False
+        
+        # Stop SIP handler
+        if self.sip_handler:
+            await self.sip_handler.stop()
+            logger.info("SIP handler stopped")
         
         # Stop pipeline manager
         if self.pipeline_manager:
