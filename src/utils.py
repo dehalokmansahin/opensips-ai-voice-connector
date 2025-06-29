@@ -20,7 +20,7 @@
 #
 
 """
-Module that provides helper functions for AI
+Utilities and configuration for OpenSIPS AI Voice Connector
 """
 
 import re
@@ -29,24 +29,59 @@ from deepgram_api import Deepgram
 from openai_api import OpenAI
 from deepgram_native_api import DeepgramNative
 from speech_session_vosk import VoskSTT
-# Try to import Azure, but don't fail if not available
+import configparser
+from pathlib import Path
+import logging
+
+logger = logging.getLogger(__name__)
+
+# AI Engine imports
 try:
-    from azure_api import AzureAI
-    has_azure = True
+    from ai import AzureAI
 except ImportError:
-    has_azure = False
-    print("Azure module not available, Azure STT provider will be disabled")
-from config import Config
+    AzureAI = None
+    logger.warning("Azure AI not available")
 
-# Initialize FLAVORS dictionary
-FLAVORS = {"deepgram": Deepgram,
-           "openai": OpenAI,
-           "deepgram_native": DeepgramNative,
-           "vosk":VoskSTT}
+try:
+    from ai import DeepgramAI
+except ImportError:
+    DeepgramAI = None
+    logger.warning("Deepgram AI not available")
 
-# Add Azure if available
-if has_azure:
-    FLAVORS["azure"] = AzureAI
+try:
+    from ai import DeepgramNativeAI
+except ImportError:
+    DeepgramNativeAI = None
+    logger.warning("Deepgram Native AI not available")
+
+# Pipecat AI Engine import
+try:
+    from pipeline.ai_engine import PipelineAI
+    PIPECAT_AVAILABLE = True
+    logger.info("Pipecat AI engine available")
+except ImportError as e:
+    PipelineAI = None
+    PIPECAT_AVAILABLE = False
+    logger.warning(f"Pipecat AI engine not available: {e}")
+
+# AI Engine flavors mapping
+FLAVORS = {}
+
+# Register available AI engines
+if AzureAI:
+    FLAVORS['azure'] = AzureAI
+
+if DeepgramAI:
+    FLAVORS['deepgram'] = DeepgramAI
+
+if DeepgramNativeAI:
+    FLAVORS['deepgram_native'] = DeepgramNativeAI
+
+if PipelineAI:
+    FLAVORS['pipecat'] = PipelineAI
+
+# Log available flavors
+logger.info(f"Available AI flavors: {list(FLAVORS.keys())}")
 
 class UnknownSIPUser(Exception):
     """ User is not known """
@@ -140,5 +175,69 @@ def get_ai_flavor(params):
 def get_ai(flavor, call, cfg):
     """ Returns an AI object """
     return FLAVORS[flavor](call, cfg)
+
+
+def load_config(config_path: str):
+    """Config dosyasını yükle"""
+    config = configparser.ConfigParser()
+    config.read(config_path)
+    
+    # Config objesi oluştur
+    class Config:
+        def __init__(self, config_parser):
+            self.config = config_parser
+            
+            # Default values
+            self.ai_flavor = self.config.get('ai', 'flavor', fallback='pipecat')
+            self.ai_model = self.config.get('ai', 'model', fallback='default')
+            self.sample_rate = self.config.getint('audio', 'sample_rate', fallback=16000)
+            self.chunk_size = self.config.getint('audio', 'chunk_size', fallback=160)
+            
+            # OpenSIPS settings
+            self.opensips_host = self.config.get('opensips', 'host', fallback='localhost')
+            self.opensips_port = self.config.getint('opensips', 'port', fallback=5060)
+            
+            # Vosk settings
+            self.vosk_url = self.config.get('vosk', 'url', fallback='ws://localhost:2700')
+            
+            # Validate AI flavor
+            if self.ai_flavor not in FLAVORS:
+                logger.warning(f"AI flavor '{self.ai_flavor}' not available, using fallback")
+                # Fallback to first available flavor
+                if FLAVORS:
+                    self.ai_flavor = list(FLAVORS.keys())[0]
+                    logger.info(f"Using fallback AI flavor: {self.ai_flavor}")
+                else:
+                    raise ValueError("No AI flavors available!")
+    
+    return Config(config)
+
+def get_ai_engine_class(flavor: str):
+    """AI flavor'ına göre engine class'ını döndür"""
+    if flavor not in FLAVORS:
+        available = list(FLAVORS.keys())
+        raise ValueError(f"AI flavor '{flavor}' not available. Available: {available}")
+    
+    return FLAVORS[flavor]
+
+def list_available_flavors():
+    """Mevcut AI flavor'larını listele"""
+    return list(FLAVORS.keys())
+
+# Backward compatibility
+def create_ai_engine(flavor: str, call, cfg):
+    """AI engine oluştur"""
+    engine_class = get_ai_engine_class(flavor)
+    return engine_class(call, cfg)
+
+# Debug info
+if __name__ == "__main__":
+    print("🔧 OpenSIPS AI Voice Connector Utils")
+    print("=" * 40)
+    print(f"Available AI Flavors: {list_available_flavors()}")
+    print(f"Pipecat Available: {PIPECAT_AVAILABLE}")
+    
+    for flavor, engine_class in FLAVORS.items():
+        print(f"  - {flavor}: {engine_class.__name__ if engine_class else 'None'}")
 
 # vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4

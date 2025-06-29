@@ -13,3 +13,10 @@ torchaudio==2.7.0
 silero-vad==5.1.2
 g711==1.6.5
 wyoming==1.6.0
+pytest==8.2.1
+pytest-asyncio==0.23.6
+structlog==24.1.0
+loguru==0.7.2
+pyloudnorm==0.1.1
+soxr==0.3.7
+aiohttp==3.9.1
