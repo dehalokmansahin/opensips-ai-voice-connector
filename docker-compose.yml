@@ -20,6 +20,7 @@ services:
       - VOSK_SERVER_URL=ws://vosk-server:2700
       - PIPER_TTS_URL=ws://piper-tts-server:8000/tts
       - LLAMA_SERVER_URL=ws://llm-turkish-server:8765
+      - TEST_MODE=false
     networks:
       - opensips_network
     depends_on:

@@ -24,35 +24,13 @@ Utilities and configuration for OpenSIPS AI Voice Connector
 """
 
 import re
-from sipmessage import Address
-from deepgram_api import Deepgram
-from openai_api import OpenAI
-from deepgram_native_api import DeepgramNative
-from speech_session_vosk import VoskSTT
 import configparser
 from pathlib import Path
 import logging
+from sipmessage import Address
+from config import Config
 
 logger = logging.getLogger(__name__)
-
-# AI Engine imports
-try:
-    from ai import AzureAI
-except ImportError:
-    AzureAI = None
-    logger.warning("Azure AI not available")
-
-try:
-    from ai import DeepgramAI
-except ImportError:
-    DeepgramAI = None
-    logger.warning("Deepgram AI not available")
-
-try:
-    from ai import DeepgramNativeAI
-except ImportError:
-    DeepgramNativeAI = None
-    logger.warning("Deepgram Native AI not available")
 
 # Pipecat AI Engine import
 try:
@@ -64,19 +42,10 @@ except ImportError as e:
     PIPECAT_AVAILABLE = False
     logger.warning(f"Pipecat AI engine not available: {e}")
 
-# AI Engine flavors mapping
+# AI Engine flavors mapping - Sadece Pipecat
 FLAVORS = {}
 
-# Register available AI engines
-if AzureAI:
-    FLAVORS['azure'] = AzureAI
-
-if DeepgramAI:
-    FLAVORS['deepgram'] = DeepgramAI
-
-if DeepgramNativeAI:
-    FLAVORS['deepgram_native'] = DeepgramNativeAI
-
+# Register Pipecat AI engine
 if PipelineAI:
     FLAVORS['pipecat'] = PipelineAI
 
@@ -91,11 +60,28 @@ def get_header(params, header):
     """ Returns a specific line from headers """
     if 'headers' not in params:
         return None
-    hdr_lines = [line for line in params['headers'].splitlines()
-                 if re.match(f"{header}:", line, re.I)]
-    if len(hdr_lines) == 0:
+    
+    # Debug: Check the type of headers field
+    headers = params['headers']
+    logger.debug(f"get_header: headers type: {type(headers)}, content: {headers}")
+    
+    # Handle both string and dict types
+    if isinstance(headers, dict):
+        # If headers is a dict, look for the header directly
+        for key, value in headers.items():
+            if key.lower() == header.lower():
+                return value
         return None
-    return hdr_lines[0].split(":", 1)[1].strip()
+    elif isinstance(headers, str):
+        # Original string processing
+        hdr_lines = [line for line in headers.splitlines()
+                     if re.match(f"{header}:", line, re.I)]
+        if len(hdr_lines) == 0:
+            return None
+        return hdr_lines[0].split(":", 1)[1].strip()
+    else:
+        logger.error(f"get_header: Unexpected headers type: {type(headers)}")
+        return None
 
 
 def get_to(params):
@@ -140,8 +126,12 @@ def get_ai_flavor_default(user):
                                          False)]
     if user in keys:
         return user
-    hash_index = hash(user) % len(keys)
-    return keys[hash_index]
+    if keys:
+        hash_index = hash(user) % len(keys)
+        return keys[hash_index]
+    else:
+        # Default to pipecat if available
+        return 'pipecat' if 'pipecat' in FLAVORS else None
 
 
 def get_ai_flavor(params):
@@ -169,11 +159,25 @@ def get_ai_flavor(params):
                     return flavor
         elif _dialplan_match(dialplans, user):
             return flavor
-    return get_ai_flavor_default(user)
+    
+    # If no specific flavor found, use default
+    default_flavor = get_ai_flavor_default(user)
+    if default_flavor:
+        return default_flavor
+    else:
+        # Fallback to pipecat
+        return 'pipecat'
 
 
 def get_ai(flavor, call, cfg):
     """ Returns an AI object """
+    if flavor not in FLAVORS:
+        logger.warning(f"AI flavor '{flavor}' not available, using pipecat")
+        flavor = 'pipecat'
+    
+    if flavor not in FLAVORS:
+        raise ValueError(f"No AI flavors available! Available: {list(FLAVORS.keys())}")
+        
     return FLAVORS[flavor](call, cfg)
 
 
@@ -183,7 +187,7 @@ def load_config(config_path: str):
     config.read(config_path)
     
     # Config objesi oluştur
-    class Config:
+    class ConfigWrapper:
         def __init__(self, config_parser):
             self.config = config_parser
             
@@ -203,14 +207,11 @@ def load_config(config_path: str):
             # Validate AI flavor
             if self.ai_flavor not in FLAVORS:
                 logger.warning(f"AI flavor '{self.ai_flavor}' not available, using fallback")
-                # Fallback to first available flavor
-                if FLAVORS:
-                    self.ai_flavor = list(FLAVORS.keys())[0]
-                    logger.info(f"Using fallback AI flavor: {self.ai_flavor}")
-                else:
-                    raise ValueError("No AI flavors available!")
+                # Fallback to pipecat
+                self.ai_flavor = 'pipecat'
+                logger.info(f"Using fallback AI flavor: {self.ai_flavor}")
     
-    return Config(config)
+    return ConfigWrapper(config)
 
 def get_ai_engine_class(flavor: str):
     """AI flavor'ına göre engine class'ını döndür"""
