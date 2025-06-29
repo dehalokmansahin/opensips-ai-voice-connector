@@ -16,6 +16,7 @@ import structlog
 from transports.rtp_utils import decode_rtp_packet, generate_rtp_packet
 from transports.audio_utils import pcmu_to_pcm16k, pcm16k_to_pcmu
 from config import Config
+from pipeline.ai_engine import PipelineAI
 
 logger = structlog.get_logger()
 
@@ -41,8 +42,26 @@ def _init_rtp_ports():
         logger.warning("RTP config not available, using defaults", 
                       min_port=_min_rtp_port, max_port=_max_rtp_port)
     
-    _available_ports = set(range(_min_rtp_port, _max_rtp_port))
+    _available_ports = set(range(_min_rtp_port, _max_rtp_port + 1))  # +1 to include max_port
     logger.info("RTP port pool initialized", total_ports=len(_available_ports))
+
+
+def _debug_port_status():
+    """Debug function to check port pool status"""
+    global _available_ports, _min_rtp_port, _max_rtp_port
+    _init_rtp_ports()
+    
+    total_ports = _max_rtp_port - _min_rtp_port + 1
+    available_count = len(_available_ports) if _available_ports else 0
+    used_count = total_ports - available_count
+    
+    logger.info("🔍 PORT DEBUG STATUS", 
+               min_port=_min_rtp_port,
+               max_port=_max_rtp_port, 
+               total_ports=total_ports,
+               available_ports=available_count,
+               used_ports=used_count,
+               available_list=sorted(list(_available_ports)) if _available_ports else [])
 
 
 class NoAvailablePorts(Exception):
@@ -76,13 +95,19 @@ class Call:
             host_ip = '0.0.0.0'
             rtp_ip = None
         
-        # Get hostname if rtp_ip not configured
-        if not rtp_ip:
+        # Get hostname if rtp_ip not configured or set to 0.0.0.0
+        if not rtp_ip or rtp_ip == '0.0.0.0':
             try:
-                hostname = socket.gethostbyname(socket.gethostname())
-            except socket.gaierror:
-                hostname = "127.0.0.1"
-            rtp_ip = hostname
+                # For Docker environments, use the actual Windows host IP that client can reach
+                # Client is on 192.168.88.x network, so use Windows host LAN IP
+                rtp_ip = "192.168.1.120"  # Windows host LAN IP - client can reach this
+                logger.info("🌐 Using Windows host LAN IP for SDP", 
+                           rtp_ip=rtp_ip,
+                           reason="Client accessible from 192.168.88.x network")
+                    
+            except Exception as e:
+                logger.warning("🌐 Failed to set host IP, using fallback", error=str(e))
+                rtp_ip = "127.0.0.1"
 
         # Call properties
         self.b2b_key = b2b_key
@@ -99,6 +124,7 @@ class Call:
         self.terminated = False
         self.first_packet = True
         self.last_received_packet_time = datetime.datetime.now()
+        self.call_start_time = datetime.datetime.now()
 
         # RTP queues and events
         self.rtp_out_queue = Queue()
@@ -112,6 +138,9 @@ class Call:
 
         # Generate SDP response
         self.response_sdp = self.generate_response_sdp(sdp_info, rtp_ip)
+
+        # Initialize PipelineAI integration
+        self.pipeline_ai = PipelineAI(self, self.config or {})
 
         logger.info("RTP listener initialized", 
                    call_key=b2b_key, 
@@ -141,6 +170,11 @@ class Call:
         """Generate SDP response for 200 OK"""
         local_port = self.serversock.getsockname()[1]
         
+        logger.info("🎵 Generating SDP response", 
+                   rtp_ip=rtp_ip, 
+                   local_port=local_port,
+                   call_key=self.b2b_key)
+        
         # Basic SDP template - PCMU/8000 codec
         sdp_lines = [
             "v=0",
@@ -153,7 +187,12 @@ class Call:
             "a=sendrecv"
         ]
         
-        return "\n".join(sdp_lines)
+        sdp_response = "\n".join(sdp_lines)
+        logger.info("🎵 SDP response generated", 
+                   sdp_preview=sdp_response[:100] + "..." if len(sdp_response) > 100 else sdp_response,
+                   call_key=self.b2b_key)
+        
+        return sdp_response
 
     def get_sdp_body(self) -> str:
         """Get SDP body for OpenSIPS response"""
@@ -168,36 +207,88 @@ class Call:
             
             logger.info("RTP listener started", call_key=self.b2b_key)
             
+            # Schedule PipelineAI start
+            try:
+                asyncio.create_task(self.pipeline_ai.start())
+                logger.info("🔄 PipelineAI start scheduled", call_key=self.b2b_key)
+            except Exception as e:
+                logger.error("Error scheduling PipelineAI start", call_key=self.b2b_key, error=str(e))
+            
+            # Start first packet timeout checker
+            asyncio.create_task(self._check_first_packet_timeout())
+            
         except Exception as e:
             logger.error("Error starting call", key=self.b2b_key, error=str(e))
 
+    async def _check_first_packet_timeout(self):
+        """Check if first RTP packet arrived within timeout period"""
+        timeout_seconds = 10.0
+        check_interval = 2.0
+        
+        while not self.terminated and self.first_packet:
+            await asyncio.sleep(check_interval)
+            elapsed = (datetime.datetime.now() - self.call_start_time).total_seconds()
+            
+            if elapsed > timeout_seconds:
+                logger.warning("⏰ No RTP packets received after 10 seconds", 
+                             call_key=self.b2b_key,
+                             expected_client=f"{self.client_addr}:{self.client_port}",
+                             rtp_port=self.serversock.getsockname()[1],
+                             sdp_sent="200 OK with SDP sent to client")
+                # Wait another 10 seconds before next warning
+                await asyncio.sleep(timeout_seconds)
+
     def read_rtp_packet(self):
         """Read incoming RTP packets (called by event loop)"""
+        # Debug entry into read_rtp_packet
+        logger.debug("🛠️ Entered read_rtp_packet", call_key=self.b2b_key)
         try:
             data, addr = self.serversock.recvfrom(4096)
+            
+            logger.debug("🎤 RTP data received", 
+                        call_key=self.b2b_key,
+                        source_addr=f"{addr[0]}:{addr[1]}", 
+                        data_size=len(data),
+                        first_packet=self.first_packet,
+                        expected_client=f"{self.client_addr}:{self.client_port}")
             
             # Update last received packet time for timeout detection
             self.last_received_packet_time = datetime.datetime.now()
             
-            # First packet sets client address
+            # First packet sets client address - learn from actual traffic
             if self.first_packet:
                 self.first_packet = False
+                # Update client address to actual source (Docker network mapping)
                 self.client_addr = addr[0]
                 self.client_port = addr[1]
-                logger.info("RTP listener created", 
+                logger.info("🎯 FIRST RTP PACKET received! Learning client address", 
                            call_key=self.b2b_key,
-                           client_addr=self.client_addr,
-                           client_port=self.client_port,
+                           original_sdp_client=f"{self.client_addr}:{self.client_port}",
+                           actual_client=f"{addr[0]}:{addr[1]}",
                            local_port=self.serversock.getsockname()[1])
                 # Start sending RTP packets when first packet is received
                 asyncio.create_task(self.send_rtp_packets())
 
-            # Verify packet source
+            # Accept packets from learned client address OR if still first few packets
+            packet_count = getattr(self, '_packet_count', 0)
+            self._packet_count = packet_count + 1
+            
+            # Be flexible with source validation for first 10 packets (NAT/Docker network adaptation)
             if addr[0] != self.client_addr or addr[1] != self.client_port:
-                logger.debug("RTP packet from unknown source", 
-                           source=addr,
-                           expected=(self.client_addr, self.client_port))
-                return
+                if packet_count < 10:
+                    logger.info("🔄 Updating client address from packet", 
+                               call_key=self.b2b_key,
+                               old_addr=f"{self.client_addr}:{self.client_port}",
+                               new_addr=f"{addr[0]}:{addr[1]}",
+                               packet_num=packet_count)
+                    self.client_addr = addr[0] 
+                    self.client_port = addr[1]
+                else:
+                    logger.debug("RTP packet from different source", 
+                               call_key=self.b2b_key,
+                               source=f"{addr[0]}:{addr[1]}",
+                               expected=f"{self.client_addr}:{self.client_port}")
+                    return
 
             # Drop packets if paused
             if self.paused:
@@ -208,24 +299,49 @@ class Call:
                 rtp_packet = decode_rtp_packet(data.hex())
                 pcmu_payload = bytes.fromhex(rtp_packet['payload'])
                 
-                # Convert PCMU to PCM16k for pipeline
-                pcm_data = pcmu_to_pcm16k(pcmu_payload)
+                # Route PCMU payload through PipelineAI if available
+                if hasattr(self, 'pipeline_ai') and self.pipeline_ai and self.pipeline_ai.is_running:
+                    asyncio.create_task(self.pipeline_ai.process_rtp_payload(pcmu_payload))
+                    logger.info("🔄 RTP payload sent to PipelineAI", call_key=self.b2b_key, payload_size=len(pcmu_payload))
+                else:
+                    # Fallback: Convert PCMU to PCM16k for pipeline
+                    pcm_data = pcmu_to_pcm16k(pcmu_payload)
+                    # Send to pipeline
+                    logger.debug("🎯 PIPELINE CHECK", 
+                               call_key=self.b2b_key,
+                               has_pipeline_manager=bool(self.pipeline_manager),
+                               has_pcm_data=bool(pcm_data),
+                               pcm_data_len=len(pcm_data) if pcm_data else 0)
+                    if self.pipeline_manager and pcm_data:
+                        push_task = asyncio.create_task(
+                            self.pipeline_manager.push_audio(pcm_data)
+                        )
+                        logger.debug("🛠️ Scheduled fallback pipeline push_audio task", 
+                                     call_key=self.b2b_key,
+                                     task_id=id(push_task))
+                        logger.info("🎵 Audio frame pushed to fallback pipeline", 
+                                   call_key=self.b2b_key,
+                                   frame_size=len(pcm_data))
+                    else:
+                        if not self.pipeline_manager:
+                            logger.warning("❌ No pipeline manager available", call_key=self.b2b_key)
+                        if not pcm_data:
+                            logger.warning("❌ No PCM data after conversion", call_key=self.b2b_key)
                 
-                # Send to pipeline
-                if self.pipeline_manager and pcm_data:
-                    asyncio.create_task(self.pipeline_manager.push_audio(pcm_data))
-                    
-                logger.debug("RTP packet processed", 
+                logger.info("📦 RTP packet RECEIVED and processed", 
+                           call_key=self.b2b_key,
                            pcmu_size=len(pcmu_payload),
-                           pcm_size=len(pcm_data) if pcm_data else 0,
-                           key=self.b2b_key)
+                           pcm_size=len(pcm_data) if 'pcm_data' in locals() and pcm_data else 0,
+                           source_addr=f"{addr[0]}:{addr[1]}",
+                           seq_num=rtp_packet.get('sequence_number'),
+                           packet_num=packet_count)
                            
             except ValueError as e:
-                logger.warning("Invalid RTP packet", error=str(e), key=self.b2b_key)
+                logger.warning("Invalid RTP packet", call_key=self.b2b_key, error=str(e), packet_hex=data.hex()[:100])
 
         except socket.error as e:
             if not self.terminated:  # Only log errors if not already terminated
-                logger.error("RTP socket read error", error=str(e), key=self.b2b_key)
+                logger.error("RTP socket read error", call_key=self.b2b_key, error=str(e))
 
     async def send_rtp_packets(self):
         """Send outgoing RTP packets"""
@@ -305,10 +421,11 @@ class Call:
                         (self.client_addr, self.client_port)
                     )
                     
-                    logger.debug("RTP packet sent", 
+                    logger.info("📤 RTP packet SENT", 
                                call_key=self.b2b_key,
                                payload_size=len(payload),
-                               seq=sequence_number)
+                               seq=sequence_number,
+                               dest_addr=f"{self.client_addr}:{self.client_port}")
                 
                 # Update timestamp and calculate next packet time
                 timestamp += ts_increment
@@ -367,13 +484,15 @@ class Call:
 
     async def close(self):
         """Close call and release resources"""
-        logger.info("Call closing", key=self.b2b_key)
+        logger.info("🔚 CALL CLOSING", key=self.b2b_key, terminated=self.terminated)
         
         # Mark as terminated to stop processing
         self.terminated = True
+        logger.info("📋 Call marked as terminated", key=self.b2b_key)
         
         # Stop RTP processing
         self.stop_event.set()
+        logger.info("🛑 RTP stop event set", key=self.b2b_key)
         
         # Remove socket reader
         try:
@@ -391,6 +510,8 @@ class Call:
             if _available_ports is not None and free_port >= _min_rtp_port and free_port <= _max_rtp_port:
                 _available_ports.add(free_port)
                 logger.info("RTP port released", port=free_port, key=self.b2b_key)
+                # Debug port status after release
+                _debug_port_status()
         except Exception as e:
             logger.error("Error closing RTP socket", error=str(e), key=self.b2b_key)
 
@@ -416,6 +537,10 @@ class CallManager:
         self.pipeline_manager = pipeline_manager
         self.mi_conn = mi_conn
         self.active_calls = {}
+        
+        # Initialize and debug RTP ports at startup
+        _debug_port_status()
+        
         logger.info("CallManager initialized")
         
         # Set up pipeline output callback
@@ -484,6 +609,16 @@ class CallManager:
                 return None
             logger.info("✅ MI connection available", key=b2b_key)
             
+            # Debug port status before creating call
+            _debug_port_status()
+            
+            # Reset StartFrame flag for this pipeline session
+            logger.debug("🔄 Resetting StartFrame flag", before=self.pipeline_manager._start_frame_sent)
+            try:
+                self.pipeline_manager._start_frame_sent = False
+            except Exception:
+                pass
+            
             # Create call instance  
             logger.info("🔧 Creating Call instance...", key=b2b_key)
             call = Call(
@@ -517,11 +652,15 @@ class CallManager:
 
     async def terminate_call(self, b2b_key: str):
         """Terminate a call by key"""
+        logger.info("🔚 TERMINATING call", key=b2b_key, active_calls_before=len(self.active_calls))
+        
         call = self.active_calls.get(b2b_key)
         if call:
             await call.close()
             self.active_calls.pop(b2b_key, None)
-            logger.info("Call terminated", key=b2b_key)
+            logger.info("✅ Call terminated successfully", key=b2b_key, active_calls_after=len(self.active_calls))
+        else:
+            logger.warning("⚠️ Call not found for termination", key=b2b_key, available_calls=list(self.active_calls.keys()))
 
     def get_call(self, b2b_key: str) -> Optional[Call]:
         """Get call by key"""

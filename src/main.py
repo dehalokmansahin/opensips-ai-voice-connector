@@ -40,7 +40,7 @@ from services.vosk_websocket import VoskWebsocketSTTService
 from services.piper_websocket import PiperWebsocketTTSService
 
 # Pipeline imports
-from pipeline.manager import EnhancedPipelineManager as PipelineManager
+from pipeline import PipelineManager
 
 # OpenSIPS integration imports  
 from utils import get_ai, FLAVORS, get_ai_flavor, get_user, get_to, indialog
@@ -634,7 +634,7 @@ class OpenSIPSEventHandler:
             await self.send_response(call_key, "BYE", 200, "OK")
                 
         except Exception as e:
-            logger.error("Error handling BYE", key=call_key, error=str(e))
+            logger.error("Error handling BYE", error=str(e))
     
     async def handle_cancel(self, call_key: str, params: dict):
         """CANCEL event'ini işle"""
@@ -799,6 +799,9 @@ class SIPListener:
                 
             first_line = lines[0].strip()
             
+            # Debug: Full SIP message for ACK detection
+            logger.debug("Full SIP message details", method=first_line, full_message=sip_data)
+            
             if first_line.startswith('INVITE'):
                 await self.handle_invite(sip_data, addr)
             elif first_line.startswith('BYE'):
@@ -806,9 +809,10 @@ class SIPListener:
             elif first_line.startswith('CANCEL'):
                 await self.handle_cancel(sip_data, addr)
             elif first_line.startswith('ACK'):
+                logger.warning("🎯 ACK MESSAGE DETECTED! Processing...", from_addr=addr)
                 await self.handle_ack(sip_data, addr)
             else:
-                logger.debug("Unhandled SIP method", method=first_line)
+                logger.warning("❓ Unhandled SIP method", method=first_line, from_addr=addr)
                 
         except Exception as e:
             logger.error("Error handling SIP message", error=str(e))
@@ -818,8 +822,10 @@ class SIPListener:
         try:
             logger.info("Processing INVITE from OpenSIPS", from_addr=addr)
             
-            # Parse basic SIP headers
+            # Parse basic SIP headers - handle multiple Via headers and Record-Route
             headers = {}
+            via_headers = []  # Store all Via headers
+            record_route_headers = []  # Store all Record-Route headers
             body = ""
             in_body = False
             
@@ -833,7 +839,19 @@ class SIPListener:
                     body += line + '\n'
                 elif ':' in line:
                     key, value = line.split(':', 1)
-                    headers[key.strip().lower()] = value.strip()
+                    key_lower = key.strip().lower()
+                    value_clean = value.strip()
+                    
+                    # Handle multiple Via headers specially
+                    if key_lower == 'via':
+                        via_headers.append(value_clean)
+                        headers['via'] = via_headers[0]  # Keep first for compatibility
+                    # Handle Record-Route headers (critical for ACK routing!)
+                    elif key_lower == 'record-route':
+                        record_route_headers.append(value_clean)
+                        headers['record-route'] = value_clean  # Store for response
+                    else:
+                        headers[key_lower] = value_clean
             
             # Extract call information
             call_id = headers.get('call-id', 'unknown')
@@ -876,14 +894,18 @@ class SIPListener:
                 if call:
                     # Send 200 OK response with SDP
                     response_sdp = call.get_sdp_body()
-                    await self.send_response(addr, call_id, '200', 'OK', headers, response_sdp)
+                    logger.info("🎯 Sending 200 OK with Record-Route", 
+                               call_id=call_id, 
+                               has_record_route='record-route' in headers,
+                               record_route=headers.get('record-route', 'N/A'))
+                    await self.send_response(addr, call_id, '200', 'OK', headers, response_sdp, via_headers)
                     logger.info("Call created and 200 OK sent", call_id=call_id)
                 else:
                     logger.error("Failed to create call", call_id=call_id)
-                    await self.send_response(addr, call_id, '500', 'Internal Server Error')
+                    await self.send_response(addr, call_id, '500', 'Internal Server Error', headers, None, via_headers)
             else:
                 logger.error("No call manager available")
-                await self.send_response(addr, call_id, '500', 'Internal Server Error')
+                await self.send_response(addr, call_id, '500', 'Internal Server Error', headers, None, via_headers)
                 
         except Exception as e:
             logger.error("Error handling INVITE", error=str(e))
@@ -891,21 +913,27 @@ class SIPListener:
     async def handle_bye(self, sip_data: str, addr):
         """BYE mesajını işle"""
         try:
-            # Parse Call-ID
+            # Parse Call-ID and Via headers
             call_id = 'unknown'
+            via_headers = []
+            
             for line in sip_data.split('\n'):
+                line = line.strip()
                 if line.lower().startswith('call-id:'):
                     call_id = line.split(':', 1)[1].strip()
-                    break
+                elif line.lower().startswith('via:'):
+                    via_headers.append(line.split(':', 1)[1].strip())
             
-            logger.info("Processing BYE", call_id=call_id, from_addr=addr)
+            logger.info("📞 Processing BYE message", call_id=call_id, from_addr=addr, via_count=len(via_headers))
             
             # Terminate call
             if self.call_manager:
+                logger.info("🔚 Calling CallManager.terminate_call", call_id=call_id)
                 await self.call_manager.terminate_call(call_id)
+                logger.info("✅ CallManager.terminate_call completed", call_id=call_id)
             
             # Send 200 OK response  
-            await self.send_response(addr, call_id, '200', 'OK')
+            await self.send_response(addr, call_id, '200', 'OK', None, None, via_headers)
             
         except Exception as e:
             logger.error("Error handling BYE", error=str(e))
@@ -913,12 +941,16 @@ class SIPListener:
     async def handle_cancel(self, sip_data: str, addr):
         """CANCEL mesajını işle"""
         try:
-            # Parse Call-ID
+            # Parse Call-ID and Via headers
             call_id = 'unknown'
+            via_headers = []
+            
             for line in sip_data.split('\n'):
+                line = line.strip()
                 if line.lower().startswith('call-id:'):
                     call_id = line.split(':', 1)[1].strip()
-                    break
+                elif line.lower().startswith('via:'):
+                    via_headers.append(line.split(':', 1)[1].strip())
             
             logger.info("Processing CANCEL", call_id=call_id, from_addr=addr)
             
@@ -927,7 +959,7 @@ class SIPListener:
                 await self.call_manager.terminate_call(call_id)
             
             # Send 200 OK response
-            await self.send_response(addr, call_id, '200', 'OK')
+            await self.send_response(addr, call_id, '200', 'OK', None, None, via_headers)
             
         except Exception as e:
             logger.error("Error handling CANCEL", error=str(e))
@@ -942,21 +974,33 @@ class SIPListener:
                     call_id = line.split(':', 1)[1].strip()
                     break
             
-            logger.debug("Processing ACK", call_id=call_id, from_addr=addr)
-            # ACK doesn't need response
+            logger.info("✅ Processing ACK - Call established!", call_id=call_id, from_addr=addr)
+            # ACK doesn't need response - but this confirms call is established
             
         except Exception as e:
             logger.error("Error handling ACK", error=str(e))
     
-    async def send_response(self, addr, call_id: str, code: str, reason: str, request_headers: dict = None, body: str = None):
+    async def send_response(self, addr, call_id: str, code: str, reason: str, request_headers: dict = None, body: str = None, via_headers: list = None):
         """SIP response gönder"""
         try:
             # Build SIP response
             response = f"SIP/2.0 {code} {reason}\r\n"
             
             if request_headers:
-                # Copy required headers from request
-                for header in ['via', 'from', 'to', 'call-id', 'cseq']:
+                # Handle Via headers first (in original order)
+                if via_headers:
+                    for via_value in via_headers:
+                        response += f"Via: {via_value}\r\n"
+                elif 'via' in request_headers:
+                    response += f"Via: {request_headers['via']}\r\n"
+                
+                # Copy Record-Route header for dialog establishment (CRITICAL for ACK routing!)
+                if 'record-route' in request_headers and code == '200':
+                    response += f"Record-Route: {request_headers['record-route']}\r\n"
+                    logger.debug("Added Record-Route to 200 OK response", record_route=request_headers['record-route'])
+                
+                # Copy other required headers from request
+                for header in ['from', 'to', 'call-id', 'cseq']:
                     if header in request_headers:
                         if header == 'to' and code == '200':
                             # Add tag to To header for 200 OK
@@ -971,7 +1015,17 @@ class SIPListener:
             
             # Add Contact header for 200 OK
             if code == '200':
-                response += f"Contact: <sip:oavc@{self.host}:{self.port}>\r\n"
+                # Use container IP instead of 0.0.0.0 for Contact header
+                contact_host = self.host
+                if contact_host == '0.0.0.0':
+                    try:
+                        import socket
+                        contact_host = socket.gethostbyname(socket.gethostname())
+                        logger.debug("Resolved container IP for Contact header", ip=contact_host)
+                    except:
+                        contact_host = self.host  # Fallback to original
+                
+                response += f"Contact: <sip:oavc@{contact_host}:{self.port}>\r\n"
             
             # Add body if provided (SDP for 200 OK)
             if body:
@@ -991,6 +1045,7 @@ class SIPListener:
             )
             
             logger.info("Sent SIP response", code=code, reason=reason, to=addr, has_body=bool(body))
+            logger.debug("SIP response content", response_preview=response[:200] + "..." if len(response) > 200 else response)
             
         except Exception as e:
             logger.error("Error sending SIP response", error=str(e))

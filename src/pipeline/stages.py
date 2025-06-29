@@ -68,8 +68,10 @@ class VADProcessor(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         """Frame'leri işle"""
         
+        logger.debug("VAD processing frame", frame_type=type(frame).__name__)
+        
         if isinstance(frame, StartFrame):
-            logger.info("VAD processor started")
+            logger.info("🎤 VAD processor started!")
         elif isinstance(frame, AudioRawFrame):
             # Improved VAD with timing controls
             if frame.audio and len(frame.audio) > 0:
@@ -131,6 +133,8 @@ class STTProcessor(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         """Frame'leri işle"""
         
+        logger.debug("STT processing frame", frame_type=type(frame).__name__)
+        
         if isinstance(frame, StartFrame):
             if not self._is_started:
                 try:
@@ -141,7 +145,7 @@ class STTProcessor(FrameProcessor):
                         
                     await self._stt_service.start()
                     self._is_started = True
-                    logger.info("STT service started successfully")
+                    logger.info("🗣️ STT service started successfully")
                 except Exception as e:
                     logger.error("Failed to start STT service", error=str(e))
                     # Continue without STT - graceful degradation

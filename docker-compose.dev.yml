@@ -19,6 +19,8 @@ services:
       - PYTHONUNBUFFERED=1
       # Development mode flag
       - DEVELOPMENT_MODE=true
+      # RTP Debug
+      - RTP_DEBUG=true
     # Development için container'ı her seferinde rebuild etme
     build:
       context: .

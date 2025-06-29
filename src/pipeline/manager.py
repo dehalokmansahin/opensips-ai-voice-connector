@@ -40,15 +40,17 @@ class PipelineSource(FrameProcessor):
         
     async def start_processing(self):
         """Start the audio processing loop"""
+        logger.info("🔁 PipelineSource start_processing loop started")
         self._running = True
         try:
             while self._running:
                 try:
-                    # Wait for audio data with timeout
+                    logger.info("🔂 PipelineSource waiting for audio frame")
                     audio_frame = await asyncio.wait_for(
                         self._audio_buffer.get(), 
                         timeout=0.1
                     )
+                    logger.info("🔂 PipelineSource got audio frame", frame_type=type(audio_frame).__name__)
                     await self.push_frame(audio_frame)
                     
                 except asyncio.TimeoutError:
@@ -71,11 +73,13 @@ class PipelineSource(FrameProcessor):
         self._running = False
         
     async def process_frame(self, frame: Frame, direction):
+        logger.info("🔍 PipelineSource.process_frame called", frame_type=type(frame).__name__)
         """Process frames - mainly for system frames"""
         await super().process_frame(frame, direction)
         
         if isinstance(frame, StartFrame):
             # Start the processing task
+            logger.info("!!! 🚀 PipelineSource received StartFrame, creating processing task.")
             asyncio.create_task(self.start_processing())
         elif isinstance(frame, EndFrame):
             await self.stop_processing()
@@ -361,11 +365,14 @@ class EnhancedPipelineManager:
                 self._pipeline_task = PipelineTask(self._pipeline, params=params)
                 
                 # Start the pipeline task
+                logger.info("🎬 QUEUEING initial StartFrame to pipeline task...")
                 await self._pipeline_task.queue_frame(StartFrame())
+                logger.info("✅ Initial StartFrame has been queued.")
                 
                 self._is_running = True
                 self._frame_count = 0
                 self._error_frames = 0
+                self._start_frame_sent = False  # Reset StartFrame flag
                 
                 logger.info("✅ Enhanced pipeline started successfully", 
                            interruption_enabled=self._enable_interruption,
@@ -452,6 +459,23 @@ class EnhancedPipelineManager:
             return
         
         try:
+            # Send StartFrame on first audio if not already sent
+            logger.debug("🔍 STARTFRAME CHECK", 
+                        has_start_frame_sent=hasattr(self, '_start_frame_sent') and self._start_frame_sent,
+                        has_pipeline_task=bool(self._pipeline_task))
+            
+            if not hasattr(self, '_start_frame_sent') or not self._start_frame_sent:
+                if self._pipeline_task:
+                    logger.info("!!! 🎬 QUEUEING StartFrame from push_audio...")
+                    start_frame = StartFrame()
+                    await self._pipeline_task.queue_frame(start_frame)
+                    self._start_frame_sent = True
+                    logger.info("!!! 🚀 StartFrame SENT to pipeline from push_audio! VAD/STT/LLM/TTS should start now")
+                else:
+                    logger.warning("❌ Cannot send StartFrame - no pipeline_task")
+            else:
+                logger.debug("✅ StartFrame already sent previously")
+            
             # Create audio frame
             audio_frame = AudioRawFrame(
                 audio=pcm_bytes,

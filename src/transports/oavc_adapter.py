@@ -13,7 +13,7 @@ import logging
 from typing import Optional
 import structlog
 
-from pipeline.manager import PipelineManager
+from pipeline import PipelineManager
 from transports.audio_utils import pcmu_to_pcm16k
 
 logger = structlog.get_logger()

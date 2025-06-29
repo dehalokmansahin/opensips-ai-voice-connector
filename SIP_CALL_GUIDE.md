@@ -4,7 +4,7 @@
 
 ### 1. **Gelen Çağrı (INVITE)**
 ```
-SIP Client → OpenSIPS:5060 → OAVC:8088 → Pipecat Pipeline
+SIP Client → OpenSIPS:5060 → OAVC:8089 → Pipecat Pipeline
 ```
 
 ### 2. **Ses İşleme Pipeline**
@@ -35,21 +35,22 @@ Client ↔ OpenSIPS ↔ OAVC ↔ AI Services
 
 ### 1. **SIP Client ile Test**
 ```ini
-# MicroSIP / X-Lite Ayarları
-Server: YOUR_SERVER_IP:5060
+# MicroSIP / X-Lite / Zoiper Ayarları
+Server: 192.168.1.120:5060  # YOUR_HOST_IP:5060 (OpenSIPS ana port)
 Username: test
-Domain: YOUR_SERVER_IP  
+Domain: 192.168.1.120  # YOUR_HOST_IP
 Protocol: UDP
+Codec: PCMU (G.711)
 ```
 
 ### 2. **Test Çağrısı**
 ```
-Çağrı: sip:12345@YOUR_SERVER_IP:5060
+Çağrı: sip:12345@192.168.1.120:5060
 ```
 
 ### 3. **Asterisk/FreeSWITCH'ten Test**
 ```
-Dial(SIP/12345@YOUR_SERVER_IP:5060)
+Dial(SIP/12345@192.168.1.120:5060)
 ```
 
 ## 🎵 Ses Formatları
