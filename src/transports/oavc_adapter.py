@@ -59,6 +59,11 @@ class OAVCAdapter:
             
             # PCM verisini pipeline'a gönder
             if self._pipeline_manager and self._pipeline_manager.is_running:
+                # Check if audio input is enabled
+                if hasattr(self._pipeline_manager, '_audio_in_enabled') and not self._pipeline_manager._audio_in_enabled:
+                    logger.debug("Audio input disabled in pipeline manager")
+                    return
+                    
                 await self._pipeline_manager.push_audio(pcm_data)
                 logger.debug("Audio pushed to pipeline")
             else:

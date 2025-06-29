@@ -1,1 +1,1 @@
-from .manager import PipelineManager  # noqa: F401 
+from .manager import EnhancedPipelineManager as PipelineManager  # noqa: F401 

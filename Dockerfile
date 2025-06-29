@@ -3,7 +3,7 @@ FROM python:3.11-slim
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies including OPUS codec support and libsndfile for soundfile library
+# Install system dependencies - Enhanced for dynamic config processing
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tcpdump \
     libopus-dev \
@@ -11,12 +11,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
     python3-dev \
-    && apt-get clean \
+    netcat-openbsd \
+    curl \
     iproute2 \
     net-tools \
     procps \
     iputils-ping \
-    curl \    
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first to leverage Docker cache
@@ -29,24 +30,51 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY pipecat/ /app/pipecat/
 RUN cd /app/pipecat && pip install -e .
 
-# Copy source code and configuration
+# Copy source code and configuration - Enhanced with templates
 COPY src/ /app/src/
 COPY cfg/ /app/cfg/
 COPY pipecat/ /app/pipecat/
+COPY scripts/ /app/scripts/
+COPY test_audio/ /app/test_audio/
 
+# Create log directories
+RUN mkdir -p /app/logs /app/logs/opensips /app/logs/event-monitor
 
-# Environment variables (can be overridden at runtime)
+# Make startup script executable
+RUN chmod +x /app/scripts/startup.sh
+
+# Environment variables - Dynamic configuration support
 ENV CONFIG_FILE=/app/cfg/opensips-ai-voice-connector.ini
 ENV PYTHONPATH=/app
-# Set default Vosk WebSocket URL - can be overridden when running the container
-# Use the container name when containers are on the same Docker network
-ENV VOSK_WS_URL=ws://vosk-server:2700
-# Use a different SIP port to avoid conflict with OpenSIPS
-ENV SIP_PORT=8088
 
-# Expose ports for SIP and RTP
-EXPOSE 8088/udp
-EXPOSE 35000-35100/udp
+# Default service URLs (Docker service discovery)
+ENV VOSK_SERVER_URL=ws://vosk-server:2700
+ENV PIPER_TTS_URL=ws://piper-tts-server:8000/tts
+ENV LLAMA_SERVER_URL=ws://llm-turkish-server:8765
 
-# Run the application
-CMD ["python", "src/main.py"] 
+# OpenSIPS Integration defaults
+ENV OPENSIPS_HOST=opensips
+ENV OPENSIPS_MI_PORT=8087
+ENV OPENSIPS_EVENT_PORT=8090
+ENV OAVC_SIP_PORT=8089
+
+# Runtime configuration
+ENV TEST_MODE=false
+ENV LOG_LEVEL=INFO
+ENV DEBUG_MODE=false
+ENV WAIT_FOR_DEPS=true
+
+# Expose ports - Updated for dynamic configuration
+# OAVC SIP Interface
+EXPOSE 8089/udp 8089/tcp
+# RTP Media ports
+EXPOSE 35000-35003/udp
+EXPOSE 35010/udp 35011/udp
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python -c "import socket; s=socket.socket(); s.connect(('localhost', ${OAVC_SIP_PORT:-8089})); s.close()" || exit 1
+
+# Entry point - Dynamic startup script
+ENTRYPOINT ["/app/scripts/startup.sh"]
+CMD ["oavc"] 

@@ -40,22 +40,32 @@ from services.vosk_websocket import VoskWebsocketSTTService
 from services.piper_websocket import PiperWebsocketTTSService
 
 # Pipeline imports
-from pipeline.manager import PipelineManager
+from pipeline.manager import EnhancedPipelineManager as PipelineManager
 
-# OpenSIPS integration imports
+# OpenSIPS integration imports  
 from utils import get_ai, FLAVORS, get_ai_flavor, get_user, get_to, indialog
-from config import Config
+from config import Config, ConfigValidationError
+
+# Call management
+from transports.call_manager import CallManager, Call, NoAvailablePorts
+
+# OpenSIPS Event Integration
+from opensips_event_listener import OpenSIPSEventListener, OpenSIPSMIClient
 
 # OpenSIPS MI integration
 try:
-    from opensips import OpenSIPS
-    OPENSIPS_MI_AVAILABLE = True
+    from opensips.mi import OpenSIPSMI, OpenSIPSMIException
+    from opensips.event import OpenSIPSEventHandler, OpenSIPSEventException
+    OPENSIPS_AVAILABLE = True
 except ImportError:
-    OpenSIPS = None
-    OPENSIPS_MI_AVAILABLE = False
+    OpenSIPSMI = None
+    OpenSIPSMIException = Exception
+    OpenSIPSEventHandler = None  
+    OpenSIPSEventException = Exception
+    OPENSIPS_AVAILABLE = False
     logger.warning("OpenSIPS library not available")
 
-# Mock OpenSIPS MI class for development
+# Mock OpenSIPS classes for development
 class MockOpenSIPSMI:
     """Mock OpenSIPS MI connection for development/testing"""
     
@@ -68,6 +78,17 @@ class MockOpenSIPSMI:
         logger.info("Mock MI command", command=command, params=params)
         return {"status": "success", "message": "Mock response"}
 
+class MockOpenSIPSEventHandler:
+    """Mock OpenSIPS Event Handler"""
+    
+    def __init__(self, *args, **kwargs):
+        self.config = kwargs
+        logger.info("Mock OpenSIPS Event Handler initialized")
+    
+    def async_subscribe(self, event_name, handler):
+        logger.info("Mock event subscription", event_name=event_name, handler_type=type(handler).__name__)
+        return self
+
 # SDP parsing
 try:
     from aiortc.sdp import SessionDescription
@@ -77,85 +98,77 @@ except ImportError:
     SDP_PARSING_AVAILABLE = False
     logger.warning("SDP parsing not available")
 
-class CallManager:
-    """Call management for OpenSIPS sessions"""
+class OpenSIPSEngine:
+    """
+    OpenSIPS AI Voice Connector Engine
+    Eski engine.py mantığını koruyarak Pipecat pipeline ile entegre eder
+    """
     
-    def __init__(self, pipeline_manager, mi_conn):
+    def __init__(self, pipeline_manager):
+        """
+        Args:
+            pipeline_manager: Pipecat pipeline manager
+        """
         self.pipeline_manager = pipeline_manager
-        self.mi_conn = mi_conn
+        
+        # OpenSIPS MI configuration
+        mi_cfg = Config.get("opensips", {})
+        mi_ip = mi_cfg.get("ip", "127.0.0.1")
+        mi_port = int(mi_cfg.get("port", "8080"))
+        
+        # Initialize MI connection
+        if OPENSIPS_AVAILABLE:
+            self.mi_conn = OpenSIPSMI(conn="datagram", datagram_ip=mi_ip, datagram_port=mi_port)
+            logger.info("OpenSIPS MI connection initialized", ip=mi_ip, port=mi_port)
+        else:
+            self.mi_conn = MockOpenSIPSMI(ip=mi_ip, port=mi_port)
+            logger.warning("Using mock OpenSIPS MI connection")
+        
+        # Call manager
+        self.call_manager = CallManager(pipeline_manager, self.mi_conn)
         self.active_calls = {}
         
-    async def create_call(self, call_key: str, params: dict):
-        """Yeni call oluştur ve pipeline'a bağla"""
+        # Event handler
+        self.event_handler = None
+        self.event_subscription = None
+        
+        logger.info("OpenSIPS Engine initialized")
+
+    def mi_reply(self, key: str, method: str, code: int, reason: str, body: str = None):
+        """Send reply to OpenSIPS via MI"""
         try:
-            # Debug: param types
-            logger.debug("CallManager create_call params", 
-                        key=call_key, 
-                        params_keys=list(params.keys()),
-                        body_type=type(params.get('body', 'missing')).__name__)
-            
-            # SDP parsing - temporary bypass for debugging
-            if 'body' not in params:
-                logger.warning("No SDP body in INVITE - continuing without SDP")
-                params['body'] = ""
-                
-            sdp_str = params['body']
-            logger.info("🔍 DEBUG: SDP processing", 
-                       body_type=type(sdp_str).__name__, 
-                       body_length=len(str(sdp_str)),
-                       body_preview=str(sdp_str)[:100])
-            
-            # Force string conversion for safety
-            if isinstance(sdp_str, dict):
-                logger.error("❌ FOUND BUG: body is dict, converting to string", body_dict=sdp_str)
-                sdp_str = str(sdp_str)
-            elif not isinstance(sdp_str, str):
-                logger.error("❌ FOUND BUG: body is not string", body_type=type(sdp_str).__name__)
-                sdp_str = str(sdp_str)
-                
-            # Parse SDP for audio configuration
-            logger.info("✅ ENABLING SDP parsing")
-            sdp = self.parse_sdp(sdp_str)
-            
-            if not sdp:
-                logger.error("Failed to parse SDP", sdp_preview=sdp_str[:100])
-                return None
-            
-            # AI flavor selection
-            flavor = get_ai_flavor(params)
-            logger.info("Selected AI flavor", key=call_key, flavor=flavor)
-            
-            # Create call object (simplified for now)
-            call_info = {
-                'key': call_key,
-                'sdp': sdp,
-                'flavor': flavor,
-                'params': params,
-                'to': get_to(params),
-                'user': get_user(params)
+            params = {
+                'key': key,
+                'method': method,
+                'code': code,
+                'reason': reason
             }
+            if body:
+                params["body"] = body
             
-            # Store call
-            self.active_calls[call_key] = call_info
-            
-            # TODO: Pipeline integration
-            # await self.pipeline_manager.add_call(call_info)
-            
-            logger.info("Call created successfully", key=call_key, flavor=flavor)
-            return call_info
+            result = self.mi_conn.execute('ua_session_reply', params)
+            logger.info("MI reply sent", key=key, method=method, code=code, reason=reason)
+            return result
             
         except Exception as e:
-            logger.error("Error creating call", key=call_key, error=str(e))
+            logger.error("Error sending MI reply", key=key, method=method, error=str(e))
             return None
-    
+
     def parse_sdp(self, sdp_str: str) -> dict:
-        """SDP string'ini parse et"""
+        """Parse SDP string - eski mantık korunuyor"""
         try:
-            logger.debug("Parsing SDP", sdp_length=len(sdp_str))
-            
             if not sdp_str or not sdp_str.strip():
                 logger.warning("Empty SDP content")
                 return None
+            
+            # Clean SDP - remove rtcp lines that cause parser errors
+            clean_lines = []
+            for line in sdp_str.split('\n'):
+                line = line.strip()
+                if not line.startswith("a=rtcp:"):
+                    clean_lines.append(line)
+            
+            sdp_str = '\n'.join(clean_lines)
             
             sdp_info = {
                 'media_ip': None,
@@ -180,7 +193,7 @@ class CallManager:
                 elif line.startswith('m='):
                     # m=audio 4082 RTP/AVP 0
                     parts = line.split()
-                    if len(parts) >= 2 and parts[0] == 'audio':
+                    if len(parts) >= 2 and parts[0] == 'm=audio':
                         try:
                             sdp_info['media_port'] = int(parts[1])
                         except ValueError:
@@ -197,15 +210,237 @@ class CallManager:
                                 sdp_info['audio_format'] = f'PT_{payload_type}'
             
             logger.info("SDP parsed successfully", 
-                       media_ip=sdp_info['media_ip'], 
+                       media_ip=sdp_info['media_ip'],
                        media_port=sdp_info['media_port'],
                        audio_format=sdp_info['audio_format'])
             
             return sdp_info
             
         except Exception as e:
-            logger.error("Error parsing SDP", error=str(e), sdp_preview=sdp_str[:100])
+            logger.error("Error parsing SDP", error=str(e))
             return None
+
+    def get_header(self, params: dict, header_name: str) -> str:
+        """Extract header value from OpenSIPS parameters"""
+        if 'headers' not in params:
+            return None
+            
+        headers = params['headers']
+        if header_name in headers:
+            return headers[header_name]
+            
+        return None
+
+    def indialog(self, params: dict) -> bool:
+        """Check if request is in-dialog"""
+        if 'to' not in params:
+            return False
+        to = params['to']
+        return ';tag=' in to
+
+    async def handle_call(self, call: Call, key: str, method: str, params: dict):
+        """Handle SIP call - eski engine.py handle_call mantığı"""
+        try:
+            if method == 'INVITE':
+                if 'body' not in params:
+                    self.mi_reply(key, method, 415, 'Unsupported Media Type')
+                    return
+
+                sdp_str = params['body']
+                sdp_info = self.parse_sdp(sdp_str)
+                
+                if not sdp_info:
+                    self.mi_reply(key, method, 400, 'Bad Request')
+                    return
+
+                if call:
+                    # Handle in-dialog re-INVITE
+                    # TODO: Check SDP direction for pause/resume
+                    call.resume()
+                    try:
+                        self.mi_reply(key, method, 200, 'OK', call.get_sdp_body())
+                    except Exception as e:
+                        logger.error("Error sending re-INVITE response", error=str(e))
+                    return
+
+                try:
+                    # Create new call with Pipecat pipeline
+                    config = {'flavor': 'pipecat'}  # Default config
+                    new_call = await self.call_manager.create_call(key, sdp_info, config)
+                    
+                    if new_call:
+                        # Send 200 OK with SDP
+                        sdp_body = new_call.get_sdp_body()
+                        logger.warning("🎯 Generated SDP response", 
+                                      local_ip=sdp_info.get('connection_ip', '0.0.0.0'), 
+                                      rtp_port=new_call.serversock.getsockname()[1],
+                                      sdp_full=sdp_body)
+                        logger.warning("🎯 SENDING 200 OK WITH SDP!", 
+                                      call_id=key, 
+                                      rtp_port=new_call.serversock.getsockname()[1])
+                        self.mi_reply(key, method, 200, 'OK', sdp_body)
+                    else:
+                        # Call creation failed
+                        self.mi_reply(key, method, 500, 'Server Internal Error')
+                        
+                except NoAvailablePorts:
+                    logger.error("No available RTP ports", key=key)
+                    self.mi_reply(key, method, 503, 'Service Unavailable')
+                except Exception as e:
+                    logger.error("Error creating call", key=key, error=str(e))
+                    self.mi_reply(key, method, 500, 'Server Internal Error')
+            
+            elif method == 'NOTIFY':
+                # Handle NOTIFY messages (e.g., subscription state)
+                self.mi_reply(key, method, 200, 'OK')
+                
+                # Check for terminated subscription
+                sub_state = self.get_header(params, "Subscription-State")
+                if sub_state and "terminated" in sub_state:
+                    if call:
+                        call.terminated = True
+                        logger.info("Call marked for termination via NOTIFY", key=key)
+                        # Ensure call is actually terminated
+                        await self.call_manager.terminate_call(key)
+            
+            elif method == 'BYE':
+                # Handle BYE - terminate call
+                logger.info("BYE received, terminating call", key=key)
+                self.mi_reply(key, method, 200, 'OK')
+                if call:
+                    # Ensure call is properly terminated
+                    call.terminated = True
+                    call.stop_event.set()
+                    await self.call_manager.terminate_call(key)
+            
+            elif method == 'CANCEL':
+                # Handle CANCEL - terminate call
+                logger.info("CANCEL received, terminating call", key=key)
+                self.mi_reply(key, method, 200, 'OK')
+                if call:
+                    # Ensure call is properly terminated
+                    call.terminated = True
+                    call.stop_event.set()
+                    await self.call_manager.terminate_call(key)
+            
+            else:
+                # Unsupported method
+                if not call:
+                    self.mi_reply(key, method, 481, 'Call/Transaction Does Not Exist')
+                else:
+                    self.mi_reply(key, method, 405, 'Method Not Allowed')
+
+        except Exception as e:
+            logger.error("Error handling call", key=key, method=method, error=str(e))
+            self.mi_reply(key, method, 500, 'Server Internal Error')
+
+    def udp_handler(self, data: dict):
+        """UDP handler for OpenSIPS events"""
+        try:
+            if 'params' not in data:
+                logger.warning("Invalid event data: missing params")
+                return
+                
+            params = data['params']
+            
+            if 'key' not in params:
+                logger.warning("Invalid event data: missing key")
+                return
+                
+            key = params['key']
+            
+            if 'method' not in params:
+                logger.warning("Invalid event data: missing method")
+                return
+                
+            method = params['method']
+            
+            # Check if in-dialog
+            if self.indialog(params):
+                # Get existing call
+                call = self.call_manager.get_call(key)
+                if not call:
+                    logger.warning("Call not found for in-dialog request", key=key, method=method)
+                    self.mi_reply(key, method, 481, 'Call/Transaction Does Not Exist')
+                    return
+            else:
+                call = None
+            
+            # Log the request
+            from_header = params.get('from', 'unknown')
+            to_header = params.get('to', 'unknown')
+            logger.info(f"Processing {method} from OpenSIPS", from_addr=params.get('remote_addr'))
+            logger.info(f"INVITE details", call_id=key, from_=from_header, to=to_header)
+            
+            # Handle the call
+            asyncio.create_task(self.handle_call(call, key, method, params))
+            
+        except Exception as e:
+            logger.error("Error in UDP handler", error=str(e))
+
+    async def start_event_handler(self):
+        """Start OpenSIPS event handler"""
+        try:
+            # Get configuration
+            engine_cfg = Config.get("engine")
+            host_ip = engine_cfg.get("event_ip", "0.0.0.0")
+            port = int(engine_cfg.get("event_port", "8090"))
+            
+            # Initialize event handler
+            if OPENSIPS_AVAILABLE:
+                self.event_handler = OpenSIPSEventHandler(
+                    host=host_ip, port=port, mi_conn=self.mi_conn
+                )
+                # Subscribe to E_UA_SESSION events
+                self.event_subscription = self.event_handler.async_subscribe(
+                    "E_UA_SESSION", self.udp_handler
+                )
+                
+                # Get actual bound port
+                _, actual_port = self.event_subscription.socket.sock.getsockname()
+                logger.info("OpenSIPS event handler started", ip=host_ip, port=actual_port)
+                
+            else:
+                # Mock event handler for development
+                self.event_handler = MockOpenSIPSEventHandler()
+                logger.warning("Using mock OpenSIPS event handler", ip=host_ip, port=port)
+                
+            return True
+            
+        except Exception as e:
+            logger.error("Failed to start OpenSIPS event handler", error=str(e))
+            return False
+
+    async def shutdown(self):
+        """Shutdown OpenSIPS engine"""
+        logger.info("Shutting down OpenSIPS engine")
+        
+        # Terminate all active calls
+        await self.call_manager.shutdown()
+        
+        # Unsubscribe from events
+        if OPENSIPS_AVAILABLE and self.event_subscription:
+            try:
+                self.event_subscription.unsubscribe()
+                logger.info("Unsubscribed from OpenSIPS events")
+            except (OpenSIPSEventException, OpenSIPSMIException) as e:
+                logger.error("Error unsubscribing from events", error=str(e))
+        
+        logger.info("OpenSIPS engine shutdown complete")
+
+
+class LegacyCallManager:
+    """Legacy call manager - compatibility wrapper"""
+
+    def __init__(self, pipeline_manager, mi_conn):
+        self.pipeline_manager = pipeline_manager
+        self.mi_conn = mi_conn
+        self.active_calls = {}
+        
+    async def create_call(self, call_key: str, params: dict):
+        """Compatibility method for legacy code"""
+        # TODO: Implement if needed
+        return None
 
     async def terminate_call(self, call_key: str):
         """Call'ı sonlandır"""
@@ -235,21 +470,63 @@ class OpenSIPSEventHandler:
         self.host = host
         self.port = port
         self.socket = None
+        self.sock = None  # Direct socket reference for compatibility
         self.running = False
         self.mi_conn = mi_conn
         self.call_manager = None
         
+        # Socket wrapper for compatibility
+        class SocketWrapper:
+            def __init__(self, parent):
+                self.parent = parent
+                self.sock = None
+                
+            def getsockname(self):
+                if self.sock:
+                    return self.sock.getsockname()
+                return (self.parent.host, self.parent.port)
+        
+        self.socket = SocketWrapper(self)
+        
     def set_call_manager(self, call_manager):
         """Call manager'ı set et"""
         self.call_manager = call_manager
+    
+    def async_subscribe(self, event_name, handler):
+        """Event subscription için compatibility method"""
+        logger.info("Event subscription", event_name=event_name, handler_type=type(handler).__name__)
+        
+        # Initialize socket if not already done
+        if not self.socket.sock:
+            import socket as socket_module
+            real_socket = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_DGRAM)
+            real_socket.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_REUSEADDR, 1)
+            real_socket.bind((self.host, self.port))
+            self.socket.sock = real_socket
+            self.sock = real_socket  # Direct reference for compatibility
+            logger.info("Socket initialized for event subscription", host=self.host, port=self.port)
+        
+        # Return a mock subscription object with socket attribute
+        class MockSubscription:
+            def __init__(self, parent):
+                self.socket = parent  # parent has socket attribute
+            
+            def unsubscribe(self):
+                logger.info("Event unsubscribed")
+        
+        return MockSubscription(self)
         
     async def start(self):
         """Event handler'ı başlat"""
         try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.socket.bind((self.host, self.port))
-            self.socket.setblocking(False)
+            import socket as socket_module
+            real_socket = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_DGRAM)
+            real_socket.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_REUSEADDR, 1)
+            real_socket.bind((self.host, self.port))
+            real_socket.setblocking(False)
+            
+            # Update wrapper with real socket
+            self.socket.sock = real_socket
             self.running = True
             
             logger.info("OpenSIPS Event Handler started", host=self.host, port=self.port)
@@ -258,7 +535,7 @@ class OpenSIPSEventHandler:
             while self.running:
                 try:
                     loop = asyncio.get_event_loop()
-                    data, addr = await loop.sock_recvfrom(self.socket, 4096)
+                    data, addr = await loop.sock_recvfrom(real_socket, 4096)
                     
                     # Process OpenSIPS event
                     await self.handle_opensips_event(data.decode('utf-8'), addr)
@@ -410,6 +687,75 @@ class SIPListener:
         self.socket = None
         self.running = False
         self.call_manager = call_manager
+    
+    def _parse_sdp_body(self, sdp_str: str) -> dict:
+        """Parse SDP string - utility method"""
+        try:
+            if not sdp_str or not sdp_str.strip():
+                logger.warning("Empty SDP content")
+                return None
+            
+            # Clean SDP - remove rtcp lines that cause parser errors
+            clean_lines = []
+            for line in sdp_str.split('\n'):
+                line = line.strip()
+                if not line.startswith("a=rtcp:"):
+                    clean_lines.append(line)
+            
+            sdp_str = '\n'.join(clean_lines)
+            
+            sdp_info = {
+                'media_ip': None,
+                'media_port': None,
+                'audio_format': 'PCMU',  # Default
+                'connection_ip': None
+            }
+            
+            lines = sdp_str.strip().split('\n')
+            for line in lines:
+                line = line.strip()
+                
+                # Connection information
+                if line.startswith('c='):
+                    # c=IN IP4 192.168.88.1
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        sdp_info['connection_ip'] = parts[2]
+                        sdp_info['media_ip'] = parts[2]  # Fallback
+                
+                # Media description  
+                elif line.startswith('m='):
+                    # m=audio 4082 RTP/AVP 0
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[0] == 'm=audio':
+                        try:
+                            sdp_info['media_port'] = int(parts[1])
+                        except ValueError:
+                            logger.warning("Invalid media port", port=parts[1])
+                
+                # RTP map
+                elif line.startswith('a=rtpmap:'):
+                    # a=rtpmap:0 PCMU/8000
+                    if 'PCMU' in line:
+                        sdp_info['audio_format'] = 'PCMU'
+                    elif 'PCMA' in line:
+                        sdp_info['audio_format'] = 'PCMA'
+            
+            # Validation
+            if not sdp_info['media_ip'] or not sdp_info['media_port']:
+                logger.error("Invalid SDP - missing media information", sdp_info=sdp_info)
+                return None
+            
+            logger.info("SDP parsed successfully", 
+                       audio_format=sdp_info['audio_format'],
+                       media_ip=sdp_info['media_ip'], 
+                       media_port=sdp_info['media_port'])
+            
+            return sdp_info
+            
+        except Exception as e:
+            logger.error("Error parsing SDP", error=str(e), sdp_content=sdp_str[:200])
+            return None
         
     async def start(self):
         """SIP listener'ı başlat"""
@@ -496,22 +842,45 @@ class SIPListener:
             
             logger.info("INVITE details", call_id=call_id, from_=from_header, to=to_header)
             
+            # Parse SDP from body
+            sdp_body = body.strip()
+            if not sdp_body:
+                logger.error("No SDP body in INVITE", call_id=call_id)
+                await self.send_response(addr, call_id, '400', 'Bad Request - Missing SDP')
+                return
+            
+            logger.info("SDP body received", call_id=call_id, sdp_preview=sdp_body[:100])
+            
+            # Parse SDP using static utility method
+            sdp_info = self._parse_sdp_body(sdp_body)
+            
+            if not sdp_info:
+                logger.error("Failed to parse SDP", call_id=call_id)
+                await self.send_response(addr, call_id, '400', 'Bad Request - Invalid SDP')
+                return
+            
+            logger.info("SDP parsed successfully", call_id=call_id, sdp_info=sdp_info)
+            
             # Create call via call manager
             if self.call_manager:
-                call_params = {
-                    'method': 'INVITE',
-                    'call_id': call_id,
-                    'from': from_header,
-                    'to': to_header,
-                    'body': body.strip(),
-                    'headers': headers,
-                    'remote_addr': addr
-                }
+                logger.info("🔧 CALLING create_call method", call_id=call_id, call_manager_type=type(self.call_manager).__name__)
                 
-                await self.call_manager.create_call(call_id, call_params)
+                try:
+                    call = await self.call_manager.create_call(call_id, sdp_info)
+                    logger.info("🔧 create_call RETURNED", call_id=call_id, call_result=call, call_type=type(call).__name__ if call else "None")
+                except Exception as e:
+                    import traceback
+                    logger.error("💥 EXCEPTION in create_call CALL", call_id=call_id, error=str(e), traceback=traceback.format_exc())
+                    call = None
                 
-                # Send 200 OK response
-                await self.send_response(addr, call_id, '200', 'OK', headers)
+                if call:
+                    # Send 200 OK response with SDP
+                    response_sdp = call.get_sdp_body()
+                    await self.send_response(addr, call_id, '200', 'OK', headers, response_sdp)
+                    logger.info("Call created and 200 OK sent", call_id=call_id)
+                else:
+                    logger.error("Failed to create call", call_id=call_id)
+                    await self.send_response(addr, call_id, '500', 'Internal Server Error')
             else:
                 logger.error("No call manager available")
                 await self.send_response(addr, call_id, '500', 'Internal Server Error')
@@ -579,7 +948,7 @@ class SIPListener:
         except Exception as e:
             logger.error("Error handling ACK", error=str(e))
     
-    async def send_response(self, addr, call_id: str, code: str, reason: str, request_headers: dict = None):
+    async def send_response(self, addr, call_id: str, code: str, reason: str, request_headers: dict = None, body: str = None):
         """SIP response gönder"""
         try:
             # Build SIP response
@@ -589,12 +958,30 @@ class SIPListener:
                 # Copy required headers from request
                 for header in ['via', 'from', 'to', 'call-id', 'cseq']:
                     if header in request_headers:
-                        response += f"{header.title()}: {request_headers[header]}\r\n"
+                        if header == 'to' and code == '200':
+                            # Add tag to To header for 200 OK
+                            to_value = request_headers[header]
+                            if 'tag=' not in to_value:
+                                to_value += f";tag={call_id[:8]}"
+                            response += f"To: {to_value}\r\n"
+                        else:
+                            response += f"{header.title()}: {request_headers[header]}\r\n"
             else:
                 response += f"Call-ID: {call_id}\r\n"
             
-            response += f"Content-Length: 0\r\n"
-            response += "\r\n"
+            # Add Contact header for 200 OK
+            if code == '200':
+                response += f"Contact: <sip:oavc@{self.host}:{self.port}>\r\n"
+            
+            # Add body if provided (SDP for 200 OK)
+            if body:
+                response += f"Content-Type: application/sdp\r\n"
+                response += f"Content-Length: {len(body)}\r\n"
+                response += "\r\n"
+                response += body
+            else:
+                response += f"Content-Length: 0\r\n"
+                response += "\r\n"
             
             # Send response
             await asyncio.get_event_loop().sock_sendto(
@@ -603,7 +990,7 @@ class SIPListener:
                 addr
             )
             
-            logger.info("Sent SIP response", code=code, reason=reason, to=addr)
+            logger.info("Sent SIP response", code=code, reason=reason, to=addr, has_body=bool(body))
             
         except Exception as e:
             logger.error("Error sending SIP response", error=str(e))
@@ -631,9 +1018,14 @@ class OpenSIPSAIVoiceConnector:
         # Services
         self.services = {}
         self.pipeline_manager = None
+        
+        # OpenSIPS Engine - yeni implementasyon
+        self.opensips_engine = None
+        
+        # Legacy components (will be removed)
         self.call_manager = None
         self.opensips_handler = None
-        self.sip_listener = None  # SIP listener eklendi
+        self.sip_listener = None
         
         # Background tasks
         self._background_tasks = []
@@ -680,7 +1072,7 @@ class OpenSIPSAIVoiceConnector:
     def initialize_mi_connection(self):
         """OpenSIPS MI bağlantısını başlat"""
         try:
-            if not OPENSIPS_MI_AVAILABLE:
+            if not OPENSIPS_AVAILABLE:
                 logger.warning("OpenSIPS MI library not available, using mock")
                 self.mi_conn = MockOpenSIPSMI()
                 return
@@ -698,70 +1090,292 @@ class OpenSIPSAIVoiceConnector:
             self.mi_conn = MockOpenSIPSMI()
     
     async def initialize_services(self):
-        """AI servislerini başlat"""
+        """Initialize all AI services with comprehensive validation and error handling"""
         try:
-            logger.info("Initializing AI services...", test_mode=self.test_mode)
+            logger.info("🚀 Starting AI services initialization...", test_mode=self.test_mode)
             
             if self.test_mode:
-                logger.info("🧪 TEST MODE: Skipping AI service initialization")
+                logger.info("🧪 TEST MODE: Skipping AI service validation and initialization")
                 # Mock services for testing
                 self.services['llm'] = None
                 self.services['stt'] = None
                 self.services['tts'] = None
                 
-                # Mock Pipeline Manager
-                self.pipeline_manager = None
-                logger.info("Mock services initialized for testing")
+                # Create minimal Pipeline Manager for test mode
+                logger.info("Creating minimal pipeline manager for test mode...")
+                self.pipeline_manager = PipelineManager(
+                    llm_service=None,
+                    stt_service=None, 
+                    tts_service=None,
+                    config={"max_pipeline_errors": 5}  # Reduced for test mode
+                )
+                logger.info("Mock pipeline manager created for testing")
                 
-                # Initialize Call Manager with mock pipeline
-                self.call_manager = CallManager(None, self.mi_conn)
-                logger.info("Call manager initialized (test mode)")
+                # Initialize OpenSIPS Engine (test mode)
+                logger.info("Initializing OpenSIPS Engine...")
+                self.opensips_engine = OpenSIPSEngine(self.pipeline_manager)
+                logger.info("OpenSIPS Engine initialized successfully")
+                
+                # Initialize OpenSIPS Event Listener (test mode)
+                logger.info("🔔 Initializing OpenSIPS Event Listener...")
+                event_port = int(self.config.get('engine', 'event_port', fallback='8090'))
+                self.opensips_event_listener = OpenSIPSEventListener(port=event_port)
+                
+                # Initialize OpenSIPS MI Client (test mode)
+                opensips_ip = self.config.get('opensips', 'ip', fallback='172.20.0.6')
+                opensips_port = int(self.config.get('opensips', 'port', fallback='8087'))
+                self.opensips_mi_client = OpenSIPSMIClient(host=opensips_ip, port=opensips_port)
+                
+                logger.info("✅ OpenSIPS Event integration initialized",
+                           event_port=event_port,
+                           mi_host=opensips_ip,
+                           mi_port=opensips_port)
+                                                
+                # Initialize Call Manager  
+                self.call_manager = CallManager(self.pipeline_manager, self.mi_conn)
+                logger.info("Call manager initialized successfully")
                 return
             
-            # Normal mode - Real AI services
+            # Normal mode - Validate configuration first
+            try:
+                # First validate service configurations using Config class
+                validation_results = await Config.validate_services_config()
+                logger.info("✅ Service configuration validation completed", 
+                           results=validation_results)
+            except ConfigValidationError as e:
+                logger.error("❌ Service configuration validation failed", error=str(e))
+                raise
+            except Exception as e:
+                logger.warning("⚠️ Service configuration validation skipped (missing dependencies)", error=str(e))
+                # Continue without validation if optional dependencies are missing
+            
+            # Initialize services with enhanced error handling
+            services_to_initialize = []
+            failed_services = []
+            
             # LLM Service
-            llm_url = self.config.get('llm', 'url', fallback='ws://127.0.0.1:8765')
-            logger.info("Creating LLM service", url=llm_url)
-            self.services['llm'] = LlamaWebsocketLLMService(url=llm_url)
+            try:
+                llm_url = self.config.get('llm', 'url', fallback='ws://127.0.0.1:8765')
+                if not llm_url:
+                    raise ConfigValidationError("LLM service URL is required")
+                
+                logger.info("📡 Creating LLM service", url=llm_url)
+                self.services['llm'] = LlamaWebsocketLLMService(url=llm_url)
+                services_to_initialize.append(("LLM", self.services['llm']))
+                logger.info("✅ LLM service created successfully")
+                
+            except Exception as e:
+                logger.error("❌ Failed to create LLM service", error=str(e))
+                failed_services.append("LLM")
+                self.services['llm'] = None
             
             # STT Service  
-            stt_url = self.config.get('stt', 'url', fallback='ws://127.0.0.1:2700')
-            logger.info("Creating STT service", url=stt_url)
-            self.services['stt'] = VoskWebsocketSTTService(url=stt_url)
+            try:
+                stt_url = self.config.get('stt', 'url', fallback='ws://127.0.0.1:2700')
+                if not stt_url:
+                    raise ConfigValidationError("STT service URL is required")
+                
+                logger.info("📡 Creating STT service", url=stt_url)
+                self.services['stt'] = VoskWebsocketSTTService(url=stt_url)
+                services_to_initialize.append(("STT", self.services['stt']))
+                logger.info("✅ STT service created successfully")
+                
+            except Exception as e:
+                logger.error("❌ Failed to create STT service", error=str(e))
+                failed_services.append("STT")
+                self.services['stt'] = None
             
             # TTS Service
-            tts_url = self.config.get('tts', 'url', fallback='ws://127.0.0.1:8000/tts')
-            logger.info("Creating TTS service", url=tts_url)
-            self.services['tts'] = PiperWebsocketTTSService(url=tts_url)
+            try:
+                tts_url = self.config.get('tts', 'url', fallback='ws://127.0.0.1:8000/tts')
+                if not tts_url:
+                    raise ConfigValidationError("TTS service URL is required")
+                
+                logger.info("📡 Creating TTS service", url=tts_url)
+                self.services['tts'] = PiperWebsocketTTSService(url=tts_url)
+                services_to_initialize.append(("TTS", self.services['tts']))
+                logger.info("✅ TTS service created successfully")
+                
+            except Exception as e:
+                logger.error("❌ Failed to create TTS service", error=str(e))
+                failed_services.append("TTS")
+                self.services['tts'] = None
             
-            # Start all services
-            for service_name, service in self.services.items():
-                logger.info(f"Starting {service_name} service...")
+            # Check if any critical services failed during creation
+            if failed_services:
+                error_msg = f"Critical services failed to initialize: {', '.join(failed_services)}"
+                logger.critical("🚨 " + error_msg)
+                raise ConfigValidationError(error_msg)
+            
+            # Start all services with timeout and retry logic
+            startup_timeout = 10.0  # 10 seconds timeout per service
+            for service_name, service in services_to_initialize:
+                logger.info(f"🚀 Starting {service_name} service...")
                 try:
-                    await service.start()
-                    logger.info(f"{service_name} service started successfully")
+                    # Start service with timeout
+                    await asyncio.wait_for(service.start(), timeout=startup_timeout)
+                    logger.info(f"✅ {service_name} service started successfully")
+                    
+                except asyncio.TimeoutError:
+                    logger.error(f"⏰ {service_name} service startup timeout ({startup_timeout}s)")
+                    failed_services.append(service_name)
+                    
                 except Exception as e:
-                    logger.error(f"Failed to start {service_name} service", error=str(e))
-                    raise
+                    logger.error(f"❌ Failed to start {service_name} service", error=str(e))
+                    failed_services.append(service_name)
             
-            # Initialize Pipeline Manager
-            logger.info("Initializing Pipeline Manager...")
+            # Check if any services failed to start
+            if failed_services:
+                # Cleanup started services
+                await self._cleanup_services()
+                error_msg = f"Services failed to start: {', '.join(failed_services)}"
+                logger.critical("🚨 " + error_msg)
+                raise ConfigValidationError(error_msg)
+            
+            # Create enhanced pipeline configuration
+            pipeline_config = {
+                "max_pipeline_errors": int(self.config.get('pipeline', 'max_errors', fallback='10')),
+                "error_reset_interval": int(self.config.get('pipeline', 'error_reset_interval', fallback='300')),
+                "max_threads": int(self.config.get('pipeline', 'max_threads', fallback='4')),
+                "interruption": {
+                    "min_words": int(self.config.get('interruption', 'min_words', fallback='2')),
+                    "volume_threshold": float(self.config.get('interruption', 'volume_threshold', fallback='0.6')),
+                    "min_duration_ms": int(self.config.get('interruption', 'min_duration_ms', fallback='300'))
+                }
+            }
+            
+            # Initialize Enhanced Pipeline Manager
+            logger.info("🔧 Initializing Enhanced Pipeline Manager...")
             self.pipeline_manager = PipelineManager(
                 llm_service=self.services['llm'],
                 stt_service=self.services['stt'], 
-                tts_service=self.services['tts']
+                tts_service=self.services['tts'],
+                config=pipeline_config
             )
             
-            await self.pipeline_manager.start()
-            logger.info("Pipeline manager started successfully")
+            # Start pipeline with timeout
+            pipeline_start_timeout = 15.0  # 15 seconds for pipeline startup
+            try:
+                await asyncio.wait_for(self.pipeline_manager.start(), timeout=pipeline_start_timeout)
+                logger.info("✅ Enhanced Pipeline Manager started successfully")
+                
+                # Log pipeline statistics
+                stats = self.pipeline_manager.get_pipeline_stats()
+                logger.info("📊 Pipeline statistics", stats=stats)
+                
+            except asyncio.TimeoutError:
+                logger.error(f"⏰ Pipeline manager startup timeout ({pipeline_start_timeout}s)")
+                raise ConfigValidationError("Pipeline manager startup timeout")
+            except Exception as e:
+                logger.error("❌ Failed to start Pipeline Manager", error=str(e))
+                raise ConfigValidationError(f"Pipeline manager startup failed: {str(e)}")
             
-            # Initialize Call Manager
-            self.call_manager = CallManager(self.pipeline_manager, self.mi_conn)
-            logger.info("Call manager initialized")
+            # Initialize OpenSIPS Engine (yeni implementasyon)
+            logger.info("🔌 Initializing OpenSIPS Engine...")
+            try:
+                self.opensips_engine = OpenSIPSEngine(self.pipeline_manager)
+                logger.info("✅ OpenSIPS Engine initialized successfully")
+            except Exception as e:
+                logger.error("❌ OpenSIPS Engine initialization failed", error=str(e))
+                raise ConfigValidationError(f"OpenSIPS Engine initialization failed: {str(e)}")
+            
+            # Initialize OpenSIPS Event Listener (normal mode)
+            logger.info("🔔 Initializing OpenSIPS Event Listener...")
+            try:
+                event_port = int(self.config.get('engine', 'event_port', fallback='8090'))
+                self.opensips_event_listener = OpenSIPSEventListener(port=event_port)
+                
+                # Initialize OpenSIPS MI Client  
+                opensips_ip = self.config.get('opensips', 'ip', fallback='172.20.0.6')
+                opensips_port = int(self.config.get('opensips', 'port', fallback='8087'))
+                self.opensips_mi_client = OpenSIPSMIClient(host=opensips_ip, port=opensips_port)
+                
+                logger.info("✅ OpenSIPS Event integration initialized",
+                           event_port=event_port,
+                           mi_host=opensips_ip,
+                           mi_port=opensips_port)
+            except Exception as e:
+                logger.error("❌ OpenSIPS Event integration failed", error=str(e))
+                raise ConfigValidationError(f"OpenSIPS Event integration failed: {str(e)}")
+            
+            # Initialize Call Manager (compatibility)
+            logger.info("🔧 Initializing Call Manager...")
+            try:
+                self.call_manager = CallManager(self.pipeline_manager, self.mi_conn)
+                logger.info("✅ Call manager initialized successfully")
+            except Exception as e:
+                logger.error("❌ Call Manager initialization failed", error=str(e))
+                raise ConfigValidationError(f"Call Manager initialization failed: {str(e)}")
+            
+            # Final success message
+            logger.info("🎉 All AI services initialized successfully!")
+            logger.info("📋 Service summary:")
+            logger.info(f"   ✅ LLM Service: {self.services['llm'].__class__.__name__}")
+            logger.info(f"   ✅ STT Service: {self.services['stt'].__class__.__name__}")
+            logger.info(f"   ✅ TTS Service: {self.services['tts'].__class__.__name__}")
+            logger.info(f"   ✅ Pipeline Config: {pipeline_config}")
             
         except Exception as e:
-            logger.error("Failed to initialize services", error=str(e))
+            logger.error("💥 Failed to initialize services", error=str(e))
+            # Cleanup on failure
+            await self._cleanup_services()
             raise
+    
+    async def _cleanup_services(self):
+        """Cleanup partially initialized services with proper error handling"""
+        try:
+            logger.info("🧹 Starting service cleanup...")
+            cleanup_tasks = []
+            
+            # Add cleanup tasks for each service
+            for service_name in ['llm', 'stt', 'tts']:
+                service = self.services.get(service_name)
+                if service and hasattr(service, 'stop'):
+                    cleanup_tasks.append(self._safe_service_stop(service_name, service))
+            
+            # Pipeline manager cleanup
+            if hasattr(self, 'pipeline_manager') and self.pipeline_manager:
+                cleanup_tasks.append(self._safe_pipeline_stop())
+            
+            # Execute all cleanup tasks with timeout
+            if cleanup_tasks:
+                cleanup_results = await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+                
+                # Log cleanup results
+                for i, result in enumerate(cleanup_results):
+                    if isinstance(result, Exception):
+                        logger.warning(f"⚠️ Cleanup task {i} failed", error=str(result))
+                    else:
+                        logger.debug(f"✅ Cleanup task {i} completed")
+                
+                logger.info("🧹 Service cleanup completed")
+            else:
+                logger.info("🧹 No services to cleanup")
+                
+        except Exception as e:
+            logger.error("❌ Error during service cleanup", error=str(e))
+    
+    async def _safe_service_stop(self, service_name: str, service):
+        """Safely stop a service with timeout and error handling"""
+        try:
+            stop_timeout = 5.0  # 5 seconds timeout
+            await asyncio.wait_for(service.stop(), timeout=stop_timeout)
+            logger.info(f"✅ {service_name} service stopped cleanly")
+        except asyncio.TimeoutError:
+            logger.warning(f"⏰ {service_name} service stop timeout ({stop_timeout}s)")
+        except Exception as e:
+            logger.error(f"❌ Error stopping {service_name} service", error=str(e))
+    
+    async def _safe_pipeline_stop(self):
+        """Safely stop the pipeline manager"""
+        try:
+            stop_timeout = 10.0  # 10 seconds timeout for pipeline
+            await asyncio.wait_for(self.pipeline_manager.stop(), timeout=stop_timeout)
+            logger.info("✅ Pipeline manager stopped cleanly")
+        except asyncio.TimeoutError:
+            logger.warning(f"⏰ Pipeline manager stop timeout ({stop_timeout}s)")
+        except Exception as e:
+            logger.error("❌ Error stopping pipeline manager", error=str(e))
     
     async def start_opensips_handler(self):
         """OpenSIPS event handler'ı initialize et (infinite loop başlatmadan)"""
@@ -829,110 +1443,104 @@ class OpenSIPSAIVoiceConnector:
             raise
     
     async def start(self):
-        """Ana servisi başlat"""
+        """Ana servisi başlat - Yeni OpenSIPSEngine ile"""
         try:
             self.running = True
             
-            # Load configuration
+            # 1. Load configuration
+            logger.info("📄 Loading configuration...")
             self.load_config()
             
-            # Initialize MI connection
+            # 2. Initialize MI connection
+            logger.info("🔗 Initializing MI connection...")
             self.initialize_mi_connection()
             
-            # Initialize AI services
+            # 3. Initialize AI services
+            logger.info("🤖 Initializing AI services...")
             await self.initialize_services()
             
-            logger.info("🎉 OpenSIPS AI Voice Connector started successfully!")
+            logger.info("🎉 OpenSIPS AI Voice Connector initialized successfully!")
             logger.info("🎯 Services ready:")
             logger.info("   ✅ LLM (Custom LLaMA WebSocket)")
             logger.info("   ✅ STT (Vosk WebSocket)")
             logger.info("   ✅ TTS (Piper WebSocket)")
             logger.info("   ✅ Pipeline Manager")
-            logger.info("   ✅ Call Manager")
-            logger.info("   ✅ OpenSIPS Event Handler")
-            logger.info("   ✅ SIP Listener (Port 8089)")  # SIP listener eklendi
-            if self.mi_conn:
-                logger.info("   ✅ OpenSIPS MI Connection")
-            else:
-                logger.info("   ⚠️ OpenSIPS MI Connection (Mock)")
+            logger.info("   ✅ OpenSIPS Engine (NEW)")
             
-            # Start services concurrently
-            logger.info("🔍 DEBUG: test_mode = " + str(self.test_mode))
-            if self.test_mode:
-                # Test mode - just initialize but don't start listeners
-                await self.start_opensips_handler()
-                await self.start_sip_listener()
-                logger.info("🧪 TEST MODE: Both handlers initialized but not actively listening")
-            else:
-                # Normal mode - start both listeners as background tasks
-                logger.info("🚀 NORMAL MODE: Starting listeners as background tasks...")
+            # 4. Start OpenSIPS Engine (Event Handler)
+            if self.opensips_engine:
+                logger.info("🚀 Starting OpenSIPS Engine...")
                 try:
-                    # Initialize both handlers first
-                    logger.info("🔧 Initializing OpenSIPS Event Handler...")
-                    await self.start_opensips_handler()
-                    logger.info("✅ OpenSIPS Event Handler initialized successfully")
-                    
-                    logger.info("🔧 Initializing SIP Listener...")
-                    await self.start_sip_listener()
-                    logger.info("✅ SIP Listener initialized successfully")
-                    
-                    # Now start background loops
-                    logger.info("📡 Creating OpenSIPS Event Handler background task...")
-                    opensips_task = asyncio.create_task(self.run_opensips_handler_loop())
-                    
-                    logger.info("📞 Creating SIP Listener background task...")  
-                    sip_task = asyncio.create_task(self.run_sip_listener_loop())
-                    
-                    # Store tasks for cleanup
-                    self._background_tasks = [opensips_task, sip_task]
-                    logger.info("✅ Both background tasks created and stored")
-                    
-                    # Wait for initialization
-                    logger.info("⏳ Waiting for listeners to initialize...")
-                    await asyncio.sleep(1.0)
-                    
-                    # Check task status in detail
-                    logger.info("🔍 Checking task statuses...")
-                    logger.info(f"   📡 OpenSIPS task done: {opensips_task.done()}")
-                    logger.info(f"   📞 SIP task done: {sip_task.done()}")
-                    
-                    # Check for exceptions
-                    if opensips_task.done() and opensips_task.exception():
-                        logger.error("❌ OpenSIPS handler failed", error=str(opensips_task.exception()))
-                    if sip_task.done() and sip_task.exception():
-                        logger.error("❌ SIP listener failed", error=str(sip_task.exception()))
-                    
-                    # Both tasks should be running (not done) for infinite loops
-                    opensips_running = not opensips_task.done()
-                    sip_running = not sip_task.done()
-                    
-                    logger.info(f"📊 Task status: OpenSIPS={opensips_running}, SIP={sip_running}")
-                    
-                    if opensips_running and sip_running:
-                        logger.info("✅ Both listeners started as background tasks")
-                        logger.info("🔥 READY: OpenSIPS AI Voice Connector is now listening for calls!")
-                        logger.info("   📞 SIP Listener: 0.0.0.0:8089") 
-                        logger.info("   📡 Event Handler: 0.0.0.0:8090")
-                    else:
-                        logger.error("❌ One or both listeners failed to start properly")
-                        raise Exception("One or more listeners failed to start")
-                        
+                    await self.opensips_engine.start_event_handler()
+                    logger.info("✅ OpenSIPS Engine started successfully!")
                 except Exception as e:
-                    logger.error("💥 Critical error starting listeners", error=str(e))
+                    logger.error("❌ Failed to start OpenSIPS Engine", error=str(e), exc_info=True)
                     raise
+            else:
+                logger.error("❌ OpenSIPS Engine not initialized!")
+                raise Exception("OpenSIPS Engine initialization failed")
+            
+            # 5. Initialize OpenSIPS Event Handler (Critical - This was missing!)
+            logger.info("🎯 Starting OpenSIPS Event Handler on port 8090...")
+            try:
+                await self.start_opensips_handler()
+                logger.info("✅ OpenSIPS Event Handler initialized successfully!")
+            except Exception as e:
+                logger.error("❌ Failed to initialize OpenSIPS Event Handler", error=str(e), exc_info=True)
+                raise
+            
+            # 6. Initialize SIP Listener (Critical - This was missing!)
+            logger.info("🎯 Starting SIP Listener on port 8089...")
+            try:
+                await self.start_sip_listener()
+                logger.info("✅ SIP Listener initialized successfully!")
+            except Exception as e:
+                logger.error("❌ Failed to initialize SIP Listener", error=str(e), exc_info=True)
+                raise
+            
+            # 7. Start both listeners in parallel
+            opensips_task = asyncio.create_task(self.run_opensips_handler_loop())
+            sip_task = asyncio.create_task(self.run_sip_listener_loop()) 
+            
+            logger.info("🔥 OpenSIPS AI Voice Connector is ready for calls!")
+            logger.info("   📡 OpenSIPS Event Handler: 0.0.0.0:8090")
+            logger.info("   📞 SIP Listener: 0.0.0.0:8089")
+            
+            # Wait for both tasks to complete (or until shutdown)
+            try:
+                await asyncio.gather(opensips_task, sip_task)
+            except asyncio.CancelledError:
+                logger.info("Application shutdown requested")
+            finally:
+                # Cancel remaining tasks
+                for task in [opensips_task, sip_task]:
+                    if not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
             
         except Exception as e:
-            logger.error("⚠️ EXCEPTION in start() method", error=str(e))
+            logger.error("⚠️ Critical error during startup", error=str(e))
             logger.error("Exception details", exc_info=True)
             await self.stop()
             raise
     
     async def stop(self):
-        """Servisi durdur"""
+        """Servisi durdur - Yeni OpenSIPSEngine ile"""
         logger.info("Stopping OpenSIPS AI Voice Connector...")
         self.running = False
         
-        # Cancel background tasks
+        # Stop OpenSIPS Engine (yeni implementasyon)
+        if self.opensips_engine:
+            try:
+                await self.opensips_engine.shutdown()
+                logger.info("OpenSIPS Engine stopped")
+            except Exception as e:
+                logger.error("Error stopping OpenSIPS Engine", error=str(e))
+        
+        # Cancel background tasks (legacy)
         for task in self._background_tasks:
             if not task.done():
                 task.cancel()
@@ -941,14 +1549,12 @@ class OpenSIPSAIVoiceConnector:
                 except asyncio.CancelledError:
                     pass
         self._background_tasks.clear()
-        logger.info("Background tasks cancelled")
         
-        # Stop SIP listener
+        # Stop legacy components
         if self.sip_listener:
             await self.sip_listener.stop()
             logger.info("SIP listener stopped")
         
-        # Stop OpenSIPS handler
         if self.opensips_handler:
             await self.opensips_handler.stop()
             logger.info("OpenSIPS event handler stopped")

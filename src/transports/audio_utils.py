@@ -8,8 +8,17 @@ import logging
 from typing import Tuple, Union
 
 import numpy as np
-import g711
 import struct
+
+# Simple μ-law codec implementation 
+# Constants for μ-law conversion
+BIAS = 0x84
+CLIP = 32635
+SIGN_BIT = 0x80
+QUANT_MASK = 0xf
+NSEGS = 8
+SEG_SHIFT = 4
+SEG_MASK = 0x70
 
 logger = logging.getLogger(__name__)
 
@@ -133,61 +142,150 @@ def pcmu_to_pcm16k(pcmu_bytes: bytes) -> bytes:
         PCM 16kHz 16-bit bytes
     """
     if not pcmu_bytes:
-        logger.debug("Empty PCMU input")
         return b''
     
     try:
-        logger.debug(f"Converting PCMU: {len(pcmu_bytes)} bytes")
-        
         # PCMU → PCM 16-bit (8kHz)
         pcm_8k = pcmu_to_pcm16(pcmu_bytes)
         
         if not pcm_8k:
-            logger.warning("PCMU to PCM16 conversion returned empty")
             return b''
-        
-        logger.debug(f"PCM 8kHz: {len(pcm_8k)} bytes")
         
         # 8kHz → 16kHz resample
         pcm_16k = resample_pcm(pcm_8k, 8000, 16000)
-        
-        if not pcm_16k:
-            logger.warning("PCM resampling returned empty")
-            return b''
-        
-        logger.debug(f"PCM 16kHz: {len(pcm_16k)} bytes")
         
         return pcm_16k
         
     except Exception as e:
         logger.error("PCMU to PCM16k conversion error", error=str(e))
-        # Detaylı hata bilgisi
-        import traceback
-        logger.debug("Conversion error traceback", traceback=traceback.format_exc())
+        return b''
+
+# μ-law encoding function - direct implementation for better performance
+def linear_to_ulaw(sample: int) -> int:
+    """
+    Convert linear PCM sample to μ-law
+    
+    Args:
+        sample: 16-bit signed PCM sample
+        
+    Returns:
+        8-bit μ-law sample
+    """
+    # Get the sign and absolute value
+    sign = 0
+    if sample < 0:
+        sign = 0x80
+        sample = -sample
+    
+    # Clip to avoid overflow
+    if sample > CLIP:
+        sample = CLIP
+    
+    # Add bias
+    sample = sample + BIAS
+    
+    # Find segment
+    seg = 8
+    for i in range(8):
+        if sample <= (0xFF << i):
+            seg = i
+            break
+    
+    if seg >= 8:
+        return sign | 0x7F
+    
+    # Quantization
+    result = sign | ((seg << 4) | ((sample >> (seg + 3)) & 0x0F))
+    
+    # Invert bits for μ-law
+    return ~result & 0xFF
+
+def pcm16_to_pcmu(pcm_bytes: bytes) -> bytes:
+    """
+    PCM 16-bit signed formatını PCMU (μ-law) formatına çevir
+    
+    Args:
+        pcm_bytes: PCM 16-bit signed bytes
+        
+    Returns:
+        PCMU encoded bytes (8-bit μ-law)
+    """
+    if not pcm_bytes:
+        return b''
+    
+    try:
+        # Bytes'ı 16-bit signed array'e çevir
+        pcm_array = np.frombuffer(pcm_bytes, dtype=np.int16)
+        
+        if len(pcm_array) == 0:
+            return b''
+        
+        # Convert each sample to μ-law
+        ulaw_array = np.zeros(len(pcm_array), dtype=np.uint8)
+        for i in range(len(pcm_array)):
+            ulaw_array[i] = linear_to_ulaw(int(pcm_array[i]))
+        
+        return ulaw_array.tobytes()
+        
+    except Exception as e:
+        logger.error(f"PCM16 to PCMU conversion error: {e}")
+        return b''
+
+def pcm16k_to_pcmu(pcm_bytes: bytes) -> bytes:
+    """
+    PCM (16kHz, 16-bit signed) → PCMU (8kHz, 8-bit μ-law)
+    
+    Args:
+        pcm_bytes: PCM 16kHz 16-bit bytes
+        
+    Returns:
+        PCMU encoded bytes (8-bit μ-law)
+    """
+    if not pcm_bytes:
+        return b''
+    
+    try:
+        # 16kHz → 8kHz resample
+        pcm_8k = resample_pcm(pcm_bytes, 16000, 8000)
+        
+        if not pcm_8k:
+            return b''
+        
+        # PCM 16-bit → PCMU
+        pcmu = pcm16_to_pcmu(pcm_8k)
+        
+        return pcmu
+        
+    except Exception as e:
+        logger.error("PCM16k to PCMU conversion error", error=str(e))
         return b''
 
 def validate_pcm_format(pcm_bytes: bytes, expected_sample_rate: int = 16000) -> bool:
     """
-    PCM formatını validate et
+    Validate PCM audio format
     
     Args:
         pcm_bytes: PCM bytes
-        expected_sample_rate: Beklenen sample rate
+        expected_sample_rate: Expected sample rate
         
     Returns:
-        True if valid
+        True if valid, False otherwise
     """
     if not pcm_bytes:
         return False
     
-    # 16-bit PCM olmalı (çift sayı byte)
+    # Check length is multiple of 2 (16-bit samples)
     if len(pcm_bytes) % 2 != 0:
-        logger.warning(f"Invalid PCM format: odd byte count {len(pcm_bytes)}")
         return False
     
-    # Minimum length check
-    if len(pcm_bytes) < 32:  # En az 1ms @ 16kHz
-        logger.warning(f"PCM data too short: {len(pcm_bytes)} bytes")
+    # Check minimum size (at least 10ms of audio)
+    min_samples = expected_sample_rate // 100
+    if len(pcm_bytes) < min_samples * 2:
         return False
+    
+    # Check for extreme values that might indicate format issues
+    pcm_array = np.frombuffer(pcm_bytes, dtype=np.int16)
+    if np.max(np.abs(pcm_array)) == 0:
+        return False  # Silent audio
     
     return True 

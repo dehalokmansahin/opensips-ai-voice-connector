@@ -7,7 +7,8 @@ alwaysApply: true
 
 ## 📋 Proje Dokümanları
 [PRD.MD](mdc:.cursor/rules/PRD.MD)
-
+[event and mi datagram.md](mdc:.cursor/rules/event and mi datagram.md)
+[example_opensips.md](mdc:.cursor/rules/example_opensips.md)
 ## 🏗️ Proje Mimarisi
 
 Bu proje, **Pipecat** tabanlı gerçek zamanlı ses işleme pipeline'ı ile çalışan bir IVR sanal asistan sistemidir.
@@ -148,6 +149,9 @@ docs(readme): update installation guide
 test(vad): add unit tests for segmentation
 refactor(llm): improve error handling
 ```
+
+B2b Modülünü kullanmak gerekirse @b2b_entities usage.md bilgileri referans alınabilir
+
 
 ## 🤝 Code Review Checklist
 

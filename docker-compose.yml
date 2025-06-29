@@ -1,26 +1,49 @@
-version: '3.8'
-
 services:
   # OpenSIPS AI Voice Connector (OAVC - Ana uygulama)
   opensips-ai-voice-connector:
     build: .
     container_name: opensips-ai-voice-connector
+    command: ["oavc"]
     ports:
-      - "8088:8088/tcp"
-      - "8089:8089/tcp"
-      - "35000-35003:35000-35003/udp"
-      - "35010:35010/udp"
-      - "35011:35011/udp"
+      # SIP Interface ports
+      - "${OAVC_SIP_PORT:-8089}:8089/udp"
+      - "${OAVC_SIP_PORT:-8089}:8089/tcp"
+      # RTP ports for media
+      - "${RTP_PORT_MIN:-35000}-${RTP_PORT_MAX:-35003}:35000-35003/udp"
+      # Additional RTP ports 
+      - "${RTP_EXTRA_PORT_1:-35010}:35010/udp"
+      - "${RTP_EXTRA_PORT_2:-35011}:35011/udp"
     volumes:
-      - ./cfg/opensips-ai-voice-connector.ini:/app/cfg/opensips-ai-voice-connector.ini
+      - ./cfg/opensips-ai-voice-connector-docker.ini:/app/cfg/opensips-ai-voice-connector.ini
+      - ./cfg/opensips.cfg:/app/cfg/opensips.cfg
       - ./test_audio:/app/test_audio
+      # Log directory
+      - ./logs:/app/logs
     environment:
       - CONFIG_FILE=/app/cfg/opensips-ai-voice-connector.ini
       - PYTHONPATH=/app
-      - VOSK_SERVER_URL=ws://vosk-server:2700
-      - PIPER_TTS_URL=ws://piper-tts-server:8000/tts
-      - LLAMA_SERVER_URL=ws://llm-turkish-server:8765
-      - TEST_MODE=false
+      
+      # Service URLs - using Docker service names (dynamic)
+      - VOSK_SERVER_URL=ws://vosk-server:${VOSK_PORT:-2700}
+      - PIPER_TTS_URL=ws://piper-tts-server:${PIPER_PORT:-8000}/tts
+      - LLAMA_SERVER_URL=ws://llm-turkish-server:${LLM_PORT:-8765}
+      
+      # OpenSIPS Integration
+      - OPENSIPS_HOST=opensips
+      - OPENSIPS_MI_PORT=${OPENSIPS_MI_PORT:-8087}
+      - OPENSIPS_EVENT_PORT=${OPENSIPS_EVENT_PORT:-8090}
+      - OPENSIPS_SIP_PORT=${OPENSIPS_SIP_PORT:-5060}
+      
+      # Runtime configuration
+      - TEST_MODE=${TEST_MODE:-false}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DEBUG_MODE=${DEBUG_MODE:-false}
+      
+      # Pipeline configuration
+      - PIPELINE_MAX_ERRORS=${PIPELINE_MAX_ERRORS:-10}
+      - PIPELINE_TIMEOUT=${PIPELINE_TIMEOUT:-30}
+      - INTERRUPTION_ENABLED=${INTERRUPTION_ENABLED:-true}
+      
     networks:
       - opensips_network
     depends_on:
@@ -29,65 +52,125 @@ services:
       - piper-tts-server
       - llm-turkish-server
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.connect(('localhost', 8089)); s.close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
-  # OpenSIPS SIP Proxy
+  # OpenSIPS SIP Proxy - Using dynamic configuration
   opensips:
-    image: opensips/opensips:3.6
+    image: opensips/opensips:3.6  # Orijinal OpenSIPS image'ı kullan
     container_name: opensips
     ports:
-      - "5060:5060/udp"
-      - "5060:5060/tcp"
-      - "8080:8080/udp"
+      # Main SIP ports
+      - "${OPENSIPS_SIP_PORT:-5060}:5060/udp"
+      - "${OPENSIPS_SIP_PORT:-5060}:5060/tcp"
+      # Secondary SIP port
+      - "${OPENSIPS_SIP_SECONDARY_PORT:-8080}:8080/udp"
+      # MI Datagram interface (Management Interface)
+      - "${OPENSIPS_MI_PORT:-8087}:8087/udp" 
+      # Event Datagram interface (Event notifications) 
+      - "${OPENSIPS_EVENT_PORT:-8090}:8090/udp"
     volumes:
+      # OpenSIPS config - statik mount (template processing şimdilik devre dışı)
       - ./cfg/opensips.cfg:/etc/opensips/opensips.cfg
+      # OpenSIPS logs
+      - ./logs/opensips:/var/log/opensips
+    environment:
+      # OpenSIPS configuration
+      - OPENSIPS_MI_PORT=${OPENSIPS_MI_PORT:-8087}
+      - OPENSIPS_EVENT_PORT=${OPENSIPS_EVENT_PORT:-8090}
+      - OPENSIPS_SIP_SECONDARY_PORT=${OPENSIPS_SIP_SECONDARY_PORT:-8080}
+      - OAVC_HOST=opensips-ai-voice-connector
+      - OAVC_SIP_PORT=${OAVC_SIP_PORT:-8089}
+      
+      # Logging
+      - OPENSIPS_LOG_LEVEL=${OPENSIPS_LOG_LEVEL:-3}
+      - OPENSIPS_LOG_FACILITY=${OPENSIPS_LOG_FACILITY:-local0}
+      
     networks:
       - opensips_network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8087", "||", "exit", "1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # Vosk STT Server
   vosk-server:
     image: dehalokmansahin/vosk-server:latest
     container_name: vosk-server
     ports:
-      - "2700:2700"
+      - "${VOSK_PORT:-2700}:2700"
     environment:
       - MODEL_PATH=/opt/vosk-model
-      - SAMPLE_RATE=16000
+      - SAMPLE_RATE=${VOSK_SAMPLE_RATE:-16000}
+      - WEBSOCKET_PORT=${VOSK_PORT:-2700}
+      - LOG_LEVEL=${VOSK_LOG_LEVEL:-INFO}
+    volumes:
+      # Model cache for faster startup
+      - vosk_models:/opt/vosk-model
+      - ./logs/vosk:/var/log/vosk
     networks:
       - opensips_network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:2700/health", "||", "exit", "1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
 
   # Piper TTS Server
   piper-tts-server:
-    image: piper-tts-server:py311
+    image: piper-tts-server:latest
     container_name: piper-tts-server
     ports:
-      - "8000:8000"
-      - "8001:8001"
+      - "${PIPER_PORT:-8000}:8000"
+      - "${PIPER_HTTP_PORT:-8001}:8001"
     environment:
       - MODEL_PATH=/app/models
-      - VOICE_MODEL=tr_TR-dfki-medium
+      - VOICE_MODEL=${PIPER_VOICE_MODEL:-tr_TR-dfki-medium}
+      - SAMPLE_RATE=${PIPER_SAMPLE_RATE:-22050}
+      - TTS_PORT=${PIPER_PORT:-8000}
+      - HTTP_PORT=${PIPER_HTTP_PORT:-8001}
+      - LOG_LEVEL=${PIPER_LOG_LEVEL:-INFO}
     volumes:
       - piper_models:/app/models
+      - piper_cache:/app/cache
+      - ./logs/piper:/var/log/piper
     networks:
       - opensips_network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health", "||", "exit", "1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # LLM Turkish Server (Llama3.2 Turkish Model)
   llm-turkish-server:
     image: dehalokmansahin/llm-turkish-server:latest
     container_name: llm-turkish-server
     ports:
-      - "8765:8765"
+      - "${LLM_PORT:-8765}:8765"
     environment:
-      - MODEL_NAME=llama3.2:3b-instruct-turkish
-      - MAX_TOKENS=80
-      - TEMPERATURE=0.2
-      - TOP_P=0.7
-      - WEBSOCKET_PORT=8765
+      - MODEL_NAME=${LLM_MODEL:-llama3.2:3b-instruct-turkish}
+      - MAX_TOKENS=${LLM_MAX_TOKENS:-80}
+      - TEMPERATURE=${LLM_TEMPERATURE:-0.2}
+      - TOP_P=${LLM_TOP_P:-0.7}
+      - WEBSOCKET_PORT=${LLM_PORT:-8765}
+      - LOG_LEVEL=${LLM_LOG_LEVEL:-INFO}
+      - CUDA_VISIBLE_DEVICES=${LLM_GPU_DEVICE:-0}
     volumes:
       - llm_models:/app/models
       - llm_cache:/app/cache
+      - ./logs/llm:/var/log/llm
     networks:
       - opensips_network
     deploy:
@@ -98,20 +181,96 @@ services:
               count: 1
               capabilities: [gpu]
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8765/health", "||", "exit", "1"]
+      interval: 45s
+      timeout: 15s
+      retries: 3
+      start_period: 120s
+
+  # OpenSIPS Event Monitor (Opsiyonel - debug için)
+  opensips-event-monitor:
+    build: .
+    container_name: opensips-event-monitor
+    command: ["event-monitor"]
+    environment:
+      - OPENSIPS_HOST=opensips
+      - OPENSIPS_EVENT_PORT=${OPENSIPS_EVENT_PORT:-8090}
+      - OPENSIPS_MI_PORT=${OPENSIPS_MI_PORT:-8087}
+      - LOG_LEVEL=${EVENT_MONITOR_LOG_LEVEL:-INFO}
+    volumes:
+      - ./src:/app/src
+      - ./logs/event-monitor:/var/log/event-monitor
+    networks:
+      - opensips_network
+    depends_on:
+      - opensips
+    restart: unless-stopped
+    profiles:
+      - debug
+      - monitoring
+
+  # PostgreSQL Database (Opsiyonel - gelecekte call logging için)
+  postgres:
+    image: postgres:15-alpine
+    container_name: opensips-postgres
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-opensips}
+      - POSTGRES_USER=${POSTGRES_USER:-opensips}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-opensips_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - opensips_network
+    restart: unless-stopped
+    profiles:
+      - database
+      - production
+
+  # Redis Cache (Opsiyonel - session management için)
+  redis:
+    image: redis:7-alpine
+    container_name: opensips-redis
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis_password}
+    volumes:
+      - redis_data:/data
+    networks:
+      - opensips_network
+    restart: unless-stopped
+    profiles:
+      - cache
+      - production
 
 networks:
   opensips_network:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 172.20.0.0/16
+    name: opensips_network
+    # Tamamen dinamik - Docker'ın otomatik service discovery kullanılıyor
+    # Container'lar hostname ile birbirlerini bulabilir
 
 volumes:
   piper_models:
     driver: local
+    name: opensips_piper_models
+  piper_cache:
+    driver: local
+    name: opensips_piper_cache
+  vosk_models:
+    driver: local
+    name: opensips_vosk_models
   llm_models:
     driver: local
+    name: opensips_llm_models
   llm_cache:
     driver: local
+    name: opensips_llm_cache
+  postgres_data:
+    driver: local
+    name: opensips_postgres_data
+  redis_data:
+    driver: local
+    name: opensips_redis_data
   model_data:
     driver: local
+    name: opensips_model_data
