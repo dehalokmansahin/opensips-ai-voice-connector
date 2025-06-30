@@ -12,6 +12,7 @@ import socket
 from pathlib import Path
 import configparser
 import structlog
+from fastapi import FastAPI
 
 # Python path setup
 current_dir = Path(__file__).parent
@@ -40,7 +41,7 @@ from services.vosk_websocket import VoskWebsocketSTTService
 from services.piper_websocket import PiperWebsocketTTSService
 
 # Pipeline imports
-from pipeline import PipelineManager
+from pipeline.manager import EnhancedPipelineManager as PipelineManager
 
 # OpenSIPS integration imports  
 from utils import get_ai, FLAVORS, get_ai_flavor, get_user, get_to, indialog
@@ -428,19 +429,21 @@ class OpenSIPSEngine:
         
         logger.info("OpenSIPS engine shutdown complete")
 
-
-class LegacyCallManager:
-    """Legacy call manager - compatibility wrapper"""
-
-    def __init__(self, pipeline_manager, mi_conn):
-        self.pipeline_manager = pipeline_manager
-        self.mi_conn = mi_conn
-        self.active_calls = {}
-        
-    async def create_call(self, call_key: str, params: dict):
-        """Compatibility method for legacy code"""
-        # TODO: Implement if needed
-        return None
+    async def debug_start_stream(self, call_key: str):
+        """Debug endpoint to manually start stream for existing calls"""
+        try:
+            call = self.call_manager.get_call(call_key)
+            if call and call.pipeline_manager:
+                logger.info("🔧 DEBUG: Manually starting stream for call", call_key=call_key)
+                await call.pipeline_manager.start_stream()
+                logger.info("✅ DEBUG: Stream started successfully", call_key=call_key)
+                return {"status": "success", "message": f"Stream started for call {call_key}"}
+            else:
+                logger.warning("⚠️ DEBUG: Call not found or no pipeline manager", call_key=call_key)
+                return {"status": "error", "message": f"Call {call_key} not found or no pipeline manager"}
+        except Exception as e:
+            logger.error("💥 DEBUG: Error starting stream", call_key=call_key, error=str(e))
+            return {"status": "error", "message": str(e)}
 
     async def terminate_call(self, call_key: str):
         """Call'ı sonlandır"""
@@ -1688,5 +1691,35 @@ async def main():
 if __name__ == "__main__":
     exit_code = asyncio.run(main())
     sys.exit(exit_code)
+
+# vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4
+
+# Test endpoints for development
+app = FastAPI()
+
+@app.get("/test/pipeline")
+async def test_pipeline():
+    """Test pipeline functionality"""
+    if connector.pipeline_manager:
+        stats = connector.pipeline_manager.get_performance_stats()
+        return {
+            "status": "Pipeline active",
+            "stats": stats,
+            "running": connector.pipeline_manager._is_running
+        }
+    return {"status": "Pipeline not available"}
+
+@app.post("/debug/start_stream/{call_key}")
+async def debug_start_stream_endpoint(call_key: str):
+    """Debug endpoint to manually start stream for a call"""
+    try:
+        result = await connector.debug_start_stream(call_key)
+        return result
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# Run the application
+exit_code = asyncio.run(main())
+sys.exit(exit_code)
 
 # vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4

@@ -201,18 +201,15 @@ class Call:
     async def start(self):
         """Start call processing"""
         try:
+            # Start the pipeline stream to send StartFrame
+            logger.info("🎬 Starting pipeline stream", call_key=self.b2b_key)
+            await self.pipeline_ai.start_stream()
+
             # Start RTP packet reading
             loop = asyncio.get_running_loop()
             loop.add_reader(self.serversock.fileno(), self.read_rtp_packet)
             
             logger.info("RTP listener started", call_key=self.b2b_key)
-            
-            # Schedule PipelineAI start
-            try:
-                asyncio.create_task(self.pipeline_ai.start())
-                logger.info("🔄 PipelineAI start scheduled", call_key=self.b2b_key)
-            except Exception as e:
-                logger.error("Error scheduling PipelineAI start", call_key=self.b2b_key, error=str(e))
             
             # Start first packet timeout checker
             asyncio.create_task(self._check_first_packet_timeout())
@@ -299,34 +296,31 @@ class Call:
                 rtp_packet = decode_rtp_packet(data.hex())
                 pcmu_payload = bytes.fromhex(rtp_packet['payload'])
                 
-                # Route PCMU payload through PipelineAI if available
-                if hasattr(self, 'pipeline_ai') and self.pipeline_ai and self.pipeline_ai.is_running:
-                    asyncio.create_task(self.pipeline_ai.process_rtp_payload(pcmu_payload))
-                    logger.info("🔄 RTP payload sent to PipelineAI", call_key=self.b2b_key, payload_size=len(pcmu_payload))
-                else:
-                    # Fallback: Convert PCMU to PCM16k for pipeline
-                    pcm_data = pcmu_to_pcm16k(pcmu_payload)
-                    # Send to pipeline
-                    logger.debug("🎯 PIPELINE CHECK", 
+                # Convert PCMU to PCM16k for pipeline
+                pcm_data = pcmu_to_pcm16k(pcmu_payload)
+                
+                # Send to pipeline
+                logger.debug("🎯 PIPELINE CHECK", 
+                           call_key=self.b2b_key,
+                           has_pipeline_manager=bool(self.pipeline_manager),
+                           has_pcm_data=bool(pcm_data),
+                           pcm_data_len=len(pcm_data) if pcm_data else 0)
+                
+                if self.pipeline_manager and pcm_data:
+                    push_task = asyncio.create_task(
+                        self.pipeline_manager.push_audio(pcm_data)
+                    )
+                    logger.debug("🛠️ Scheduled pipeline push_audio task", 
+                                 call_key=self.b2b_key,
+                                 task_id=id(push_task))
+                    logger.info("🎵 Audio frame pushed to pipeline", 
                                call_key=self.b2b_key,
-                               has_pipeline_manager=bool(self.pipeline_manager),
-                               has_pcm_data=bool(pcm_data),
-                               pcm_data_len=len(pcm_data) if pcm_data else 0)
-                    if self.pipeline_manager and pcm_data:
-                        push_task = asyncio.create_task(
-                            self.pipeline_manager.push_audio(pcm_data)
-                        )
-                        logger.debug("🛠️ Scheduled fallback pipeline push_audio task", 
-                                     call_key=self.b2b_key,
-                                     task_id=id(push_task))
-                        logger.info("🎵 Audio frame pushed to fallback pipeline", 
-                                   call_key=self.b2b_key,
-                                   frame_size=len(pcm_data))
-                    else:
-                        if not self.pipeline_manager:
-                            logger.warning("❌ No pipeline manager available", call_key=self.b2b_key)
-                        if not pcm_data:
-                            logger.warning("❌ No PCM data after conversion", call_key=self.b2b_key)
+                               frame_size=len(pcm_data))
+                else:
+                    if not self.pipeline_manager:
+                        logger.warning("❌ No pipeline manager available", call_key=self.b2b_key)
+                    if not pcm_data:
+                        logger.warning("❌ No PCM data after conversion", call_key=self.b2b_key)
                 
                 logger.info("📦 RTP packet RECEIVED and processed", 
                            call_key=self.b2b_key,
@@ -335,7 +329,7 @@ class Call:
                            source_addr=f"{addr[0]}:{addr[1]}",
                            seq_num=rtp_packet.get('sequence_number'),
                            packet_num=packet_count)
-                           
+                
             except ValueError as e:
                 logger.warning("Invalid RTP packet", call_key=self.b2b_key, error=str(e), packet_hex=data.hex()[:100])
 
@@ -487,8 +481,13 @@ class Call:
         logger.info("🔚 CALL CLOSING", key=self.b2b_key, terminated=self.terminated)
         
         # Mark as terminated to stop processing
+        if self.terminated:
+            return # Already closing
         self.terminated = True
         logger.info("📋 Call marked as terminated", key=self.b2b_key)
+
+        # Pipeline will automatically stop when call ends
+        logger.info("🎬 Pipeline will stop automatically when call ends", call_key=self.b2b_key)
         
         # Stop RTP processing
         self.stop_event.set()
@@ -516,17 +515,37 @@ class Call:
             logger.error("Error closing RTP socket", error=str(e), key=self.b2b_key)
 
     def terminate(self):
-        """Terminate call via OpenSIPS MI"""
-        logger.info("Terminating call", key=self.b2b_key)
+        """Terminate the call and release resources"""
+        if self.terminated:
+            return
+
         self.terminated = True
-        
+        logger.info("Terminating call", call_key=self.b2b_key)
+
+        # Stop the pipeline stream
+        if self.pipeline_ai:
+            asyncio.create_task(self.pipeline_ai.stop_stream())
+
+        # Stop RTP packet reading and close socket
+        loop = asyncio.get_running_loop()
         try:
-            # Send terminate command to OpenSIPS
-            self.mi_conn.execute("ua_session_terminate", {"key": self.b2b_key})
-            # Close call resources
-            asyncio.create_task(self.close())
+            loop.remove_reader(self.serversock.fileno())
         except Exception as e:
-            logger.error("Error terminating call", error=str(e), key=self.b2b_key)
+            logger.error("Error removing socket reader", error=str(e), key=self.b2b_key)
+        
+        # Release RTP port
+        try:
+            free_port = self.serversock.getsockname()[1]
+            self.serversock.close()
+            
+            global _available_ports
+            if _available_ports is not None and free_port >= _min_rtp_port and free_port <= _max_rtp_port:
+                _available_ports.add(free_port)
+                logger.info("RTP port released", port=free_port, key=self.b2b_key)
+                # Debug port status after release
+                _debug_port_status()
+        except Exception as e:
+            logger.error("Error closing RTP socket", error=str(e), key=self.b2b_key)
 
 
 class CallManager:
@@ -567,7 +586,7 @@ class CallManager:
         except Exception as e:
             logger.error("Error handling pipeline output", error=str(e), output_type=output_type)
 
-    async def create_call(self, b2b_key: str, sdp_info: dict) -> Optional['Call']:
+    async def create_call(self, b2b_key: str, sdp_info: dict, config: dict = None) -> Optional['Call']:
         """Create and start a new call"""
         try:
             logger.info("🚀 Creating call STARTED", key=b2b_key, sdp_info=sdp_info)
@@ -612,12 +631,8 @@ class CallManager:
             # Debug port status before creating call
             _debug_port_status()
             
-            # Reset StartFrame flag for this pipeline session
-            logger.debug("🔄 Resetting StartFrame flag", before=self.pipeline_manager._start_frame_sent)
-            try:
-                self.pipeline_manager._start_frame_sent = False
-            except Exception:
-                pass
+            # Pipeline will handle StartFrame automatically via PipelineTask
+            logger.debug("🔄 Pipeline will handle StartFrame automatically")
             
             # Create call instance  
             logger.info("🔧 Creating Call instance...", key=b2b_key)
@@ -625,7 +640,8 @@ class CallManager:
                 b2b_key=b2b_key,
                 mi_conn=self.mi_conn,
                 sdp_info=sdp_info,
-                pipeline_manager=self.pipeline_manager
+                pipeline_manager=self.pipeline_manager,
+                config=config
             )
             
             logger.info("✅ Call instance created successfully", key=b2b_key)

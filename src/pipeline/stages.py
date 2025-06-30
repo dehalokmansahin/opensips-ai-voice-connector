@@ -39,7 +39,7 @@ except ImportError:
 logger = structlog.get_logger()
 
 class VADProcessor(FrameProcessor):
-    """Voice Activity Detection processor - Improved with config support"""
+    """Voice Activity Detection processor - Pipecat compatible"""
     
     def __init__(self, vad_config=None, **kwargs):
         super().__init__(**kwargs)
@@ -66,7 +66,10 @@ class VADProcessor(FrameProcessor):
                    config_available=self._vad_config is not None)
     
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
-        """Frame'leri işle"""
+        """Process frames following Pipecat pattern"""
+        
+        # First call the parent class process_frame to handle StartFrame, etc.
+        await super().process_frame(frame, direction)
         
         logger.debug("VAD processing frame", frame_type=type(frame).__name__)
         
@@ -75,6 +78,7 @@ class VADProcessor(FrameProcessor):
         elif isinstance(frame, AudioRawFrame):
             # Improved VAD with timing controls
             if frame.audio and len(frame.audio) > 0:
+                logger.debug("🎤 VAD processing audio frame", frame_size=len(frame.audio))
                 import struct
                 import math
                 import time
@@ -98,7 +102,7 @@ class VADProcessor(FrameProcessor):
                                 self._silence_start_time = None
                                 speech_frame = UserStartedSpeakingFrame()  
                                 await self.push_frame(speech_frame, direction)
-                                logger.debug("Speech started", rms=rms, duration_ms=current_time - self._speech_start_time)
+                                logger.info("🎤 Speech started", rms=rms, duration_ms=current_time - self._speech_start_time)
                         else:
                             self._silence_start_time = None  # Reset silence timer
                     else:
@@ -111,7 +115,7 @@ class VADProcessor(FrameProcessor):
                                 self._speech_start_time = None
                                 speech_frame = UserStoppedSpeakingFrame()
                                 await self.push_frame(speech_frame, direction)
-                                logger.debug("Speech stopped", silence_duration_ms=current_time - self._silence_start_time)
+                                logger.info("🎤 Speech stopped", silence_duration_ms=current_time - self._silence_start_time)
                         else:
                             self._speech_start_time = None  # Reset speech timer
                             
@@ -131,7 +135,10 @@ class STTProcessor(FrameProcessor):
         logger.info("STTProcessor initialized", service_type=type(self._stt_service).__name__)
     
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
-        """Frame'leri işle"""
+        """Process frames following Pipecat pattern"""
+        
+        # First call the parent class process_frame to handle StartFrame, etc.
+        await super().process_frame(frame, direction)
         
         logger.debug("STT processing frame", frame_type=type(frame).__name__)
         
@@ -174,7 +181,10 @@ class LLMProcessor(FrameProcessor):
         logger.info("LLMProcessor initialized", service_type=type(self._llm_service).__name__)
     
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
-        """Frame'leri işle"""
+        """Process frames following Pipecat pattern"""
+        
+        # First call the parent class process_frame to handle StartFrame, etc.
+        await super().process_frame(frame, direction)
         
         if isinstance(frame, StartFrame):
             if not self._is_started:
@@ -227,7 +237,10 @@ class TTSProcessor(FrameProcessor):
         logger.info("TTSProcessor initialized", service_type=type(self._tts_service).__name__)
     
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
-        """Frame'leri işle"""
+        """Process frames following Pipecat pattern"""
+        
+        # First call the parent class process_frame to handle StartFrame, etc.
+        await super().process_frame(frame, direction)
         
         if isinstance(frame, StartFrame):
             if not self._is_started:

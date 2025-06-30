@@ -9,6 +9,7 @@ import structlog
 
 from pipeline.manager import EnhancedPipelineManager as PipelineManager
 from transports.oavc_adapter import OAVCAdapter
+from pipecat.frames.frames import AudioRawFrame, Frame
 
 if TYPE_CHECKING:
     from transports.call_manager import Call
@@ -28,13 +29,13 @@ class PipelineAI:
         """
         self._call = call
         self._cfg = cfg
-        self._pipeline_manager: Optional[PipelineManager] = self._call.pipeline_manager
+        self.pipeline_manager: PipelineManager = call.pipeline_manager
         self._oavc_adapter: Optional[OAVCAdapter] = None
         self._is_running = False
         
         logger.info("PipelineAI initialized", 
-                   call_id=getattr(self._call, 'b2b_key', 'unknown'),
-                   ai_flavor=self._cfg.get('ai_flavor', 'pipecat'))
+                   call_id=self._call.b2b_key,
+                   ai_flavor=self._cfg.get('flavor', 'pipecat'))
     
     async def start(self) -> None:
         """AI Engine'i başlat"""
@@ -46,14 +47,14 @@ class PipelineAI:
         try:
             logger.info("🔧 Validating pre-started pipeline manager...")
             # The pipeline manager should already be started from main.py
-            if not self._pipeline_manager or not self._pipeline_manager.is_running:
+            if not self.pipeline_manager or not self.pipeline_manager.is_running:
                 logger.error("❌ Pipeline manager is not available or not running in PipelineAI.start. Aborting.")
                 return
 
             logger.info("✅ Pipeline manager is running. Proceeding with PipelineAI start.")
             
             # OAVC adapter just needs to be instantiated with the running manager.
-            self._oavc_adapter = OAVCAdapter(self._pipeline_manager)
+            self._oavc_adapter = OAVCAdapter(self.pipeline_manager)
             logger.info("🔧 OAVC adapter created successfully")
             
             self._is_running = True
@@ -111,4 +112,20 @@ class PipelineAI:
     
     def __repr__(self) -> str:
         """String representation"""
-        return f"PipelineAI(call_id={getattr(self._call, 'b2b_key', 'unknown')}, running={self._is_running})" 
+        return f"PipelineAI(call_id={self._call.b2b_key}, running={self._is_running})"
+
+    async def start_stream(self):
+        """Starts the pipeline stream by sending a StartFrame."""
+        if self.pipeline_manager:
+            await self.pipeline_manager.start_stream()
+
+    async def stop_stream(self):
+        """Stops the pipeline stream by sending an EndFrame."""
+        if self.pipeline_manager:
+            await self.pipeline_manager.stop_stream()
+
+    async def push_audio(self, pcm_data: bytes):
+        """Pushes audio data to the pipeline."""
+        if self.pipeline_manager:
+            # Implementation of push_audio method
+            pass 

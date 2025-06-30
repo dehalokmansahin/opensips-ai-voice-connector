@@ -13,8 +13,13 @@ import logging
 from typing import Optional
 import structlog
 
-from pipeline import PipelineManager
-from transports.audio_utils import pcmu_to_pcm16k
+from pipecat.frames.frames import Frame, SystemFrame
+from pipecat.processors.frame_processor import FrameDirection
+
+# Use a forward reference for the type hint to avoid circular import
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from pipeline.manager import EnhancedPipelineManager as PipelineManager
 
 logger = structlog.get_logger()
 
@@ -22,7 +27,7 @@ logger = structlog.get_logger()
 class OAVCAdapter:
     """Bridges raw RTP payloads from OAVC to the Pipecat pipeline."""
 
-    def __init__(self, pipeline_manager):
+    def __init__(self, pipeline_manager: "PipelineManager"):
         """
         OAVC Adapter constructor
         
@@ -31,6 +36,7 @@ class OAVCAdapter:
         """
         self._pipeline_manager = pipeline_manager
         self._executor = None
+        self._is_running = True
         
         logger.info("OAVCAdapter initialized")
 
@@ -102,3 +108,7 @@ class OAVCAdapter:
     def __repr__(self) -> str:
         """String representation"""
         return f"OAVCAdapter(pipeline_running={self._pipeline_manager.is_running if self._pipeline_manager else False})" 
+
+    async def write_frame_to_pipeline(self, call_id: str, frame: Frame):
+        # Implementation of write_frame_to_pipeline method
+        pass 
