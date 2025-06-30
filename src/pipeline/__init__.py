@@ -1,1 +1,2 @@
-from .manager import EnhancedPipelineManager as PipelineManager  # noqa: F401 
+# Native transport handles pipeline management directly
+# Legacy manager import removed 

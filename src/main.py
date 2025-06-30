@@ -12,7 +12,15 @@ import socket
 from pathlib import Path
 import configparser
 import structlog
-from fastapi import FastAPI
+from typing import Dict, Any
+
+# FastAPI is optional for test mode
+try:
+    from fastapi import FastAPI
+    FASTAPI_AVAILABLE = True
+except ImportError:
+    FastAPI = None
+    FASTAPI_AVAILABLE = False
 
 # Python path setup
 current_dir = Path(__file__).parent
@@ -41,14 +49,21 @@ from services.vosk_websocket import VoskWebsocketSTTService
 from services.piper_websocket import PiperWebsocketTTSService
 
 # Pipeline imports
-from pipeline.manager import EnhancedPipelineManager as PipelineManager
+# Native transport handles pipeline management directly
 
 # OpenSIPS integration imports  
 from utils import get_ai, FLAVORS, get_ai_flavor, get_user, get_to, indialog
-from config import Config, ConfigValidationError
+from config import (
+    initialize as initialize_config,
+    get as get_config,
+    get_section as get_config_section,
+    ConfigValidationError
+)
 
-# Call management
-from transports.call_manager import CallManager, Call, NoAvailablePorts
+# Call management - Native Pipecat Transport
+from transports.native_call_manager import NativeCallManager as CallManager
+from transports.native_call_manager import NativeCall as Call
+logger.info("🎵 Using Native Pipecat Transport")
 
 # OpenSIPS Event Integration
 from opensips_event_listener import OpenSIPSEventListener, OpenSIPSMIClient
@@ -118,6 +133,10 @@ class OpenSIPSEngine:
         # Event handler
         self.event_handler = None
         self.event_subscription = None
+        
+        # SIP Listener - OpenSIPS'den gelen INVITE'ları dinler
+        self.sip_listener = None
+        self.sip_listener_task = None
         
         logger.info("OpenSIPS Engine initialized")
 
@@ -366,17 +385,18 @@ class OpenSIPSEngine:
             logger.error("Error in UDP handler", error=str(e))
 
     async def start_event_handler(self):
-        """Start OpenSIPS event handler"""
+        """Start OpenSIPS event handler and SIP listener"""
         try:
             # Get configuration
-            engine_cfg = Config.get("engine")
+            engine_cfg = get_config_section("engine")
             host_ip = engine_cfg.get("event_ip", "0.0.0.0")
-            port = int(engine_cfg.get("event_port", "8090"))
+            event_port = int(engine_cfg.get("event_port", "8090"))
+            sip_port = int(engine_cfg.get("sip_port", "8089"))
             
-            # Initialize event handler
+            # 1. Initialize event handler for E_UA_SESSION events
             if OPENSIPS_AVAILABLE:
                 self.event_handler = OpenSIPSEventHandler(
-                    host=host_ip, port=port, mi_conn=self.mi_conn
+                    host=host_ip, port=event_port, mi_conn=self.mi_conn
                 )
                 # Subscribe to E_UA_SESSION events
                 self.event_subscription = self.event_handler.async_subscribe(
@@ -390,17 +410,38 @@ class OpenSIPSEngine:
             else:
                 # Mock event handler for development
                 self.event_handler = MockOpenSIPSEventHandler()
-                logger.warning("Using mock OpenSIPS event handler", ip=host_ip, port=port)
+                logger.warning("Using mock OpenSIPS event handler", ip=host_ip, port=event_port)
+            
+            # 2. Initialize and start SIP Listener for INVITE messages
+            self.sip_listener = SIPListener(host=host_ip, port=sip_port, call_manager=self.call_manager)
+            self.sip_listener_task = asyncio.create_task(self.sip_listener.start())
+            logger.info("SIP Listener started", ip=host_ip, port=sip_port)
                 
             return True
             
         except Exception as e:
-            logger.error("Failed to start OpenSIPS event handler", error=str(e))
+            logger.error("Failed to start OpenSIPS event handler and SIP listener", error=str(e))
             return False
 
     async def shutdown(self):
         """Shutdown OpenSIPS engine"""
         logger.info("Shutting down OpenSIPS engine")
+        
+        # Stop SIP Listener
+        if self.sip_listener:
+            try:
+                await self.sip_listener.stop()
+                logger.info("SIP Listener stopped")
+            except Exception as e:
+                logger.error("Error stopping SIP Listener", error=str(e))
+        
+        # Cancel SIP Listener task
+        if self.sip_listener_task and not self.sip_listener_task.done():
+            self.sip_listener_task.cancel()
+            try:
+                await self.sip_listener_task
+            except asyncio.CancelledError:
+                pass
         
         # Terminate all active calls
         await self.call_manager.shutdown()
@@ -419,14 +460,13 @@ class OpenSIPSEngine:
         """Debug endpoint to manually start stream for existing calls"""
         try:
             call = self.call_manager.get_call(call_key)
-            if call and call.pipeline_manager:
-                logger.info("🔧 DEBUG: Manually starting stream for call", call_key=call_key)
-                await call.pipeline_manager.start_stream()
-                logger.info("✅ DEBUG: Stream started successfully", call_key=call_key)
-                return {"status": "success", "message": f"Stream started for call {call_key}"}
+            if call:
+                logger.info("🎵 Native call found", call_key=call_key)
+                # Native calls handle their own streaming
+                return {"status": "success", "message": f"Native call {call_key} is running"}
             else:
-                logger.warning("⚠️ DEBUG: Call not found or no pipeline manager", call_key=call_key)
-                return {"status": "error", "message": f"Call {call_key} not found or no pipeline manager"}
+                logger.warning("⚠️ DEBUG: Call not found", call_key=call_key)
+                return {"status": "error", "message": f"Call {call_key} not found"}
         except Exception as e:
             logger.error("💥 DEBUG: Error starting stream", call_key=call_key, error=str(e))
             return {"status": "error", "message": str(e)}
@@ -755,56 +795,99 @@ class SIPListener:
             self.socket.setblocking(False)
             self.running = True
             
-            logger.info("SIP Listener started", host=self.host, port=self.port)
+            # Enhanced logging for diagnostics
+            actual_host, actual_port = self.socket.getsockname()
+            logger.info("🚀 SIP Listener started successfully", 
+                       configured_host=self.host, 
+                       configured_port=self.port,
+                       actual_host=actual_host,
+                       actual_port=actual_port)
+            
+            # Log container network info for diagnostics
+            try:
+                import socket as sock_module
+                hostname = sock_module.gethostname()
+                local_ip = sock_module.gethostbyname(hostname)
+                logger.info("📡 Container network info", 
+                           hostname=hostname, 
+                           local_ip=local_ip)
+            except Exception as e:
+                logger.warning("Could not get container network info", error=str(e))
             
             # Listen for incoming SIP messages from OpenSIPS
+            message_count = 0
             while self.running:
                 try:
                     loop = asyncio.get_event_loop()
                     data, addr = await loop.sock_recvfrom(self.socket, 4096)
                     
+                    message_count += 1
+                    logger.info("📨 SIP message received", 
+                               message_number=message_count,
+                               from_addr=f"{addr[0]}:{addr[1]}",
+                               data_size=len(data))
+                    
                     # Process SIP message
                     await self.handle_sip_message(data.decode('utf-8'), addr)
                     
                 except asyncio.CancelledError:
+                    logger.info("SIP listener cancelled")
                     break
                 except Exception as e:
                     logger.error("Error in SIP listener", error=str(e))
                     await asyncio.sleep(0.1)
                     
         except Exception as e:
-            logger.error("Failed to start SIP listener", error=str(e))
+            logger.error("💥 Failed to start SIP listener", 
+                        host=self.host, 
+                        port=self.port, 
+                        error=str(e))
             raise
     
     async def handle_sip_message(self, sip_data: str, addr):
         """SIP mesajını işle"""
         try:
-            logger.info("Received SIP message", from_addr=addr, message_preview=sip_data[:200])
+            logger.info("🔍 Processing SIP message", 
+                       from_addr=f"{addr[0]}:{addr[1]}", 
+                       message_size=len(sip_data))
+            logger.debug("SIP message content preview", 
+                        content=sip_data[:300] + "..." if len(sip_data) > 300 else sip_data)
             
             # Parse SIP method
             lines = sip_data.strip().split('\n')
             if not lines:
+                logger.warning("Empty SIP message received")
                 return
                 
             first_line = lines[0].strip()
+            logger.info("📋 SIP method detected", method_line=first_line)
             
             # Debug: Full SIP message for ACK detection
-            logger.debug("Full SIP message details", method=first_line, full_message=sip_data)
+            logger.debug("Full SIP message details", method=first_line, full_message=sip_data[:500])
             
             if first_line.startswith('INVITE'):
+                logger.info("🎯 Processing INVITE message")
                 await self.handle_invite(sip_data, addr)
             elif first_line.startswith('BYE'):
+                logger.info("📞 Processing BYE message")
                 await self.handle_bye(sip_data, addr)
             elif first_line.startswith('CANCEL'):
+                logger.info("🚫 Processing CANCEL message")
                 await self.handle_cancel(sip_data, addr)
             elif first_line.startswith('ACK'):
-                logger.warning("🎯 ACK MESSAGE DETECTED! Processing...", from_addr=addr)
+                logger.info("✅ Processing ACK message")
                 await self.handle_ack(sip_data, addr)
             else:
-                logger.warning("❓ Unhandled SIP method", method=first_line, from_addr=addr)
+                logger.warning("❓ Unhandled SIP method", 
+                              method=first_line, 
+                              from_addr=f"{addr[0]}:{addr[1]}")
                 
         except Exception as e:
-            logger.error("Error handling SIP message", error=str(e))
+            logger.error("💥 Error handling SIP message", 
+                        error=str(e), 
+                        from_addr=f"{addr[0]}:{addr[1]}")
+            import traceback
+            logger.debug("SIP message handling traceback", traceback=traceback.format_exc())
     
     async def handle_invite(self, sip_data: str, addr):
         """INVITE mesajını işle"""
@@ -1051,630 +1134,260 @@ class SIPListener:
             logger.error("Error stopping SIP listener", error=str(e))
 
 class OpenSIPSAIVoiceConnector:
-    """Main application class for the OpenSIPS AI Voice Connector"""
-    
+    """
+    Main application class.
+    Manages the lifecycle of all components.
+    """
+
     def __init__(self, config_file: str = None, test_mode: bool = False):
+        """
+        Initializes the application.
+        Args:
+            config_file: Path to the configuration file.
+            test_mode: Flag to run in test mode (not fully implemented).
+        """
         self.config_file = config_file
         self.test_mode = test_mode
+        
+        # Core components
         self.mi_conn = None
-        self.event_handler = None
-        self.sip_listener = None
+        self.call_manager = None
+        # Native transport handles pipeline management directly
         self.engine = None
         
-        # Pipeline and services
-        self.pipeline_manager = None
-        self.llm_service = None
-        self.stt_service = None
-        self.tts_service = None
+        # Service registry
+        self.services = {}
+        self._background_tasks = {}
         
-        # Load config
-        self.load_config()
-        
-        # Initialize MI connection early
-        self.initialize_mi_connection()
-        
-        # Initialize CallManager
-        self.call_manager = CallManager(self.mi_conn)
-        
-        # FastAPI app
-        self.app = FastAPI()
+        self.running = False
 
     def load_config(self):
-        """Loads configuration from file and environment variables"""
-        try:
-            # Initialize Config singleton
-            Config.init(self.config_file)
+        """Loads the configuration from the file."""
+        logger.info("📄 Loading configuration...")
+        if not self.config_file or not Path(self.config_file).exists():
+            raise FileNotFoundError(f"Configuration file not found: {self.config_file}")
             
-            # Load configuration
-            config_parser = configparser.ConfigParser()
-            config_parser.read(self.config_file)
-            self.config = config_parser
-            
-            logger.info("Configuration loaded successfully", config_file=self.config_file)
-            
-            # Log key config sections
-            if 'llm' in self.config:
-                logger.info("LLM config", 
-                           url=self.config.get('llm', 'url', fallback='ws://llm-turkish-server:8765'),
-                           model=self.config.get('llm', 'model', fallback='llama3.2:3b'))
-            
-            if 'stt' in self.config:
-                logger.info("STT config",
-                           url=self.config.get('stt', 'url', fallback='ws://vosk-server:2700'))
-            
-            if 'tts' in self.config:
-                logger.info("TTS config",
-                           url=self.config.get('tts', 'url', fallback='ws://piper-tts-server:8000/tts'))
-            
-            # Log available AI flavors
-            logger.info("Available AI flavors", flavors=list(FLAVORS.keys()))
-                           
-        except Exception as e:
-            logger.error("Failed to load configuration", error=str(e))
-            raise
-    
+        initialize_config(self.config_file)
+        logger.info("✅ Configuration loaded successfully.")
+        
     def initialize_mi_connection(self):
-        """OpenSIPS MI bağlantısını başlat"""
-        try:
-            if not OPENSIPS_AVAILABLE:
-                logger.warning("OpenSIPS MI library not available, using mock")
-                self.mi_conn = MockOpenSIPSMI()
-                return
-                
-            # MI configuration
-            mi_ip = self.config.get('opensips', 'ip', fallback='127.0.0.1')
-            mi_port = int(self.config.get('opensips', 'port', fallback='8080'))
+        """Initializes the OpenSIPS MI connection."""
+        logger.info("🔗 Initializing MI connection...")
+        mi_config = get_config_section("opensips")
+        if not mi_config:
+            raise ConfigValidationError("Missing [opensips] section in configuration file.")
             
-            # Create MI connection - using mock for now
-            logger.info("Using Mock OpenSIPS MI connection for development")
-            self.mi_conn = MockOpenSIPSMI(ip=mi_ip, port=mi_port)
+        mi_type = mi_config.get("mi_transport")
+        
+        if mi_type == "fifo":
+            # This is not configured in the default .ini but provided for completeness
+            fifo_path = mi_config.get("fifo_path")
+            if not fifo_path:
+                raise ConfigValidationError("mi_transport is 'fifo' but 'fifo_path' is not set in [opensips] section.")
+            self.mi_conn = OpenSIPSMI(fifo_path)
+        elif mi_type == "datagram":
+            host = mi_config.get("host")
+            port = mi_config.getint("port")
+            if not host or not port:
+                raise ConfigValidationError("mi_transport is 'datagram' but 'host' or 'port' is missing from [opensips] section.")
             
-        except Exception as e:
-            logger.error("Failed to initialize MI connection", error=str(e))
-            self.mi_conn = MockOpenSIPSMI()
-    
+            # The python-opensips library expects keyword arguments here
+            self.mi_conn = OpenSIPSMI(conn="datagram", datagram_ip=host, datagram_port=port)
+        else:
+            raise ValueError(f"Unsupported MI transport type: {mi_type}")
+            
+        logger.info("✅ MI connection initialized.", transport=mi_type)
+        
+        # Clear any stale registrations on startup
+        # self.mi_conn.execute('ul_rm', {'table': 'location', 'avp': 'ruri_user'})
+        # logger.info("Cleared previous registrations from OpenSIPS location table.")
+        logger.warning("Skipping clearing of location table on startup.")
+
     async def initialize_services(self):
-        """Initialize all AI services with comprehensive validation and error handling"""
-        try:
-            logger.info("🚀 Starting AI services initialization...", test_mode=self.test_mode)
-            
-            if self.test_mode:
-                logger.info("🧪 TEST MODE: Skipping AI service validation and initialization")
-                # Mock services for testing
-                self.services['llm'] = None
-                self.services['stt'] = None
-                self.services['tts'] = None
-                
-                # Create minimal Pipeline Manager for test mode
-                logger.info("Creating minimal pipeline manager for test mode...")
-                self.pipeline_manager = PipelineManager(
-                    llm_service=None,
-                    stt_service=None, 
-                    tts_service=None,
-                    config={"max_pipeline_errors": 5}  # Reduced for test mode
-                )
-                logger.info("Mock pipeline manager created for testing")
-                
-                # Initialize OpenSIPS Engine (test mode)
-                logger.info("Initializing OpenSIPS Engine...")
-                self.engine = OpenSIPSEngine(self.call_manager, self.mi_conn)
-                logger.info("OpenSIPS Engine initialized successfully")
-                
-                # Initialize OpenSIPS Event Listener (test mode)
-                logger.info("🔔 Initializing OpenSIPS Event Listener...")
-                event_port = int(self.config.get('engine', 'event_port', fallback='8090'))
-                self.opensips_event_listener = OpenSIPSEventListener(port=event_port)
-                
-                # Initialize OpenSIPS MI Client (test mode)
-                opensips_ip = self.config.get('opensips', 'ip', fallback='172.20.0.6')
-                opensips_port = int(self.config.get('opensips', 'port', fallback='8087'))
-                self.opensips_mi_client = OpenSIPSMIClient(host=opensips_ip, port=opensips_port)
-                
-                logger.info("✅ OpenSIPS Event integration initialized",
-                           event_port=event_port,
-                           mi_host=opensips_ip,
-                           mi_port=opensips_port)
-                                                
-                # Initialize Call Manager  
-                self.call_manager = CallManager(self.pipeline_manager, self.mi_conn)
-                logger.info("Call manager initialized successfully")
-                return
-            
-            # Normal mode - Validate configuration first
-            try:
-                # First validate service configurations using Config class
-                validation_results = await Config.validate_services_config()
-                logger.info("✅ Service configuration validation completed", 
-                           results=validation_results)
-            except ConfigValidationError as e:
-                logger.error("❌ Service configuration validation failed", error=str(e))
-                raise
-            except Exception as e:
-                logger.warning("⚠️ Service configuration validation skipped (missing dependencies)", error=str(e))
-                # Continue without validation if optional dependencies are missing
-            
-            # Initialize services with enhanced error handling
-            services_to_initialize = []
-            failed_services = []
-            
-            # LLM Service
-            try:
-                if self.config.has_section('llm'):
-                    llm_url = self.config.get('llm', 'url')
-                    llm_model = self.config.get('llm', 'model')
-                    logger.info("📡 Creating LLM service", url=llm_url, model=llm_model)
-                    self.services['llm'] = LlamaWebsocketLLMService(url=llm_url, model=llm_model)
-                    services_to_initialize.append(("LLM", self.services['llm']))
-                    logger.info("✅ LLM service created successfully")
-                
-            except Exception as e:
-                logger.error("❌ Failed to create LLM service", error=str(e))
-                failed_services.append("LLM")
-            
-            # STT Service  
-            try:
-                stt_url = self.config.get('stt', 'url', fallback='ws://127.0.0.1:2700')
-                if not stt_url:
-                    raise ConfigValidationError("STT service URL is required")
-                
-                logger.info("📡 Creating STT service", url=stt_url)
-                self.services['stt'] = VoskWebsocketSTTService(url=stt_url)
-                services_to_initialize.append(("STT", self.services['stt']))
-                logger.info("✅ STT service created successfully")
-                
-            except Exception as e:
-                logger.error("❌ Failed to create STT service", error=str(e))
-                failed_services.append("STT")
-                self.services['stt'] = None
-            
-            # TTS Service
-            try:
-                tts_url = self.config.get('tts', 'url', fallback='ws://127.0.0.1:8000/tts')
-                if not tts_url:
-                    raise ConfigValidationError("TTS service URL is required")
-                
-                logger.info("📡 Creating TTS service", url=tts_url)
-                self.services['tts'] = PiperWebsocketTTSService(url=tts_url)
-                services_to_initialize.append(("TTS", self.services['tts']))
-                logger.info("✅ TTS service created successfully")
-                
-            except Exception as e:
-                logger.error("❌ Failed to create TTS service", error=str(e))
-                failed_services.append("TTS")
-                self.services['tts'] = None
-            
-            # Check if any critical services failed during creation
-            if failed_services:
-                error_msg = f"Critical services failed to initialize: {', '.join(failed_services)}"
-                logger.critical("🚨 " + error_msg)
-                raise ConfigValidationError(error_msg)
-            
-            # Start all services with timeout and retry logic
-            startup_timeout = 10.0  # 10 seconds timeout per service
-            for service_name, service in services_to_initialize:
-                logger.info(f"🚀 Starting {service_name} service...")
-                try:
-                    # Start service with timeout
-                    await asyncio.wait_for(service.start(), timeout=startup_timeout)
-                    logger.info(f"✅ {service_name} service started successfully")
-                    
-                except asyncio.TimeoutError:
-                    logger.error(f"⏰ {service_name} service startup timeout ({startup_timeout}s)")
-                    failed_services.append(service_name)
-                    
-                except Exception as e:
-                    logger.error(f"❌ Failed to start {service_name} service", error=str(e))
-                    failed_services.append(service_name)
-            
-            # Check if any services failed to start
-            if failed_services:
-                # Cleanup started services
-                await self._cleanup_services()
-                error_msg = f"Services failed to start: {', '.join(failed_services)}"
-                logger.critical("🚨 " + error_msg)
-                raise ConfigValidationError(error_msg)
-            
-            # Create enhanced pipeline configuration
-            pipeline_config = {
-                "max_pipeline_errors": int(self.config.get('pipeline', 'max_errors', fallback='10')),
-                "error_reset_interval": int(self.config.get('pipeline', 'error_reset_interval', fallback='300')),
-                "max_threads": int(self.config.get('pipeline', 'max_threads', fallback='4')),
-                "interruption": {
-                    "min_words": int(self.config.get('interruption', 'min_words', fallback='2')),
-                    "volume_threshold": float(self.config.get('interruption', 'volume_threshold', fallback='0.6')),
-                    "min_duration_ms": int(self.config.get('interruption', 'min_duration_ms', fallback='300'))
-                }
-            }
-            
-            # Initialize Enhanced Pipeline Manager
-            logger.info("🔧 Initializing Enhanced Pipeline Manager...")
-            self.pipeline_manager = PipelineManager(
-                llm_service=self.services['llm'],
-                stt_service=self.services['stt'], 
-                tts_service=self.services['tts'],
-                config=pipeline_config
-            )
-            
-            # Set pipeline manager for call manager
-            self.call_manager.set_pipeline_manager(self.pipeline_manager)
-            
-            # Start the pipeline
-            await self.pipeline_manager.start()
-            
-            # Initialize OpenSIPS Engine
-            logger.info("🔌 Initializing OpenSIPS Engine...")
-            self.engine = OpenSIPSEngine(self.call_manager, self.mi_conn)
-            
-            try:
-                # Check for OpenSIPS availability and start event handler
-                if OPENSIPS_AVAILABLE:
-                    logger.info("🎯 Starting OpenSIPS Event Handler on port 8090...")
-                    await self.start_opensips_handler()
-                    logger.info("✅ OpenSIPS Event Handler initialized successfully!")
-                else:
-                    logger.warning("OpenSIPS library not available, using mock")
-                    self.engine = OpenSIPSEngine(self.call_manager, self.mi_conn)
-                    logger.info("✅ OpenSIPS Engine initialized successfully (mock mode)")
+        """Initializes AI services and the pipeline manager."""
+        logger.info("🔧 Initializing AI services...")
 
+        # Initialize services, allowing individual services to fail without stopping the app
+        for service_name in ["llm", "stt", "tts"]:
+            try:
+                service_config = get_config_section(service_name)
+                if not service_config:
+                    logger.warning(f"Skipping {service_name.upper()} service: section not found in config.")
+                    continue
+
+                logger.info(f"📡 Creating {service_name.upper()} service...")
+                if service_name == "llm":
+                    self.services['llm'] = LlamaWebsocketLLMService(url=service_config.get('url'), model=service_config.get('model'))
+                elif service_name == "stt":
+                    self.services['stt'] = VoskWebsocketSTTService(url=service_config.get('url'))
+                elif service_name == "tts":
+                    self.services['tts'] = PiperWebsocketTTSService(url=service_config.get('url'))
+                logger.info(f"✅ {service_name.upper()} service created.")
             except Exception as e:
-                logger.error("❌ Failed to initialize OpenSIPS Engine", error=str(e))
-                raise ConfigValidationError(f"OpenSIPS Engine initialization failed: {str(e)}")
-            
-            # Final success message
-            logger.info("🎉 All AI services initialized successfully!")
-            logger.info("📋 Service summary:")
-            logger.info(f"   ✅ LLM Service: {self.services['llm'].__class__.__name__}")
-            logger.info(f"   ✅ STT Service: {self.services['stt'].__class__.__name__}")
-            logger.info(f"   ✅ TTS Service: {self.services['tts'].__class__.__name__}")
-            logger.info(f"   ✅ Pipeline Config: {pipeline_config}")
-            
-        except Exception as e:
-            logger.error("💥 Failed to initialize services", error=str(e))
-            # Cleanup on failure
-            await self._cleanup_services()
-            raise
-    
+                logger.error(f"❌ Failed to create {service_name.upper()} service", error=str(e))
+                self.services[service_name] = None
+        
+        # Native transport uses direct service integration, no separate pipeline manager needed
+        logger.info("✅ Services initialized - Native transport handles pipeline management")
+
     async def _cleanup_services(self):
-        """Cleanup partially initialized services with proper error handling"""
-        try:
-            logger.info("🧹 Starting service cleanup...")
-            cleanup_tasks = []
-            
-            # Add cleanup tasks for each service
-            for service_name in ['llm', 'stt', 'tts']:
-                service = self.services.get(service_name)
-                if service and hasattr(service, 'stop'):
-                    cleanup_tasks.append(self._safe_service_stop(service_name, service))
-            
-            # Pipeline manager cleanup
-            if hasattr(self, 'pipeline_manager') and self.pipeline_manager:
-                cleanup_tasks.append(self._safe_pipeline_stop())
-            
-            # Execute all cleanup tasks with timeout
-            if cleanup_tasks:
-                cleanup_results = await asyncio.gather(*cleanup_tasks, return_exceptions=True)
-                
-                # Log cleanup results
-                for i, result in enumerate(cleanup_results):
-                    if isinstance(result, Exception):
-                        logger.warning(f"⚠️ Cleanup task {i} failed", error=str(result))
-                    else:
-                        logger.debug(f"✅ Cleanup task {i} completed")
-                
-                logger.info("🧹 Service cleanup completed")
-            else:
-                logger.info("🧹 No services to cleanup")
-                
-        except Exception as e:
-            logger.error("❌ Error during service cleanup", error=str(e))
-    
-    async def _safe_service_stop(self, service_name: str, service):
-        """Safely stop a service with timeout and error handling"""
-        try:
-            stop_timeout = 5.0  # 5 seconds timeout
-            await asyncio.wait_for(service.stop(), timeout=stop_timeout)
-            logger.info(f"✅ {service_name} service stopped cleanly")
-        except asyncio.TimeoutError:
-            logger.warning(f"⏰ {service_name} service stop timeout ({stop_timeout}s)")
-        except Exception as e:
-            logger.error(f"❌ Error stopping {service_name} service", error=str(e))
-    
-    async def _safe_pipeline_stop(self):
-        """Safely stop the pipeline manager"""
-        try:
-            stop_timeout = 10.0  # 10 seconds timeout for pipeline
-            await asyncio.wait_for(self.pipeline_manager.stop(), timeout=stop_timeout)
-            logger.info("✅ Pipeline manager stopped cleanly")
-        except asyncio.TimeoutError:
-            logger.warning(f"⏰ Pipeline manager stop timeout ({stop_timeout}s)")
-        except Exception as e:
-            logger.error("❌ Error stopping pipeline manager", error=str(e))
-    
-    async def start_opensips_handler(self):
-        """OpenSIPS event handler'ı initialize et (infinite loop başlatmadan)"""
-        try:
-            logger.info("Initializing OpenSIPS event handler...", test_mode=self.test_mode)
-            
-            # OpenSIPS event configuration
-            event_port = int(self.config.get('engine', 'event_port', fallback='8090'))
-            event_host = self.config.get('engine', 'event_ip', fallback='0.0.0.0')
-            
-            # Initialize OpenSIPS event handler
-            self.event_handler = OpenSIPSEventHandler(
-                host=event_host, 
-                port=event_port, 
-                mi_conn=self.mi_conn
-            )
-            
-            # Set call manager
-            self.event_handler.set_call_manager(self.call_manager)
-            
-            logger.info("✅ OpenSIPS Event Handler initialized on", host=event_host, port=event_port)
-            
-        except Exception as e:
-            logger.error("OpenSIPS event handler initialization error", error=str(e))
-            raise
+        """Stops all running services and the pipeline manager."""
+        logger.info("🧹 Cleaning up services...")
+        
+        # Stop all services in parallel
+        stop_tasks = [
+            self._safe_service_stop(name, service)
+            for name, service in self.services.items() if service
+        ]
+        if stop_tasks:
+            await asyncio.gather(*stop_tasks)
 
-    async def start_sip_listener(self):
-        """SIP listener'ı initialize et (infinite loop başlatmadan)"""
+        # Native transport handles its own pipeline cleanup
+        
+        logger.info("🧹 Service cleanup completed.")
+
+    async def _safe_service_stop(self, service_name: str, service):
+        """Safely stops a single service."""
         try:
-            logger.info("Initializing SIP listener...", test_mode=self.test_mode)
-            
-            # SIP listener configuration
-            sip_port = int(self.config.get('engine', 'sip_port', fallback='8089'))
-            sip_host = self.config.get('engine', 'sip_ip', fallback='0.0.0.0')
-            
-            # Initialize SIP listener
-            self.sip_listener = SIPListener(
-                host=sip_host,
-                port=sip_port,
-                call_manager=self.call_manager
-            )
-            
-            logger.info("✅ SIP Listener initialized on", host=sip_host, port=sip_port)
-                
+            await service.stop()
+            logger.info(f"Service {service_name} stopped.")
         except Exception as e:
-            logger.error("SIP listener initialization error", error=str(e))
-            raise
-    
-    async def run_opensips_handler_loop(self):
-        """OpenSIPS event handler infinite loop'unu çalıştır"""
-        try:
-            logger.info("🔄 Starting OpenSIPS Event Handler infinite loop...")
-            await self.event_handler.start()
-        except Exception as e:
-            logger.error("OpenSIPS handler loop error", error=str(e))
-            raise
-    
-    async def run_sip_listener_loop(self):
-        """SIP listener infinite loop'unu çalıştır"""
-        try:
-            logger.info("🔄 Starting SIP Listener infinite loop...")
-            await self.sip_listener.start()
-        except Exception as e:
-            logger.error("SIP listener loop error", error=str(e))
-            raise
-    
+            logger.error(f"Error stopping service {service_name}", error=str(e))
+
+
+
+    async def start_opensips_handler(self):
+        """Initializes and starts the OpenSIPS event handler."""
+        if self.engine:
+            logger.info("▶️ Starting OpenSIPS event handler...")
+            await self.engine.start_event_handler()
+            logger.info("✅ OpenSIPS event handler started.")
+
     async def start(self):
-        """Ana servisi başlat - Yeni OpenSIPSEngine ile"""
+        """Starts all application components in the correct order."""
         try:
-            self.running = True
-            
+            logger.info("🚀 Starting OpenSIPS AI Voice Connector...")
+
             # 1. Load configuration
-            logger.info("📄 Loading configuration...")
             self.load_config()
-            
+
             # 2. Initialize MI connection
-            logger.info("🔗 Initializing MI connection...")
             self.initialize_mi_connection()
-            
-            # 3. Initialize AI services
-            logger.info("🤖 Initializing AI services...")
+
+            # 3. Initialize services first
             await self.initialize_services()
             
-            logger.info("🎉 OpenSIPS AI Voice Connector initialized successfully!")
-            logger.info("🎯 Services ready:")
-            logger.info("   ✅ LLM (Custom LLaMA WebSocket)")
-            logger.info("   ✅ STT (Vosk WebSocket)")
-            logger.info("   ✅ TTS (Piper WebSocket)")
-            logger.info("   ✅ Pipeline Manager")
-            logger.info("   ✅ OpenSIPS Engine (NEW)")
+            # 4. Create Native Call Manager with services
+            self.call_manager = CallManager(services=self.services)
+            logger.info("✅ Native Call Manager created with services")
             
-            # 4. Start OpenSIPS Engine (Event Handler)
-            if self.engine:
-                logger.info("🚀 Starting OpenSIPS Engine...")
-                try:
-                    await self.engine.start_event_handler()
-                    logger.info("✅ OpenSIPS Engine started successfully!")
-                except Exception as e:
-                    logger.error("❌ Failed to start OpenSIPS Engine", error=str(e), exc_info=True)
-                    raise
-            else:
-                logger.error("❌ OpenSIPS Engine not initialized!")
-                raise Exception("OpenSIPS Engine initialization failed")
+            # 5. Native Call Manager uses direct service integration
+            logger.info("✅ Native Call Manager uses direct service integration")
             
-            # 5. Initialize OpenSIPS Event Handler (Critical - This was missing!)
-            logger.info("🎯 Starting OpenSIPS Event Handler on port 8090...")
-            try:
-                await self.start_opensips_handler()
-                logger.info("✅ OpenSIPS Event Handler initialized successfully!")
-            except Exception as e:
-                logger.error("❌ Failed to initialize OpenSIPS Event Handler", error=str(e), exc_info=True)
-                raise
+            # 6. Initialize OpenSIPS Engine
+            self.engine = OpenSIPSEngine(self.call_manager, self.mi_conn)
             
-            # 6. Initialize SIP Listener (Critical - This was missing!)
-            logger.info("🎯 Starting SIP Listener on port 8089...")
-            try:
-                await self.start_sip_listener()
-                logger.info("✅ SIP Listener initialized successfully!")
-            except Exception as e:
-                logger.error("❌ Failed to initialize SIP Listener", error=str(e), exc_info=True)
-                raise
+            # 7. Set engine in CallManager
+            self.call_manager.set_engine(self.engine)
             
-            # 7. Start both listeners in parallel
-            opensips_task = asyncio.create_task(self.run_opensips_handler_loop())
-            sip_task = asyncio.create_task(self.run_sip_listener_loop()) 
+            # 8. Start the OpenSIPS event handler
+            await self.start_opensips_handler()
             
-            logger.info("🔥 OpenSIPS AI Voice Connector is ready for calls!")
-            logger.info("   📡 OpenSIPS Event Handler: 0.0.0.0:8090")
-            logger.info("   📞 SIP Listener: 0.0.0.0:8089")
-            
-            # Wait for both tasks to complete (or until shutdown)
-            try:
-                await asyncio.gather(opensips_task, sip_task)
-            except asyncio.CancelledError:
-                logger.info("Application shutdown requested")
-            finally:
-                # Cancel remaining tasks
-                for task in [opensips_task, sip_task]:
-                    if not task.done():
-                        task.cancel()
-                        try:
-                            await task
-                        except asyncio.CancelledError:
-                            pass
-            
+            logger.info("✅ Application started successfully!")
+            self.running = True
+
         except Exception as e:
-            logger.error("⚠️ Critical error during startup", error=str(e))
-            logger.error("Exception details", exc_info=True)
+            logger.error("💥 Application failed to start", error=str(e), exc_info=True)
             await self.stop()
             raise
-    
+
     async def stop(self):
-        """Servisi durdur - Yeni OpenSIPSEngine ile"""
-        logger.info("Stopping OpenSIPS AI Voice Connector...")
+        """Stops all application components gracefully."""
+        if not self.running:
+            return
+            
+        logger.info("🛑 Stopping OpenSIPS AI Voice Connector...")
         self.running = False
+
+        # 1. Stop the OpenSIPS event handler first
+        if self.engine and hasattr(self.engine, 'shutdown'):
+            await self.engine.shutdown()
+            logger.info("OpenSIPS Engine stopped.")
+
+        # 2. Stop services and pipeline
+        await self._cleanup_services()
         
-        # Stop OpenSIPS Engine (yeni implementasyon)
-        if self.engine:
-            try:
-                await self.engine.shutdown()
-                logger.info("OpenSIPS Engine stopped")
-            except Exception as e:
-                logger.error("Error stopping OpenSIPS Engine", error=str(e))
+        # Shutdown Call Manager
+        if self.call_manager:
+            await self.call_manager.shutdown()
+            logger.info("Call Manager stopped.")
         
-        # Cancel background tasks (legacy)
-        for task in self._background_tasks:
+        # Cancel any lingering background tasks
+        for task in self._background_tasks.values():
             if not task.done():
                 task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-        self._background_tasks.clear()
-        
-        # Stop legacy components
-        if self.sip_listener:
-            await self.sip_listener.stop()
-            logger.info("SIP listener stopped")
-        
-        if self.event_handler:
-            await self.event_handler.stop()
-            logger.info("OpenSIPS event handler stopped")
-        
-        # Stop pipeline manager
-        if self.pipeline_manager:
-            await self.pipeline_manager.stop()
-            logger.info("Pipeline manager stopped")
-        
-        # Stop all services
-        for service_name, service in self.services.items():
-            try:
-                await service.stop()
-                logger.info(f"{service_name} service stopped")
-            except Exception as e:
-                logger.error(f"Error stopping {service_name}", error=str(e))
-        
-        logger.info("OpenSIPS AI Voice Connector stopped")
+        if self._background_tasks:
+            await asyncio.gather(*self._background_tasks.values(), return_exceptions=True)
+
+        logger.info("✅ OpenSIPS AI Voice Connector stopped successfully.")
 
 async def main():
-    """Ana fonksiyon"""
+    """Main entry point for the application"""
     
-    # Test mode check
-    test_mode = '--test' in sys.argv or os.getenv('TEST_MODE', 'false').lower() == 'true'
+    # Determine config file path
+    # In Docker, the app runs from /app, so the cfg directory is at /app/cfg
+    config_file = os.environ.get("OAVC_CONFIG_FILE", "cfg/opensips-ai-voice-connector.ini")
+    
+    # Check for test mode
+    test_mode = os.environ.get("OAVC_TEST_MODE", "false").lower() == "true"
+    
+    # Create the application instance
+    app_instance = OpenSIPSAIVoiceConnector(
+        config_file=config_file,
+        test_mode=test_mode
+    )
+
+    # Setup signal handlers for graceful shutdown (Windows compatible)
+    loop = asyncio.get_event_loop()
+    
+    # Use only signals available on Windows
+    stop_signals = []
+    if hasattr(signal, 'SIGTERM'):
+        stop_signals.append(signal.SIGTERM)
+    if hasattr(signal, 'SIGINT'):
+        stop_signals.append(signal.SIGINT)
     
     try:
-        logger.info("🚀 OpenSIPS AI Voice Connector Starting...", test_mode=test_mode)
-        print("🚀 OpenSIPS AI Voice Connector Starting...")
-        print("=" * 50)
+        for signum in stop_signals:
+            loop.add_signal_handler(signum, lambda signum=signum: asyncio.create_task(app_instance.stop()))
+    except NotImplementedError:
+        # Windows doesn't support signal handlers with asyncio
+        logger.info("Signal handlers not available on this platform")
+
+    # Start the connector
+    await app_instance.start()
+
+    if test_mode:
+        logger.info("🧪 TEST MODE: Application started successfully!")
+        print("\n🧪 TEST MODE: Application running successfully!")
+        print("✅ Configuration loaded")
+        print("✅ Mock services initialized") 
+        print("✅ OpenSIPS event handler ready")
+        print("✅ Call manager ready")
+        print("\nPress Ctrl+C to stop...")
         
-        if test_mode:
-            print("🧪 TEST MODE ENABLED - AI services will be mocked")
-            print("=" * 50)
-        
-        # Create and start connector
-        connector = OpenSIPSAIVoiceConnector(test_mode=test_mode)
-        
-        # Setup signal handlers
-        def signal_handler(signum, frame):
-            logger.info("Received signal, shutting down...", signal=signum)
-            asyncio.create_task(connector.stop())
-        
-        signal.signal(signal.SIGINT, signal_handler)
-        signal.signal(signal.SIGTERM, signal_handler)
-        
-        # Start the connector
-        await connector.start()
-        
-        if test_mode:
-            logger.info("🧪 TEST MODE: Application started successfully!")
-            print("\n🧪 TEST MODE: Application running successfully!")
-            print("✅ Configuration loaded")
-            print("✅ Mock services initialized") 
-            print("✅ OpenSIPS event handler ready")
-            print("✅ Call manager ready")
-            print("\nPress Ctrl+C to stop...")
-            
-            # Keep running in test mode
-            while connector.running:
-                await asyncio.sleep(1)
-        else:
-            # Normal mode - wait for events
-            while connector.running:
-                await asyncio.sleep(0.1)
-        
-    except KeyboardInterrupt:
-        logger.info("Received keyboard interrupt")
-        print("\n👋 Shutting down...")
-    except Exception as e:
-        logger.error("Application error", error=str(e))
-        print(f"❌ Error: {e}")
-        return 1
-    
+        # Keep running in test mode
+        while app_instance.running:
+            await asyncio.sleep(1)
+    else:
+        # Normal mode - wait for events
+        while app_instance.running:
+            await asyncio.sleep(0.1)
+
     return 0
 
 if __name__ == "__main__":
     exit_code = asyncio.run(main())
     sys.exit(exit_code)
-
-# vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4
-
-# Test endpoints for development
-app = FastAPI()
-
-@app.get("/test/pipeline")
-async def test_pipeline():
-    """Test pipeline functionality"""
-    if connector.pipeline_manager:
-        stats = connector.pipeline_manager.get_performance_stats()
-        return {
-            "status": "Pipeline active",
-            "stats": stats,
-            "running": connector.pipeline_manager._is_running
-        }
-    return {"status": "Pipeline not available"}
-
-@app.post("/debug/start_stream/{call_key}")
-async def debug_start_stream_endpoint(call_key: str):
-    """Debug endpoint to manually start stream for a call"""
-    try:
-        result = await connector.debug_start_stream(call_key)
-        return result
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-# Run the application
-exit_code = asyncio.run(main())
-sys.exit(exit_code)
 
 # vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4

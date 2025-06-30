@@ -1,24 +1,24 @@
 services:
   # OpenSIPS AI Voice Connector (OAVC - Ana uygulama)
   opensips-ai-voice-connector:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: opensips-ai-voice-connector
+    hostname: opensips-ai-voice-connector
     command: ["oavc"]
     ports:
       # SIP Interface ports
       - "${OAVC_SIP_PORT:-8089}:8089/udp"
       - "${OAVC_SIP_PORT:-8089}:8089/tcp"
-      # RTP ports for media
-      - "${RTP_PORT_MIN:-35000}-${RTP_PORT_MAX:-35003}:35000-35003/udp"
+      # RTP ports for media (host and container ranges must match)
+      - "${RTP_PORT_MIN:-35000}-${RTP_PORT_MAX:-35020}:${RTP_PORT_MIN:-35000}-${RTP_PORT_MAX:-35020}/udp"
       # Additional RTP ports 
       - "${RTP_EXTRA_PORT_1:-35010}:35010/udp"
       - "${RTP_EXTRA_PORT_2:-35011}:35011/udp"
     volumes:
-      - ./cfg/opensips-ai-voice-connector-docker.ini:/app/cfg/opensips-ai-voice-connector.ini
-      - ./cfg/opensips.cfg:/app/cfg/opensips.cfg
-      - ./test_audio:/app/test_audio
-      # Log directory
       - ./logs:/app/logs
+      - ./cfg:/app/cfg:ro
     environment:
       - CONFIG_FILE=/app/cfg/opensips-ai-voice-connector.ini
       - PYTHONPATH=/app
@@ -51,7 +51,7 @@ services:
       - vosk-server
       - piper-tts-server
       - llm-turkish-server
-    restart: unless-stopped
+    restart: always
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.connect(('localhost', 8089)); s.close()"]
       interval: 30s

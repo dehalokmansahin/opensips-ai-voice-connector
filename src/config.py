@@ -20,274 +20,78 @@
 #
 
 """
-Parses the configuration file with enhanced validation and service initialization checks
+Parses the configuration file.
+This is a simplified, functional approach to configuration management.
 """
 
-import os
 import configparser
+import os
 import structlog
-from typing import Dict, List, Optional, Union
-import asyncio
-
-# Optional dependencies for enhanced validation
-try:
-    import validators
-    import aiohttp
-    VALIDATORS_AVAILABLE = True
-except ImportError:
-    VALIDATORS_AVAILABLE = False
+from configparser import SectionProxy
+from typing import Optional
 
 logger = structlog.get_logger()
 
-_Config = configparser.ConfigParser()
-
+_config: Optional[configparser.ConfigParser] = None
 
 class ConfigValidationError(Exception):
-    """Custom exception for configuration validation errors"""
+    """Custom exception for configuration validation errors."""
     pass
 
+def initialize(config_file: str):
+    """
+    Initializes the config parser with a configuration file.
+    This must be called once at application startup.
+    """
+    global _config
+    if _config:
+        logger.warning("Configuration has already been initialized.")
+        return
 
-class ServiceConfigValidator:
-    """Validates service configurations and checks connectivity"""
+    _config = configparser.ConfigParser()
+    if not os.path.exists(config_file):
+        raise ConfigValidationError(f"Configuration file not found: {config_file}")
     
-    @staticmethod
-    def validate_url(url: str) -> bool:
-        """URL formatını validate et"""
-        if not VALIDATORS_AVAILABLE:
-            return True  # Skip validation if validators not available
-        return validators.url(url) is True
-    
-    @staticmethod
-    async def check_service_connectivity(url: str, timeout: float = 5.0) -> bool:
-        """Service connectivity kontrolü"""
-        if not VALIDATORS_AVAILABLE:
-            return True  # Skip connectivity check if aiohttp not available
-        
-        try:
-            # WebSocket URL'leri için HTTP health check endpoint varsayıyoruz
-            http_url = url.replace('ws://', 'http://').replace('wss://', 'https://')
-            if http_url.endswith('/tts'):
-                http_url = http_url.replace('/tts', '/health')
-            elif not http_url.endswith('/health'):
-                http_url += '/health'
-            
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
-                async with session.get(http_url) as response:
-                    return response.status < 500  # Accept any non-server-error status
-        except Exception as e:
-            logger.warning("Service connectivity check failed", url=url, error=str(e))
-            return False  # Connectivity check failed, but continue anyway
+    try:
+        _config.read(config_file)
+        logger.info("Configuration file loaded successfully", file=config_file)
+    except configparser.Error as e:
+        raise ConfigValidationError(f"Error parsing configuration file {config_file}: {e}")
 
+def get_section(section: str) -> Optional[SectionProxy]:
+    """
+    Get a whole configuration section.
+    Returns a SectionProxy object, which is dict-like.
+    Returns None if the config is not initialized or the section does not exist.
+    """
+    if not _config or not _config.has_section(section):
+        return None
+    return _config[section]
 
-class ConfigSection(dict):
-    """ class that handles a config section """
+def get(section: str, key: str, fallback: any = None) -> any:
+    """
+    Get a single configuration value.
+    """
+    section_proxy = get_section(section)
+    if section_proxy:
+        return section_proxy.get(key, fallback)
+    return fallback
 
-    def __init__(self, section, custom=None):
-        super().__init__(section)
-        self.update(custom)
+def sections() -> list[str]:
+    """Get all section names."""
+    if not _config:
+        return []
+    return _config.sections()
 
-    def getenv(self, env, fallback=None):
-        """ returns the configuration from environment """
-        if not env:
-            return fallback
-        if isinstance(env, list):
-            # check to see whether we have any of the keys
-            for e in env:
-                if e in os.environ:
-                    return os.getenv(e)
-            # no key found - check if env is a list
-            return fallback
-        return os.getenv(env, fallback)
-
-    def get(self, option, env=None, fallback=None):
-        """ returns the configuration for the required option """
-        if isinstance(option, list):
-            # check to see whether we have any of the keys
-            for o in option:
-                if o in self.keys():
-                    return super().get(o)
-            # no key found - check if env is a list
-            return self.getenv(env, fallback)
-        return super().get(option, self.getenv(env, fallback))
-
-    def getboolean(self, option, env=None, fallback=None):
-        """ returns a boolean value from the configuration """
-        val = self.get(option, env, None)
-        if not val:
-            return fallback
-        if val.isnumeric():
-            return int(val) != 0
-        if val.lower() in ["yes", "true", "on"]:
-            return True
-        if val.lower() in ["no", "false", "off"]:
-            return False
-        return fallback
-
-    def getint(self, option, env=None, fallback=None):
-        """ returns an integer value from the configuration """
-        val = self.get(option, env, fallback)
-        try:
-            return int(val) if val is not None else fallback
-        except (ValueError, TypeError):
-            logger.warning(f"Invalid integer value for {option}: {val}, using fallback: {fallback}")
-            return fallback
-
-    def getfloat(self, option, env=None, fallback=None):
-        """ returns a float value from the configuration """
-        val = self.get(option, env, fallback)
-        try:
-            return float(val) if val is not None else fallback
-        except (ValueError, TypeError):
-            logger.warning(f"Invalid float value for {option}: {val}, using fallback: {fallback}")
-            return fallback
-
-
-class Config():
-    """ class that handles the config with enhanced validation """
-
-    @staticmethod
-    def init(config_file):
-        """ Initializes the config with a configuration file """
-        config_file = config_file or os.getenv('CONFIG_FILE')
-        if config_file:
-            if not os.path.exists(config_file):
-                raise ConfigValidationError(f"Configuration file not found: {config_file}")
-            
-            try:
-                _Config.read(config_file)
-                logger.info("Configuration file loaded successfully", file=config_file)
-            except configparser.Error as e:
-                raise ConfigValidationError(f"Error parsing configuration file {config_file}: {str(e)}")
-        else:
-            logger.warning("No configuration file specified, using defaults and environment variables")
-
-    @staticmethod
-    def get(section, init_data=None):
-        """ Retrieves a specific section from the config file """
-        if section not in _Config:
-            _Config.add_section(section)
-        if not init_data:
-            init_data = {}
-        return ConfigSection(_Config[section], init_data)
-
-    @staticmethod
-    def engine(option, env=None, fallback=None):
-        """ Special handling for the engine section """
-        section = Config.get("engine")
-        return section.get(option, env, fallback)
-
-    @staticmethod
-    def sections():
-        """ Retrieves the sections from the config file """
-        return _Config.sections()
-
-    @staticmethod
-    async def validate_services_config() -> Dict[str, Dict[str, Union[str, bool]]]:
-        """
-        Validate all service configurations and check connectivity
-        
-        Returns:
-            Dict: Service validation results
-            
-        Raises:
-            ConfigValidationError: If critical services are misconfigured
-        """
-        validation_results = {}
-        validator = ServiceConfigValidator()
-        
-        # LLM Service Validation
-        try:
-            llm_config = Config.get("llm")
-            required_llm_fields = ["url"]
-            validator.validate_required_fields(llm_config, required_llm_fields, "llm")
-            
-            llm_url = llm_config.get("url")
-            llm_reachable = await validator.validate_service_url(llm_url, "LLM")
-            
-            validation_results["llm"] = {
-                "url": llm_url,
-                "reachable": llm_reachable,
-                "validated": True
-            }
-            
-        except ConfigValidationError as e:
-            logger.error("LLM service validation failed", error=str(e))
-            validation_results["llm"] = {"validated": False, "error": str(e)}
-        
-        # STT Service Validation
-        try:
-            stt_config = Config.get("stt")
-            required_stt_fields = ["url"]
-            validator.validate_required_fields(stt_config, required_stt_fields, "stt")
-            
-            stt_url = stt_config.get("url")
-            stt_reachable = await validator.validate_service_url(stt_url, "STT")
-            
-            validation_results["stt"] = {
-                "url": stt_url,
-                "reachable": stt_reachable,
-                "validated": True
-            }
-            
-        except ConfigValidationError as e:
-            logger.error("STT service validation failed", error=str(e))
-            validation_results["stt"] = {"validated": False, "error": str(e)}
-        
-        # TTS Service Validation
-        try:
-            tts_config = Config.get("tts")
-            required_tts_fields = ["url"]
-            validator.validate_required_fields(tts_config, required_tts_fields, "tts")
-            
-            tts_url = tts_config.get("url")
-            tts_reachable = await validator.validate_service_url(tts_url, "TTS")
-            
-            validation_results["tts"] = {
-                "url": tts_url,
-                "reachable": tts_reachable,
-                "validated": True
-            }
-            
-        except ConfigValidationError as e:
-            logger.error("TTS service validation failed", error=str(e))
-            validation_results["tts"] = {"validated": False, "error": str(e)}
-        
-        # OpenSIPS Service Validation
-        try:
-            opensips_config = Config.get("opensips")
-            required_opensips_fields = ["ip", "port"]
-            validator.validate_required_fields(opensips_config, required_opensips_fields, "opensips")
-            
-            validation_results["opensips"] = {
-                "ip": opensips_config.get("ip"),
-                "port": opensips_config.getint("port"),
-                "validated": True
-            }
-            
-        except ConfigValidationError as e:
-            logger.error("OpenSIPS service validation failed", error=str(e))
-            validation_results["opensips"] = {"validated": False, "error": str(e)}
-        
-        # Log validation summary
-        valid_services = sum(1 for result in validation_results.values() if result.get("validated", False))
-        total_services = len(validation_results)
-        
-        logger.info("Service configuration validation completed", 
-                   valid_services=valid_services, 
-                   total_services=total_services,
-                   results=validation_results)
-        
-        # Check if critical services are valid
-        critical_services = ["llm", "stt", "tts", "opensips"]
-        failed_critical = [name for name in critical_services 
-                          if not validation_results.get(name, {}).get("validated", False)]
-        
-        if failed_critical:
-            raise ConfigValidationError(
-                f"Critical services failed validation: {', '.join(failed_critical)}"
-            )
-        
-        return validation_results
-
+# The validation logic has been moved to main.py to simplify this module.
+# The original validation logic was complex and had external dependencies.
+async def validate_services_config() -> dict:
+    """
+    Placeholder for service validation. The actual implementation is now in main.py
+    to keep this config module lean and free of async logic and dependencies.
+    """
+    logger.info("Service validation check from config module (placeholder).")
+    # In the new design, the caller should handle validation.
+    return {"status": "validation_moved"}
 
 # vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4

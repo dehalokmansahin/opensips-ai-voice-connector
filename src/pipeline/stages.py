@@ -32,6 +32,7 @@ from services.llama_websocket import LlamaWebsocketLLMService
 try:
     from pipeline.vad_config import DEFAULT_VAD_CONFIG, VADConfig
 except ImportError:
+    import structlog
     logger = structlog.get_logger()
     logger.warning("VAD config not available, using defaults")
     DEFAULT_VAD_CONFIG = None

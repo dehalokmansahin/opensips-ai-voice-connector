@@ -28,7 +28,7 @@ import configparser
 from pathlib import Path
 import logging
 from sipmessage import Address
-from config import Config
+from config import get as get_config_section, sections as get_config_sections
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +121,7 @@ def get_ai_flavor_default(user):
     """ Returns the default algorithm for AI choosing """
     # remove disabled engines
     keys = [k for k, _ in FLAVORS.items() if
-            not Config.get(k).getboolean("disabled",
+            not get_config_section(k).getboolean("disabled",
                                          f"{k.upper()}_DISABLE",
                                          False)]
     if user in keys:
@@ -143,14 +143,14 @@ def get_ai_flavor(params):
 
     # first, get the sections in order and check if they have a dialplan
     flavor = None
-    for flavor in Config.sections():
+    for flavor in get_config_sections():
         if flavor not in FLAVORS:
             continue
-        if Config.get(flavor).getboolean("disabled",
+        if get_config_section(flavor).getboolean("disabled",
                                          f"{flavor.upper()}_DISABLE",
                                          False):
             continue
-        dialplans = Config.get(flavor).get("match")
+        dialplans = get_config_section(flavor).get("match")
         if not dialplans:
             continue
         if isinstance(dialplans, list):

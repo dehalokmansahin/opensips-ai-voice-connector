@@ -132,7 +132,7 @@ class PiperWebsocketTTSService(TTSService):
                             
                             # PCMU (ulaw) formatına dönüştür
                             ulaw_audio = audioop.lin2ulaw(resampled_audio, 2)
-
+                            
                             # Audio frame oluştur
                             audio_frame = TTSAudioRawFrame(
                                 audio=ulaw_audio, 
