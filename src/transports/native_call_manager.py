@@ -168,25 +168,10 @@ class NativeCall:
     
     def _get_rtp_ip(self) -> str:
         """Get RTP IP address"""
-        try:
-            rtp_cfg = get_config("rtp")
-            rtp_ip = rtp_cfg.get('ip', None)
-        except Exception:
-            rtp_ip = None
-        
-        # Use configured IP if available and not empty/default
-        if rtp_ip and rtp_ip != '0.0.0.0' and rtp_ip.strip():
-            logger.info("🌐 Using configured RTP IP", rtp_ip=rtp_ip)
-            return rtp_ip
-        
-        # Fallback to auto-detection
-        try:
-            rtp_ip = socket.gethostbyname(socket.gethostname())
-            logger.info("🌐 Auto-detected container IP for RTP", rtp_ip=rtp_ip)
-        except Exception as e:
-            logger.warning("🌐 Failed to detect container IP, using fallback", error=str(e))
-            rtp_ip = "127.0.0.1"
-        
+        # Hardcoded external IP for testing - REMOVE IN PRODUCTION
+        # Bu IP Docker host'un IP'si olmalı ve client'ın erişebileceği bir IP olmalı
+        rtp_ip = "192.168.88.120"  # Docker host IP
+        logger.info("🌐 Using hardcoded IP for testing", rtp_ip=rtp_ip)
         return rtp_ip
     
     def _generate_sdp_response(self, rtp_ip: str) -> str:
