@@ -131,6 +131,9 @@ class UDPRTPInputTransport(BaseInputTransport):
             # Start UDP packet reading task
             self._udp_task = self.create_task(self._udp_reader_task())
             
+            # Push StartFrame downstream to initialize pipeline
+            await self.push_frame(frame)
+            
             # Signal transport ready
             await self.set_transport_ready(frame)
             

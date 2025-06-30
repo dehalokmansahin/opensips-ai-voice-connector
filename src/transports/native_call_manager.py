@@ -9,17 +9,33 @@ from typing import Optional, Dict, Any
 import structlog
 import random
 import socket
+import audioop
 
-from pipecat.frames.frames import StartFrame, EndFrame
+from pipecat.frames.frames import StartFrame, EndFrame, AudioRawFrame, Frame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.task import PipelineTask
 from pipecat.pipeline.runner import PipelineRunner
+from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
 
 from transports.pipecat_udp_transport import UDPRTPTransport, create_opensips_rtp_transport
 from pipeline.stages import VADProcessor, STTProcessor, LLMProcessor, TTSProcessor
+from services.vosk_websocket import VoskWebsocketSTTService
+from services.llama_websocket import LlamaWebsocketLLMService
+from services.piper_websocket import PiperWebsocketTTSService
 from config import get as get_config, get_section
 
 logger = structlog.get_logger()
+
+
+class ULawDecoder(FrameProcessor):
+    """Decodes U-Law encoded audio frames to 16-bit PCM."""
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        if isinstance(frame, AudioRawFrame):
+            decoded_audio = audioop.ulaw2lin(frame.audio, 2)
+            await self.push_frame(AudioRawFrame(audio=decoded_audio, sample_rate=8000), direction)
+        else:
+            await self.push_frame(frame, direction)
 
 
 class NativeCall:
@@ -136,24 +152,28 @@ class NativeCall:
         processors = []
         
         try:
-            # VAD Processor
+            # 0. U-Law Decoder
+            ulaw_decoder = ULawDecoder()
+            processors.append(ulaw_decoder)
+
+            # 1. VAD Processor
             vad_config = get_config("vad", {})
             vad_processor = VADProcessor(vad_config)
             processors.append(vad_processor)
             
-            # STT Processor  
+            # 2. STT Processor  
             if self.services.get("stt"):
-                stt_processor = STTProcessor(self.services["stt"])
+                stt_processor = STTProcessor(stt_service=self.services["stt"])
                 processors.append(stt_processor)
             
-            # LLM Processor
+            # 3. LLM Processor
             if self.services.get("llm"):
-                llm_processor = LLMProcessor(self.services["llm"])
+                llm_processor = LLMProcessor(llm_service=self.services["llm"])
                 processors.append(llm_processor)
             
-            # TTS Processor
+            # 4. TTS Processor
             if self.services.get("tts"):
-                tts_processor = TTSProcessor(self.services["tts"])
+                tts_processor = TTSProcessor(tts_service=self.services["tts"])
                 processors.append(tts_processor)
             
             logger.info("✅ Pipeline processors created", 
@@ -255,6 +275,12 @@ class NativeCallManager:
         try:
             logger.info("🚀 Creating native call", call_id=call_id, sdp_info=sdp_info)
             
+            # Check if call already exists (SIP retransmission deduplication)
+            existing_call = self.calls.get(call_id)
+            if existing_call:
+                logger.info("📞 Call already exists, returning existing call", call_id=call_id)
+                return existing_call
+            
             # Create call
             call = NativeCall(call_id, sdp_info, self.services)
             
@@ -280,27 +306,20 @@ class NativeCallManager:
         if call:
             await call.stop()
             del self.calls[call_id]
-            logger.info("🔚 Native call terminated", call_id=call_id)
-        else:
-            logger.warning("Call not found for termination", call_id=call_id)
-    
+            logger.info("✅ Call terminated", call_id=call_id)
+
     def get_call(self, call_id: str) -> Optional[NativeCall]:
-        """Get a call by ID"""
+        """Get a call by its ID"""
         return self.calls.get(call_id)
-    
+
     def set_engine(self, engine):
-        """Set OpenSIPS engine (for compatibility with legacy interface)"""
-        self.engine = engine
-        logger.info("✅ Engine set in Native Call Manager")
-    
+        """Sets the OpenSIPS engine for callbacks."""
+        # This might not be needed in the native transport model
+        pass
+
     async def shutdown(self):
-        """Shutdown all calls"""
-        logger.info("🛑 Shutting down native call manager...")
-        
-        # Stop all calls
-        stop_tasks = [call.stop() for call in self.calls.values()]
-        if stop_tasks:
-            await asyncio.gather(*stop_tasks, return_exceptions=True)
-        
-        self.calls.clear()
-        logger.info("✅ Native call manager shutdown complete") 
+        """Shutdown the call manager and terminate all calls."""
+        logger.info("Shutting down NativeCallManager...")
+        for call_id in list(self.calls.keys()):
+            await self.terminate_call(call_id)
+        logger.info("All native calls terminated.") 

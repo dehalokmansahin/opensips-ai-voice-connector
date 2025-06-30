@@ -12,9 +12,12 @@ from pipecat.frames.frames import (
     Frame, AudioRawFrame, InputAudioRawFrame, OutputAudioRawFrame,
     StartFrame, EndFrame, TranscriptionFrame, LLMTextFrame, TextFrame,
     LLMFullResponseStartFrame, LLMFullResponseEndFrame,
-    UserStartedSpeakingFrame, UserStoppedSpeakingFrame
+    UserStartedSpeakingFrame, UserStoppedSpeakingFrame, LLMMessagesFrame
 )
 from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
+from pipecat.services.stt_service import STTService
+from pipecat.services.llm_service import LLMService
+from pipecat.services.tts_service import TTSService
 
 # Absolute imports
 from services.vosk_websocket import VoskWebsocketSTTService
@@ -93,10 +96,10 @@ class VADProcessor(FrameProcessor):
                     is_active = rms > self._speech_threshold
                     
                     logger.debug("🎤 VAD analysis", 
-                                rms=rms, 
-                                threshold=self._speech_threshold,
-                                is_active=is_active,
-                                is_speaking=self._is_speaking)
+                                 rms=rms, 
+                                 threshold=self._speech_threshold,
+                                 is_active=is_active,
+                                 is_speaking=self._is_speaking)
                     
                     # Speech detection logic with timing
                     if is_active:
@@ -138,188 +141,66 @@ class VADProcessor(FrameProcessor):
         logger.debug("🎤 VAD frame pushed successfully")
 
 class STTProcessor(FrameProcessor):
-    """Speech-to-Text processor using Vosk WebSocket - basitleştirilmiş"""
+    """Speech-to-Text processor using a Pipecat STTService."""
     
-    def __init__(self, stt_service=None, **kwargs):
+    def __init__(self, stt_service: STTService, **kwargs):
         super().__init__(**kwargs)
-        self._stt_service = stt_service or VoskWebsocketSTTService(url="ws://vosk-server:2700")
-        self._is_started = False
-        logger.info("STTProcessor initialized", service_type=type(self._stt_service).__name__)
-    
+        self.stt_service = stt_service
+        logger.info("STTProcessor initialized", service_type=type(self.stt_service).__name__)
+
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
-        """Process frames following Pipecat pattern"""
-        
-        # First call the parent class process_frame to handle StartFrame, etc.
-        await super().process_frame(frame, direction)
-        
-        logger.debug("STT processing frame", frame_type=type(frame).__name__)
-        
-        if isinstance(frame, StartFrame):
-            if not self._is_started:
-                try:
-                    # Service availability check
-                    if not self._stt_service:
-                        logger.error("STT service not available")
-                        return
-                        
-                    await self._stt_service.start()
-                    self._is_started = True
-                    logger.info("🗣️ STT service started successfully")
-                except Exception as e:
-                    logger.error("Failed to start STT service", error=str(e))
-                    # Continue without STT - graceful degradation
-        
-        elif isinstance(frame, EndFrame):
-            if self._is_started:
-                await self._stt_service.stop()
-                self._is_started = False
-                logger.info("STT service stopped")
-        
-        elif isinstance(frame, (AudioRawFrame, InputAudioRawFrame)):
-            # Handle audio frames for STT
-            logger.info("🗣️ STT received audio frame", 
-                       frame_type=type(frame).__name__,
-                       audio_size=len(frame.audio) if frame.audio else 0,
-                       stt_started=self._is_started)
-            
-            # Ses frame'ini STT servisine gönder
-            if self._is_started and frame.audio:
-                logger.debug("🗣️ Sending audio to STT service", audio_size=len(frame.audio))
-                await self._stt_service.run_stt(frame.audio)
-                logger.debug("🗣️ Audio sent to STT service successfully")
-            elif not self._is_started:
-                logger.warning("🗣️ STT service not started, dropping audio frame")
-            elif not frame.audio:
-                logger.warning("🗣️ Empty audio frame received")
-        
-        elif isinstance(frame, UserStartedSpeakingFrame):
-            logger.info("🗣️ STT received UserStartedSpeakingFrame")
-        
-        elif isinstance(frame, UserStoppedSpeakingFrame):
-            logger.info("🗣️ STT received UserStoppedSpeakingFrame")
-        
-        # Frame'i devam ettir
-        logger.debug("🗣️ STT pushing frame downstream", frame_type=type(frame).__name__)
-        await self.push_frame(frame, direction)
-        logger.debug("🗣️ STT frame pushed successfully")
+        """Processes a frame and passes it to the STT service."""
+        await self.stt_service.process_frame(frame, direction)
+
+    async def _on_downstream_frame(self, frame: Frame):
+        # The STT service will push transcription frames, which need to be
+        # pushed downstream from this processor.
+        await self.push_frame(frame, FrameDirection.DOWNSTREAM)
 
 class LLMProcessor(FrameProcessor):
-    """Large Language Model processor using LLaMA WebSocket"""
+    """Large Language Model processor using a Pipecat LLMService."""
     
-    def __init__(self, llm_service=None, **kwargs):
+    def __init__(self, llm_service: LLMService, **kwargs):
         super().__init__(**kwargs)
-        self._llm_service = llm_service or LlamaWebsocketLLMService(url="ws://llm-turkish-server:8765", model="llama3.2:3b-instruct-turkish")
-        self._is_started = False
-        logger.info("LLMProcessor initialized", service_type=type(self._llm_service).__name__)
-    
+        self.llm_service = llm_service
+        logger.info("LLMProcessor initialized", service_type=type(self.llm_service).__name__)
+        self._history = []
+
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
-        """Process frames following Pipecat pattern"""
+        """Processes a frame, collects transcriptions, and passes them to the LLM service."""
         
-        # First call the parent class process_frame to handle StartFrame, etc.
-        await super().process_frame(frame, direction)
-        
-        if isinstance(frame, StartFrame):
-            if not self._is_started:
-                try:
-                    # Service availability check
-                    if not self._llm_service:
-                        logger.error("LLM service not available")
-                        return
-                        
-                    await self._llm_service.start()
-                    self._is_started = True
-                    logger.info("LLM service started successfully")
-                except Exception as e:
-                    logger.error("Failed to start LLM service", error=str(e))
-                    # Continue without LLM - graceful degradation
-        
-        elif isinstance(frame, EndFrame):
-            if self._is_started:
-                await self._llm_service.stop()
-                self._is_started = False
-                logger.info("LLM service stopped")
-        
-        elif isinstance(frame, TranscriptionFrame):
-            # Transcription frame'ini LLM'e gönder (streaming)
-            if self._is_started and frame.text and frame.text.strip():
-                logger.info("Processing transcription with streaming LLM", text=frame.text)
-                
-                try:
-                    # Streaming LLM frame'lerini al ve pipeline'a gönder
-                    async for llm_frame in self._llm_service.run_llm(frame.text.strip()):
-                        await self.push_frame(llm_frame, direction)
-                        
-                except Exception as e:
-                    logger.error("Error in streaming LLM processing", error=str(e))
-                    # Hata durumunda varsayılan yanıt
-                    await self.push_frame(LLMFullResponseStartFrame(), direction)
-                    await self.push_frame(LLMTextFrame(text="Bir sorun yaşadım. Tekrar dener misiniz?"), direction)
-                    await self.push_frame(LLMFullResponseEndFrame(), direction)
-        
-        # Frame'i devam ettir
-        await self.push_frame(frame, direction)
+        if isinstance(frame, TranscriptionFrame):
+            # For now, let's assume we send the full transcription to the LLM.
+            # A more advanced implementation could buffer or handle interim results.
+            if frame.text and frame.text.strip():
+                logger.info("LLMProcessor received transcription", text=frame.text)
+                self._history.append({"role": "user", "content": frame.text})
+                await self.llm_service.process_frame(LLMMessagesFrame(messages=self._history), direction)
+        elif isinstance(frame, (StartFrame, EndFrame)):
+             await self.llm_service.process_frame(frame, direction)
+        else:
+            # Forward other frames if necessary
+            await self.push_frame(frame, direction)
+
+    async def _on_downstream_frame(self, frame: Frame):
+         # The LLM service will push TextFrames, which need to be pushed downstream.
+        if isinstance(frame, TextFrame):
+            self._history.append({"role": "assistant", "content": frame.text})
+        await self.push_frame(frame, FrameDirection.DOWNSTREAM)
 
 class TTSProcessor(FrameProcessor):
-    """Text-to-Speech processor using Piper WebSocket"""
+    """Text-to-Speech processor using a Pipecat TTSService."""
     
-    def __init__(self, tts_service=None, **kwargs):
+    def __init__(self, tts_service: TTSService, **kwargs):
         super().__init__(**kwargs)
-        self._tts_service = tts_service or PiperWebsocketTTSService(url="ws://piper-tts-server:8000/tts")
-        self._is_started = False
-        logger.info("TTSProcessor initialized", service_type=type(self._tts_service).__name__)
-    
+        self.tts_service = tts_service
+        logger.info("TTSProcessor initialized", service_type=type(self.tts_service).__name__)
+
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
-        """Process frames following Pipecat pattern"""
-        
-        # First call the parent class process_frame to handle StartFrame, etc.
-        await super().process_frame(frame, direction)
-        
-        if isinstance(frame, StartFrame):
-            if not self._is_started:
-                try:
-                    # Service availability check
-                    if not self._tts_service:
-                        logger.error("TTS service not available")
-                        return
-                        
-                    await self._tts_service.start()
-                    self._is_started = True
-                    logger.info("TTS service started successfully")
-                except Exception as e:
-                    logger.error("Failed to start TTS service", error=str(e))
-                    # Continue without TTS - graceful degradation
-        
-        elif isinstance(frame, EndFrame):
-            if self._is_started:
-                await self._tts_service.stop()
-                self._is_started = False
-                logger.info("TTS service stopped")
-        
-        elif isinstance(frame, TranscriptionFrame):
-            # Transcription frame'ini TTS'e gönder (backward compatibility)
-            if self._is_started and frame.text:
-                logger.info("Processing transcription for TTS", text=frame.text)
-                
-                try:
-                    # TTS frame'lerini al ve pipeline'a gönder
-                    async for tts_frame in self._tts_service.run_tts(frame.text):
-                        await self.push_frame(tts_frame, direction)
-                        
-                except Exception as e:
-                    logger.error("Error in TTS processing", error=str(e))
-        
-        elif isinstance(frame, (TextFrame, LLMTextFrame)):
-            # LLM'den gelen TextFrame/LLMTextFrame'leri TTS'e gönder
-            if self._is_started and frame.text:
-                logger.info("Processing LLM text for TTS", text=frame.text)
-                
-                try:
-                    # TTS frame'lerini al ve pipeline'a gönder
-                    async for tts_frame in self._tts_service.run_tts(frame.text):
-                        await self.push_frame(tts_frame, direction)
-                        
-                except Exception as e:
-                    logger.error("Error in TTS processing", error=str(e))
-        
-        # Frame'i devam ettir
-        await self.push_frame(frame, direction) 
+        """Processes a frame and passes it to the TTS service."""
+        await self.tts_service.process_frame(frame, direction)
+
+    async def _on_downstream_frame(self, frame: Frame):
+        # The TTS service will push AudioRawFrames, which need to be
+        # pushed downstream from this processor.
+        await self.push_frame(frame, FrameDirection.DOWNSTREAM) 

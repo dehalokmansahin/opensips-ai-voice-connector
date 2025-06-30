@@ -29,6 +29,7 @@ from pathlib import Path
 import logging
 from sipmessage import Address
 from config import get as get_config_section, sections as get_config_sections
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -105,10 +106,12 @@ def indialog(params):
     return False
 
 
-def get_user(params):
-    """ Returns the User from the SIP headers """
-    to = get_to(params)
-    return to.uri.user.lower() if to.uri else None
+def get_user(header_str: str) -> Optional[str]:
+    """Extracts user from a To/From header string."""
+    if not header_str:
+        return None
+    addr = Address.parse(header_str)
+    return addr.uri.user.lower() if addr and addr.uri else None
 
 
 def _dialplan_match(regex, string):

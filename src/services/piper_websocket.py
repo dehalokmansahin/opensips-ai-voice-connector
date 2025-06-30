@@ -1,5 +1,5 @@
 """
-Piper WebSocket TTS Service
+Piper WebSocket TTS Service - Pipecat Native Uyumlu
 """
 
 import asyncio
@@ -12,22 +12,26 @@ import audioop
 
 from pipecat.frames.frames import (
     Frame,
-    TTSAudioRawFrame,
+    AudioRawFrame,
     TTSStartedFrame,
     TTSStoppedFrame,
+    TextFrame,
+    SystemFrame
 )
-from pipecat.services.ai_services import TTSService
+from pipecat.services.tts_service import TTSService
+from pipecat.processors.frame_processor import Frame, FrameDirection
+
 
 logger = structlog.get_logger()
 
 class PiperWebsocketTTSService(TTSService):
-    """Piper WebSocket tabanlı TTS servisi"""
+    """Piper WebSocket tabanlı TTS servisi, Pipecat ile tam uyumlu."""
     
     def __init__(
         self, 
-        url: str = "ws://localhost:8000/tts",
-        sample_rate: int = 22050,
-        target_sample_rate: int = 8000,
+        url: str,
+        sample_rate: int = 22050,  # Piper's output sample rate
+        target_sample_rate: int = 8000, # PSTN sample rate
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -41,7 +45,7 @@ class PiperWebsocketTTSService(TTSService):
         
         logger.info("PiperWebsocketTTSService initialized", 
                    url=self._url, 
-                   sample_rate=self._sample_rate,
+                   source_sample_rate=self._sample_rate,
                    target_sample_rate=self._target_sample_rate)
     
     async def start(self) -> None:
@@ -83,88 +87,73 @@ class PiperWebsocketTTSService(TTSService):
                 self._websocket = None
                 self._is_connected = False
     
-    async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
-        """TTS işlemini çalıştır ve audio frame'leri üret"""
-        if not self._is_connected or not self._websocket:
-            logger.warning("Piper TTS WebSocket not connected, skipping TTS")
-            return
-            
+    async def run_tts(self, frame_iterator: AsyncGenerator[Frame, None]) -> AsyncGenerator[Frame, None]:
+        """
+        TTS işlemini çalıştırır, metin frame'lerini alır ve audio frame'leri üretir.
+        """
+        websocket = None
         try:
-            logger.info("Starting TTS synthesis", text=text[:50] + "..." if len(text) > 50 else text)
-            
-            # TTS başladı frame'ini emit et
-            yield TTSStartedFrame()
-            
-            # TTS isteğini gönder
-            await self._websocket.send(text)
-            logger.debug("TTS request sent")
-            
-            # Audio chunk'larını al
-            async for message in self._websocket:
+            async for frame in frame_iterator:
+                if not isinstance(frame, TextFrame):
+                    yield frame
+                    continue
+                
+                text = frame.text.strip()
+                if not text:
+                    continue
+
+                logger.info(f"Synthesizing text: {text}")
+                yield TTSStartedFrame(text=text)
+
                 try:
-                    # JSON mesaj mı kontrol et
-                    if isinstance(message, str):
-                        data = json.loads(message)
-                        message_type = data.get("type")
-                        
-                        if message_type == "start":
-                            logger.debug("TTS audio stream started")
-                            continue
-                        elif message_type == "end":
-                            logger.debug("TTS audio stream ended")
-                            break
-                        elif message_type == "error":
-                            logger.error("TTS error", message=data.get("message"))
-                            break
-                        else:
-                            logger.debug("TTS message", type=message_type, data=data)
-                            continue
+                    websocket = await websockets.connect(self._url)
                     
-                    # Binary audio data
-                    elif isinstance(message, bytes):
-                        if len(message) > 0:
-                            logger.debug("Received audio chunk", size=len(message))
+                    # Wait for welcome message (optional but good practice)
+                    welcome = await asyncio.wait_for(websocket.recv(), timeout=5)
+                    logger.debug(f"Piper welcome: {welcome}")
+
+                    # Send text to synthesize
+                    await websocket.send(text)
+
+                    # Receive audio chunks
+                    async for message in websocket:
+                        if isinstance(message, bytes) and len(message) > 0:
+                            # Piper default output: 22050Hz, 16-bit PCM mono
+                            # Resample to 8000Hz for PSTN
+                            resampled_audio, _ = audioop.ratecv(message, 2, 1, self._sample_rate, self._target_sample_rate, None)
                             
-                            # Ham ses verisini işle
-                            # Piper'dan gelen ses 22050Hz, mono, 16-bit PCM.
-                            # Bunu 8000Hz'e düşürmemiz gerekiyor.
-                            resampled_audio = audioop.ratecv(message, 2, 1, self._sample_rate, self._target_sample_rate, None)[0]
-                            
-                            # PCMU (ulaw) formatına dönüştür
+                            # Convert to PCMU (u-law) for PSTN
                             ulaw_audio = audioop.lin2ulaw(resampled_audio, 2)
                             
-                            # Audio frame oluştur
-                            audio_frame = TTSAudioRawFrame(
-                                audio=ulaw_audio, 
-                                sample_rate=self._target_sample_rate,
-                                num_channels=1
-                            )
-                            
-                            yield audio_frame
-                        
-                except json.JSONDecodeError:
-                    # Binary data olarak treat et
-                    if isinstance(message, bytes) and len(message) > 0:
-                        logger.debug("Received binary audio chunk", size=len(message))
-                        
-                        audio_frame = TTSAudioRawFrame(
-                            audio=message,
-                            sample_rate=self._sample_rate,
-                            num_channels=1
-                        )
-                        
-                        yield audio_frame
-                        
+                            yield AudioRawFrame(audio=ulaw_audio, sample_rate=self._target_sample_rate)
+                        elif isinstance(message, str):
+                            # Handle potential JSON messages like 'end' or 'error'
+                            try:
+                                data = json.loads(message)
+                                if data.get("type") == "end":
+                                    logger.debug("TTS stream ended by server message.")
+                                    break
+                                elif data.get("type") == "error":
+                                    logger.error(f"Piper TTS error: {data.get('message')}")
+                                    break
+                            except json.JSONDecodeError:
+                                logger.warning(f"Received non-JSON text message from Piper: {message}")
+
+                except websockets.exceptions.ConnectionClosed:
+                    logger.info("Piper connection closed, assuming TTS for this text is complete.")
                 except Exception as e:
-                    logger.error("Error processing TTS response", error=str(e))
-                    break
-            
-            # TTS bitti frame'ini emit et
-            yield TTSStoppedFrame()
-            logger.info("TTS synthesis completed")
-                
+                    logger.error(f"Error during Piper TTS synthesis for '{text}': {e}", exc_info=True)
+                finally:
+                    if websocket and not websocket.closed:
+                        await websocket.close()
+                    
+                    yield TTSStoppedFrame(text=text)
+                    logger.info(f"Finished synthesizing text: {text}")
+
         except Exception as e:
-            logger.error("Error in TTS processing", error=str(e))
+            logger.error(f"Error in Piper TTS service run_tts loop: {e}", exc_info=True)
+        finally:
+             logger.info("Piper TTS service stopped.")
     
     async def synthesize_text(self, text: str) -> bytes:
         """Test için: metni sese çevir ve tüm audio'yu döndür"""

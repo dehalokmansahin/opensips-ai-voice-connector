@@ -1,167 +1,136 @@
 """
-Vosk WebSocket STT Service - Düzeltilmiş versiyon
+Vosk WebSocket STT Service - Pipecat Native Uyumlu Versiyon
 """
 
 import asyncio
 import json
 import logging
 import websockets
-from typing import Optional, Dict, Any
+from typing import AsyncGenerator, Optional, Dict, Any
 import structlog
 
 from pipecat.frames.frames import (
     Frame,
     AudioRawFrame,
+    EndFrame,
+    ErrorFrame,
     InterimTranscriptionFrame,
+    StartFrame,
+    SystemFrame,
     TranscriptionFrame,
+    TextFrame,
 )
-from pipecat.services.ai_services import STTService
+from pipecat.services.stt_service import STTService
+from pipecat.processors.frame_processor import FrameDirection
 
-logger = structlog.get_logger()
+from loguru import logger
 
 class VoskWebsocketSTTService(STTService):
-    """Vosk WebSocket tabanlı STT servisi"""
-    
+    """
+    Vosk STT service that uses a WebSocket connection.
+    This service connects to a Vosk server, sends audio data,
+    and pushes TranscriptionFrames back into the pipeline.
+    """
     def __init__(
-        self, 
-        url: str = "ws://localhost:2700",
-        sample_rate: int = 16000,
-        **kwargs
-    ):
+            self,
+            url: str,
+            sample_rate: int = 16000,
+            **kwargs):
         super().__init__(**kwargs)
         self._url = url
         self._sample_rate = sample_rate
-        self._websocket: Optional[websockets.WebSocketServerProtocol] = None
-        self._connection_lock = asyncio.Lock()
-        self._is_connected = False
-        
-        logger.info("VoskWebsocketSTTService initialized", 
-                   url=self._url, 
-                   sample_rate=self._sample_rate)
-    
-    async def start(self) -> None:
-        """WebSocket bağlantısını başlat"""
-        async with self._connection_lock:
-            if self._is_connected:
-                return
-                
-            try:
-                logger.info("Connecting to Vosk WebSocket", url=self._url)
-                self._websocket = await websockets.connect(self._url)
-                
-                # Vosk config mesajını gönder
-                config_message = {
-                    "config": {
-                        "sample_rate": self._sample_rate,
-                        "format": "json",
-                        "words": True
-                    }
-                }
-                
-                await self._websocket.send(json.dumps(config_message))
-                logger.info("Vosk config sent", config=config_message)
-                
-                self._is_connected = True
-                logger.info("Vosk WebSocket connected successfully")
-                
-            except Exception as e:
-                logger.error("Failed to connect to Vosk WebSocket", error=str(e))
-                raise
-    
-    async def stop(self) -> None:
-        """WebSocket bağlantısını kapat"""
-        async with self._connection_lock:
-            if not self._is_connected:
-                return
-                
-            try:
-                if self._websocket:
-                    # EOS mesajı gönder
-                    await self._websocket.send('{"eof": 1}')
-                    await self._websocket.close()
-                    logger.info("Vosk WebSocket connection closed")
-                    
-            except Exception as e:
-                logger.warning("Error closing Vosk WebSocket", error=str(e))
-            finally:
-                self._websocket = None
-                self._is_connected = False
-    
-    async def run_stt(self, audio: bytes) -> None:
-        """STT işlemini çalıştır"""
-        if not self._is_connected or not self._websocket:
-            logger.warning("Vosk WebSocket not connected, skipping STT")
-            return
-        
-        # Audio format validation
-        if not audio or len(audio) == 0:
-            logger.debug("Empty audio data, skipping")
-            return
-        
-        # Ensure audio is bytes type
-        if not isinstance(audio, bytes):
-            logger.error(f"Audio data must be bytes, got {type(audio)}")
-            return
-            
+        self._websocket = None
+        self._listener_task = None
+
+    async def _listener(self):
+        logger.info(f"Connecting to Vosk WebSocket at {self._url}")
         try:
-            # Ses verisini gönder
-            await self._websocket.send(audio)
-            logger.debug(f"Sent {len(audio)} bytes to Vosk")
-            
-            # Yanıt bekle (non-blocking)
-            try:
-                response = await asyncio.wait_for(
-                    self._websocket.recv(), 
-                    timeout=0.1  # Kısa timeout
-                )
+            async with websockets.connect(self._url) as websocket:
+                self._websocket = websocket
+                logger.info("Vosk WebSocket connected")
                 
-                # JSON yanıtını parse et
-                if isinstance(response, str):
-                    result = json.loads(response)
-                    await self._process_vosk_response(result)
-                else:
-                    logger.warning(f"Unexpected response type: {type(response)}")
-                
-            except asyncio.TimeoutError:
-                # Timeout normal - Vosk her zaman hemen yanıt vermez
-                pass
-            except json.JSONDecodeError as e:
-                logger.warning("Invalid JSON from Vosk", response=response, error=str(e))
-                
+                # Send config to Vosk server
+                config = {"config": {"sample_rate": self._sample_rate}}
+                await self._websocket.send(json.dumps(config))
+
+                # Listen for transcriptions until the connection is closed
+                while True:
+                    try:
+                        message = await self._websocket.recv()
+                        data = json.loads(message)
+
+                        if data.get("text"):
+                            await self.push_frame(TranscriptionFrame(text=data["text"], user_id="", timestamp=""))
+                        elif data.get("partial"):
+                             await self.push_frame(InterimTranscriptionFrame(text=data["partial"], user_id="", timestamp=""))
+
+                    except websockets.exceptions.ConnectionClosed:
+                        logger.warning("Vosk WebSocket connection closed.")
+                        break
+                    except Exception as e:
+                        logger.error(f"Error in Vosk listener: {e}")
+                        await self.push_frame(ErrorFrame(error=f"Vosk error: {e}"))
+                        break
         except Exception as e:
-            logger.error("Error in Vosk STT processing", error=str(e))
-    
-    async def _process_vosk_response(self, result: Dict[str, Any]) -> None:
-        """Vosk yanıtını işle ve frame'leri emit et"""
+            logger.error(f"Failed to connect to Vosk WebSocket: {e}")
+            await self.push_frame(ErrorFrame(error=f"Vosk connection failed: {e}"))
+        finally:
+            self._websocket = None
+            logger.info("Vosk WebSocket disconnected.")
+
+    async def _process_frame(self, frame: Frame, direction: FrameDirection):
+        await super()._process_frame(frame, direction)
+
+        if isinstance(frame, StartFrame):
+            # Start listening for transcriptions
+            if not self._listener_task:
+                self._listener_task = asyncio.create_task(self._listener())
         
-        # Partial (ara) sonuç
-        if "partial" in result and result["partial"]:
-            partial_text = result["partial"].strip()
-            if partial_text:
-                logger.debug("Vosk partial result", text=partial_text)
-                frame = InterimTranscriptionFrame(
-                    text=partial_text,
-                    user_id="user",
-                    timestamp=self.get_current_time()
-                )
-                await self.push_frame(frame)
+        elif isinstance(frame, AudioRawFrame):
+            if self._websocket:
+                try:
+                    await self._websocket.send(frame.audio)
+                except Exception as e:
+                    logger.error(f"Error sending audio data to Vosk: {e}")
+            else:
+                # This can happen if audio arrives before the websocket is connected.
+                # You might want to buffer it, but for now, we'll log a warning.
+                logger.warning("No active Vosk websocket to send audio to. Frame might be lost.")
         
-        # Final (kesin) sonuç
-        if "text" in result and result["text"]:
-            final_text = result["text"].strip()
-            if final_text:
-                logger.info("Vosk final result", text=final_text)
-                frame = TranscriptionFrame(
-                    text=final_text,
-                    user_id="user",
-                    timestamp=self.get_current_time()
-                )
-                await self.push_frame(frame)
-    
+        elif isinstance(frame, EndFrame):
+            # Send EOF message if websocket is still open
+            if self._websocket:
+                try:
+                    await self._websocket.send('{"eof" : 1}')
+                    logger.info("Sent EOF to Vosk")
+                except Exception as e:
+                    logger.error(f"Error sending EOF to Vosk: {e}")
+            
+            # Stop the listener task
+            if self._listener_task:
+                self._listener_task.cancel()
+                try:
+                    await self._listener_task
+                except asyncio.CancelledError:
+                    pass
+                self._listener_task = None
+            
+            # Forward the EndFrame to signal pipeline completion
+            await self.push_frame(frame)
+        else:
+            # Forward other frames like UserStartedSpeaking, etc.
+            await self.push_frame(frame, direction)
+
+    def run_stt(self, frame_iterator: AsyncGenerator[Frame, None]) -> AsyncGenerator[Frame, None]:
+        # This method is not used in the processor-based service model.
+        # All logic is handled by _process_frame and _listener.
+        logger.warning("run_stt is deprecated for this service implementation.")
+        pass
+
     async def process_audio_chunk(self, audio_chunk: bytes) -> Optional[str]:
         """Test için: ses chunk'ını işle ve sonuç döndür"""
         if not self._is_connected or not self._websocket:
-            await self.start()
+            await self._listener()
         
         try:
             # Ses verisini gönder
