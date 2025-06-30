@@ -92,14 +92,19 @@ class PipelineSource(FrameProcessor):
 class PipelineSink(FrameProcessor):
     """Pipeline sink processor for collecting outputs"""
     
-    def __init__(self, output_callback=None, **kwargs):
+    def __init__(self, output_callback=None, ready_event=None, **kwargs):
         super().__init__(**kwargs)
         self._output_callback = output_callback
         self._outputs = []
+        self._ready_event = ready_event
         
     async def process_frame(self, frame: Frame, direction):
         """Process output frames"""
         await super().process_frame(frame, direction)
+        
+        if isinstance(frame, StartFrame) and self._ready_event:
+            logger.info("🏁 PipelineSink received StartFrame, signaling pipeline is ready.")
+            self._ready_event.set()
         
         try:
             # Collect outputs
@@ -134,6 +139,7 @@ class EnhancedPipelineManager:
         self._pipeline_task: Optional[PipelineTask] = None
         self._pipeline_source: Optional[PipelineSource] = None
         self._pipeline_sink: Optional[PipelineSink] = None
+        self._pipeline_ready_event = asyncio.Event()
         
         # Services with validation
         self._llm_service = llm_service
@@ -202,26 +208,30 @@ class EnhancedPipelineManager:
                     raise PipelineError(f"{service_name} service initialization failed: {str(e)}")
     
     async def _create_pipeline_processors(self) -> List[FrameProcessor]:
-        """Create and configure pipeline processors"""
+        processors = []
         try:
-            # Import Pipecat's built-in audio processor for testing
-            from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
+            # VAD
+            vad_config = self._config.get("vad", {})
+            processors.append(VADProcessor(**vad_config))
+
+            # STT
+            if self._audio_in_enabled and self._stt_service:
+                processors.append(self._stt_service)
+
+            # LLM
+            if self._llm_service:
+                processors.append(self._llm_service)
             
-            # Create a simple test processor instead of our custom processors
-            test_audio_processor = AudioBufferProcessor()
-            
-            # Use only built-in processor for testing
-            processors = [
-                test_audio_processor
-            ]
-            
-            logger.info("Pipeline test processors created successfully", 
-                       processor_count=len(processors))
-            return processors
-            
+            # TTS
+            if self._audio_out_enabled and self._tts_service:
+                processors.append(self._tts_service)
+
+            logger.info("Pipeline processors created", count=len(processors))
         except Exception as e:
-            logger.error("Failed to create pipeline processors", error=str(e))
-            raise PipelineError(f"Processor creation failed: {str(e)}")
+            logger.error(f"Error creating pipeline processors: {e}")
+            raise PipelineError(f"Processor creation failed: {e}") from e
+
+        return processors
     
     async def _setup_interruption_manager(self):
         """Setup interruption manager with enhanced configuration"""
@@ -314,67 +324,53 @@ class EnhancedPipelineManager:
             logger.error("Error in output callback", error=str(e))
     
     async def start(self) -> None:
-        """Start the enhanced pipeline with comprehensive error handling"""
+        """Initializes and starts the pipeline."""
         async with self._lock:
             if self._is_running:
-                logger.warning("Pipeline already running")
+                logger.warning("Pipeline start called but already running.")
                 return
-            
+
             try:
                 self._start_time = asyncio.get_event_loop().time()
-                
-                # Validate services first
                 await self._validate_services()
-                
-                # Create thread pool executor
-                self._executor = ThreadPoolExecutor(
-                    max_workers=self._config.get("max_threads", 4),
-                    thread_name_prefix="pipeline"
-                )
-                
-                # Setup interruption manager
-                await self._setup_interruption_manager()
-                
-                # Create pipeline processors
+
+                self._executor = ThreadPoolExecutor(max_workers=5)
+
+                # Create pipeline components
+                self._pipeline_source = PipelineSource()
+                self._pipeline_sink = PipelineSink(output_callback=self._output_callback, ready_event=self._pipeline_ready_event)
                 processors = await self._create_pipeline_processors()
                 
-                # Create pipeline source and sink
-                self._pipeline_source = PipelineSource()
-                self._pipeline_sink = PipelineSink(output_callback=self._output_callback)
-                
-                # Create Pipecat native pipeline with correct structure
-                # Pipeline should include source at the beginning and sink at the end
-                complete_processors = [self._pipeline_source] + processors + [self._pipeline_sink]
-                self._pipeline = Pipeline(complete_processors)
-                
-                # Create pipeline task with proper parameters
+                # Setup interruption if enabled
+                if self._enable_interruption:
+                    await self._setup_interruption_manager()
+
+                # Define pipeline structure
+                self._pipeline = Pipeline([self._pipeline_source] + processors + [self._pipeline_sink])
+
+                # Create and run the pipeline task
                 params = PipelineParams(
-                    allow_interruptions=self._enable_interruption,
-                    enable_metrics=True,
-                    enable_usage_metrics=True
+                    pipeline=self._pipeline,
+                    clock=SystemClock(),
                 )
-                
-                self._pipeline_task = PipelineTask(self._pipeline, params=params)
-                
-                # Start the pipeline task using PipelineRunner pattern
+                self._pipeline_task = PipelineTask(params)
+
+                # Start the pipeline task using PipelineRunner
                 logger.info("🚀 Starting PipelineTask with PipelineRunner...")
                 self._pipeline_runner = PipelineRunner()
                 asyncio.create_task(self._pipeline_runner.run(self._pipeline_task))
-                
+
                 self._is_running = True
-                self._frame_count = 0
-                self._error_frames = 0
-                
-                logger.info("✅ Enhanced pipeline started successfully", 
-                           interruption_enabled=self._enable_interruption,
-                           processor_count=len(complete_processors),
-                           max_errors=self._max_errors)
-                
-            except Exception as e:
-                logger.error("❌ Failed to start enhanced pipeline", error=str(e))
-                # Cleanup on failure
+                logger.info("✅ Pipeline manager started successfully.")
+
+            except (PipelineError, ConfigValidationError) as e:
+                logger.error(f"❌ Pipeline startup failed: {e}")
                 await self._cleanup_on_failure()
-                raise PipelineError(f"Pipeline start failed: {str(e)}")
+                raise
+            except Exception as e:
+                logger.error(f"❌ Unexpected error during pipeline startup: {e}", exc_info=True)
+                await self._cleanup_on_failure()
+                raise PipelineError(f"An unexpected error occurred: {e}") from e
     
     async def _cleanup_on_failure(self):
         """Cleanup resources on pipeline start failure"""
@@ -555,13 +551,16 @@ class EnhancedPipelineManager:
         return self._enable_interruption
 
     async def start_stream(self):
-        """Sends a StartFrame to the pipeline."""
+        """Sends a StartFrame to the pipeline and waits for it to be ready."""
         if self._pipeline:
+            self._pipeline_ready_event.clear()
             start_frame = StartFrame()
-            logger.info("Sending StartFrame to pipeline")
+            logger.info("Sending StartFrame to pipeline and waiting for ready signal...")
             await self._pipeline.process_frame(start_frame, direction=FrameDirection.DOWNSTREAM)
+            await self._pipeline_ready_event.wait()
+            logger.info("✅ Pipeline is ready.")
         else:
-            logger.error("Attempted to start stream for non-existent pipeline")
+            logger.error("Attempted to start stream but pipeline does not exist.")
 
     async def stop_stream(self):
         """Sends an EndFrame to the pipeline."""

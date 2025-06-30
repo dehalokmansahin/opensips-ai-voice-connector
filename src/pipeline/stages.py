@@ -176,7 +176,7 @@ class LLMProcessor(FrameProcessor):
     
     def __init__(self, llm_service=None, **kwargs):
         super().__init__(**kwargs)
-        self._llm_service = llm_service or LlamaWebsocketLLMService(url="ws://llm-turkish-server:8765")
+        self._llm_service = llm_service or LlamaWebsocketLLMService(url="ws://llm-turkish-server:8765", model="llama3.2:3b-instruct-turkish")
         self._is_started = False
         logger.info("LLMProcessor initialized", service_type=type(self._llm_service).__name__)
     

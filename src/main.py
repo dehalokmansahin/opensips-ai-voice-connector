@@ -1213,19 +1213,17 @@ class OpenSIPSAIVoiceConnector:
             
             # LLM Service
             try:
-                llm_url = self.config.get('llm', 'url', fallback='ws://127.0.0.1:8765')
-                if not llm_url:
-                    raise ConfigValidationError("LLM service URL is required")
-                
-                logger.info("📡 Creating LLM service", url=llm_url)
-                self.services['llm'] = LlamaWebsocketLLMService(url=llm_url)
-                services_to_initialize.append(("LLM", self.services['llm']))
-                logger.info("✅ LLM service created successfully")
+                if self.config.get('llm') and self.config.get('llm.url'):
+                    llm_url = self.config.get('llm.url')
+                    llm_model = self.config.get('llm.model')
+                    logger.info("📡 Creating LLM service", url=llm_url, model=llm_model)
+                    self.services['llm'] = LlamaWebsocketLLMService(url=llm_url, model=llm_model)
+                    services_to_initialize.append(("LLM", self.services['llm']))
+                    logger.info("✅ LLM service created successfully")
                 
             except Exception as e:
                 logger.error("❌ Failed to create LLM service", error=str(e))
                 failed_services.append("LLM")
-                self.services['llm'] = None
             
             # STT Service  
             try:

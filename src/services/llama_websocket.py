@@ -16,6 +16,7 @@ from pipecat.frames.frames import (
     LLMFullResponseEndFrame, 
     TextFrame
 )
+from pipecat.services.ai_services import LLMService
 
 logger = structlog.get_logger()
 
@@ -67,32 +68,28 @@ class StreamingSentenceSegmenter:
         """Segmenter'ı sıfırla"""
         self.buffer = ""
 
-class LlamaWebsocketLLMService:
+class LlamaWebsocketLLMService(LLMService):
     """Custom LLaMA WebSocket LLM Service with Sentence Segmentation"""
     
-    def __init__(self, url: str = "ws://llama-server:8765"):
-        """
-        Initialize LLaMA WebSocket service
-        
-        Args:
-            url: WebSocket URL of your LLaMA server
-        """
-        self.url = url
+    def __init__(self, url: str, model: str, **kwargs):
+        super().__init__(**kwargs)
+        self._url = url
+        self._model = model
         self.websocket = None
         self.running = False
         
         # Turkish system prompt optimized for customer service
         self.system_prompt = """Sen Türk Telekom müşteri hizmetleri asistanısın. Türkçe konuş, kısa ve net yanıtlar ver. Müşterilere yardımcı ol, sorunlarını çöz. Maksimum 2-3 cümle kullan."""
         
-        logger.info("LLaMA WebSocket LLM service initialized", url=self.url)
+        logger.info("LLaMA WebSocket LLM service initialized", url=self._url)
     
     async def start(self):
         """Service'i başlat"""
         try:
-            logger.info("Starting LLaMA WebSocket LLM service", url=self.url)
+            logger.info("Starting LLaMA WebSocket LLM service", url=self._url)
             
             # WebSocket bağlantısını test et
-            async with websockets.connect(self.url) as websocket:
+            async with websockets.connect(self._url) as websocket:
                 logger.info("✅ LLaMA WebSocket connection test successful")
             
             self.running = True
@@ -127,7 +124,7 @@ class LlamaWebsocketLLMService:
             logger.info("Generating LLaMA response with sentence segmentation", prompt=prompt[:50])
             
             # WebSocket bağlantısı kur
-            async with websockets.connect(self.url) as websocket:
+            async with websockets.connect(self._url) as websocket:
                 # Request payload hazırla
                 request_data = {
                     "prompt": prompt,
