@@ -131,26 +131,64 @@ class Call:
         self.stop_event = asyncio.Event()
         self.stop_event.clear()
 
+        # Socket ve SDP başlangıçta None
+        self.serversock = None
+        self.response_sdp = None
+        
+        # PipelineAI başlangıçta None
+        self.pipeline_ai = None
+        
+        logger.info("Call instance created (pre-start)", call_key=b2b_key)
+
+    async def start(self):
+        """
+        Asenkron başlatma işlemlerini gerçekleştirir:
+        - Socket oluşturur ve bağlar
+        - SDP yanıtı oluşturur
+        - PipelineAI'yi başlatır
+        - RTP dinleme ve gönderme döngülerini başlatır
+        """
+        logger.info(f"Starting async initialization for call {self.b2b_key}...")
+        
+        # RTP yapılandırmasını al
+        try:
+            rtp_cfg = Config.get("rtp")
+            host_ip = rtp_cfg.get('bind_ip', '0.0.0.0')
+            rtp_ip = rtp_cfg.get('ip', None)
+        except Exception:
+            host_ip = '0.0.0.0'
+            rtp_ip = None
+            
+        if not rtp_ip or rtp_ip == '0.0.0.0':
+            try:
+                rtp_ip = "192.168.1.120"
+                logger.info("🌐 Using Windows host LAN IP for SDP", rtp_ip=rtp_ip)
+            except Exception as e:
+                logger.warning("🌐 Failed to set host IP, using fallback", error=str(e))
+                rtp_ip = "127.0.0.1"
+
         # Create and bind RTP socket
         self.serversock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.bind_rtp_socket(host_ip)
         self.serversock.setblocking(False)
 
         # Generate SDP response
-        self.response_sdp = self.generate_response_sdp(sdp_info, rtp_ip)
+        self.response_sdp = self.generate_response_sdp(rtp_ip)
 
         # Initialize PipelineAI integration
         self.pipeline_ai = PipelineAI(self, self.config or {})
-
-        logger.info("RTP listener initialized", 
-                   call_key=b2b_key, 
-                   client_addr=self.client_addr,
-                   client_port=self.client_port)
         
-        logger.info("RTP socket bound", 
-                   call_key=b2b_key,
-                   host_ip=host_ip, 
-                   port=self.serversock.getsockname()[1])
+        # Start the pipeline stream now that the call is established
+        # In a real scenario, this might wait for ACK, but for now, it's ok here.
+        await self.pipeline_ai.start_stream()
+
+        # Start RTP processing loops
+        loop = asyncio.get_event_loop()
+        self.rtp_read_task = loop.create_task(self.read_rtp_packets())
+        self.rtp_send_task = loop.create_task(self.send_rtp_packets())
+        self.first_packet_timeout_task = loop.create_task(self._check_first_packet_timeout())
+
+        logger.info(f"Call {self.b2b_key} started successfully.")
 
     def bind_rtp_socket(self, host_ip: str):
         """Bind RTP socket to available port"""
@@ -166,7 +204,7 @@ class Call:
         _available_ports.remove(port)
         self.serversock.bind((host_ip, port))
 
-    def generate_response_sdp(self, original_sdp: dict, rtp_ip: str) -> str:
+    def generate_response_sdp(self, rtp_ip: str) -> str:
         """Generate SDP response for 200 OK"""
         local_port = self.serversock.getsockname()[1]
         
@@ -198,44 +236,7 @@ class Call:
         """Get SDP body for OpenSIPS response"""
         return self.response_sdp
 
-    async def start(self):
-        """Start call processing"""
-        try:
-            # Start the pipeline stream to send StartFrame
-            logger.info("🎬 Starting pipeline stream", call_key=self.b2b_key)
-            await self.pipeline_ai.start_stream()
-
-            # Start RTP packet reading
-            loop = asyncio.get_running_loop()
-            loop.add_reader(self.serversock.fileno(), self.read_rtp_packet)
-            
-            logger.info("RTP listener started", call_key=self.b2b_key)
-            
-            # Start first packet timeout checker
-            asyncio.create_task(self._check_first_packet_timeout())
-            
-        except Exception as e:
-            logger.error("Error starting call", key=self.b2b_key, error=str(e))
-
-    async def _check_first_packet_timeout(self):
-        """Check if first RTP packet arrived within timeout period"""
-        timeout_seconds = 10.0
-        check_interval = 2.0
-        
-        while not self.terminated and self.first_packet:
-            await asyncio.sleep(check_interval)
-            elapsed = (datetime.datetime.now() - self.call_start_time).total_seconds()
-            
-            if elapsed > timeout_seconds:
-                logger.warning("⏰ No RTP packets received after 10 seconds", 
-                             call_key=self.b2b_key,
-                             expected_client=f"{self.client_addr}:{self.client_port}",
-                             rtp_port=self.serversock.getsockname()[1],
-                             sdp_sent="200 OK with SDP sent to client")
-                # Wait another 10 seconds before next warning
-                await asyncio.sleep(timeout_seconds)
-
-    def read_rtp_packet(self):
+    async def read_rtp_packets(self):
         """Read incoming RTP packets (called by event loop)"""
         # Debug entry into read_rtp_packet
         logger.debug("🛠️ Entered read_rtp_packet", call_key=self.b2b_key)
@@ -547,147 +548,141 @@ class Call:
         except Exception as e:
             logger.error("Error closing RTP socket", error=str(e), key=self.b2b_key)
 
+    async def _check_first_packet_timeout(self):
+        """İlk RTP paketi için zaman aşımı kontrolü"""
+        timeout_seconds = 10.0
+        check_interval = 2.0
+        
+        while not self.terminated and self.first_packet:
+            await asyncio.sleep(check_interval)
+            elapsed = (datetime.datetime.now() - self.call_start_time).total_seconds()
+            
+            if elapsed > timeout_seconds:
+                logger.warning("⏰ No RTP packets received after 10 seconds", 
+                             call_key=self.b2b_key,
+                             expected_client=f"{self.client_addr}:{self.client_port}",
+                             rtp_port=self.serversock.getsockname()[1],
+                             sdp_sent="200 OK with SDP sent to client")
+                # Wait another 10 seconds before next warning
+                await asyncio.sleep(timeout_seconds)
+
 
 class CallManager:
-    """Manages active calls"""
-    
-    def __init__(self, pipeline_manager, mi_conn):
-        """Initialize call manager"""
-        self.pipeline_manager = pipeline_manager
+    """Aramaları yöneten ve pipeline ile entegrasyonu sağlayan sınıf"""
+
+    def __init__(self, mi_conn):
+        """
+        Args:
+            mi_conn: OpenSIPS MI connection
+        """
         self.mi_conn = mi_conn
-        self.active_calls = {}
+        self.calls: Dict[str, Call] = {}
+        self.shutdown_event = asyncio.Event()
+        self._output_queue = asyncio.Queue()
+        self.pipeline_manager = None # Will be set later
         
-        # Initialize and debug RTP ports at startup
-        _debug_port_status()
+        # Pipeline'dan gelen verileri işlemek için bir görev başlat
+        asyncio.create_task(self._process_pipeline_output())
         
         logger.info("CallManager initialized")
-        
-        # Set up pipeline output callback
-        if self.pipeline_manager:
-            # This will be called when pipeline produces audio output
-            self.pipeline_manager._output_callback = self._handle_pipeline_output
-    
-    async def _handle_pipeline_output(self, output_type: str, data: Any):
-        """Handle pipeline output and distribute to active calls"""
-        try:
-            if output_type == 'audio':
-                # Send audio to all active calls
-                for call_id, call in self.active_calls.items():
-                    if not call.terminated and not call.paused:
-                        call.queue_audio(data)
-                        logger.debug("Audio queued to call", call_id=call_id, data_size=len(data))
-            
-            elif output_type == 'text':
-                logger.info("Pipeline text output", text=data)
-            
-            elif output_type == 'error':
-                logger.error("Pipeline error output", error=data)
-            
-        except Exception as e:
-            logger.error("Error handling pipeline output", error=str(e), output_type=output_type)
+
+    def set_pipeline_manager(self, pipeline_manager):
+        """Sets the pipeline manager and its output callback."""
+        self.pipeline_manager = pipeline_manager
+        if hasattr(self.pipeline_manager, '_output_callback'):
+             # This is a bit of a hack, directly setting the callback.
+             # A better approach would be to pass it in the constructor.
+            self.pipeline_manager._output_callback = self._pipeline_output_callback
+            logger.info("Pipeline manager output callback configured.")
+
+    async def _pipeline_output_callback(self, output_type: str, data: Any):
+        """Callback to receive data from the pipeline and put it in a queue."""
+        await self._output_queue.put((output_type, data))
+
+    async def _process_pipeline_output(self):
+        """Pipeline'dan gelen ses ve sistem mesajlarını işler"""
+        while not self.shutdown_event.is_set():
+            try:
+                output_type, data = await self._output_queue.get()
+                if output_type == "audio":
+                    # For now, assume one call and broadcast audio
+                    for call in self.calls.values():
+                        if not call.paused:
+                            call.queue_audio(data)
+                elif output_type == "event":
+                    logger.info("Pipeline event received", event=data)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Error in pipeline output handler", error=str(e))
 
     async def create_call(self, b2b_key: str, sdp_info: dict, config: dict = None) -> Optional['Call']:
-        """Create and start a new call"""
+        """Yeni bir arama oluşturur ve başlatır"""
+        logger.info("🚀 Creating call STARTED", key=b2b_key, sdp_info=sdp_info)
+        
+        if not sdp_info or 'media_ip' not in sdp_info or 'media_port' not in sdp_info:
+            logger.error("❌ Cannot create call, missing SDP info", key=b2b_key)
+            return None
+        
+        logger.info("✅ SDP validation passed", key=b2b_key)
+
+        if not self.pipeline_manager:
+            logger.error("❌ Cannot create call, no pipeline manager", key=b2b_key)
+            return None
+            
+        logger.info("✅ Pipeline manager available", key=b2b_key)
+
+        if not self.mi_conn:
+            logger.error("❌ Cannot create call, no MI connection", key=b2b_key)
+            return None
+            
+        logger.info("✅ MI connection available", key=b2b_key)
+        
+        _debug_port_status()
+        
+        logger.debug("🔄 Pipeline will handle StartFrame automatically")
+        
         try:
-            logger.info("🚀 Creating call STARTED", key=b2b_key, sdp_info=sdp_info)
-            
-            # 🔒 Check for duplicate call (SIP retransmission protection)
-            if b2b_key in self.active_calls:
-                existing_call = self.active_calls[b2b_key]
-                if not existing_call.terminated:
-                    logger.info("✅ Call already exists and active, returning existing", 
-                               key=b2b_key, active_count=len(self.active_calls))
-                    return existing_call
-                else:
-                    # Clean up terminated call before creating new one
-                    logger.info("🧹 Cleaning up terminated call before recreating", key=b2b_key)
-                    await self.terminate_call(b2b_key)
-            
-            # Validate SDP info
-            if not sdp_info:
-                logger.error("❌ No SDP info provided", key=b2b_key)
-                return None
-                
-            required_fields = ['media_ip', 'media_port', 'audio_format']
-            for field in required_fields:
-                if field not in sdp_info:
-                    logger.error(f"❌ Missing SDP field: {field}", key=b2b_key, sdp_info=sdp_info)
-                    return None
-            
-            logger.info("✅ SDP validation passed", key=b2b_key)
-            
-            # Check pipeline manager
-            if not self.pipeline_manager:
-                logger.error("❌ Pipeline manager not available", key=b2b_key)
-                return None
-            logger.info("✅ Pipeline manager available", key=b2b_key)
-            
-            # Check MI connection
-            if not self.mi_conn:
-                logger.error("❌ MI connection not available", key=b2b_key)
-                return None
-            logger.info("✅ MI connection available", key=b2b_key)
-            
-            # Debug port status before creating call
-            _debug_port_status()
-            
-            # Pipeline will handle StartFrame automatically via PipelineTask
-            logger.debug("🔄 Pipeline will handle StartFrame automatically")
-            
-            # Create call instance  
             logger.info("🔧 Creating Call instance...", key=b2b_key)
-            call = Call(
-                b2b_key=b2b_key,
-                mi_conn=self.mi_conn,
-                sdp_info=sdp_info,
-                pipeline_manager=self.pipeline_manager,
-                config=config
-            )
+            call = Call(b2b_key, self.mi_conn, sdp_info, self.pipeline_manager, config)
             
-            logger.info("✅ Call instance created successfully", key=b2b_key)
+            logger.info("🔧 Starting async resources for call...", key=b2b_key)
+            await call.start() # Asenkron başlatma
             
-            # Start call processing
-            logger.info("🔧 Starting call processing...", key=b2b_key)
-            await call.start()
-            logger.info("✅ Call started successfully", key=b2b_key)
-            
-            # Store in active calls
-            self.active_calls[b2b_key] = call
-            logger.info("🎉 Call created and stored successfully!", key=b2b_key, active_count=len(self.active_calls))
-            
+            self.calls[b2b_key] = call
+            logger.info(f"✅ Call {b2b_key} created and started successfully.")
             return call
             
+        except NoAvailablePorts:
+            logger.error("❌ No available RTP ports to create call", key=b2b_key)
+            return None
         except Exception as e:
             import traceback
-            logger.error("💥 EXCEPTION in create_call", 
-                        key=b2b_key, 
-                        error=str(e), 
-                        error_type=type(e).__name__,
-                        traceback=traceback.format_exc())
+            logger.error(f"❌ Exception creating call {b2b_key}", error=str(e), traceback=traceback.format_exc())
             return None
 
     async def terminate_call(self, b2b_key: str):
-        """Terminate a call by key"""
-        logger.info("🔚 TERMINATING call", key=b2b_key, active_calls_before=len(self.active_calls))
+        """Bir aramayı sonlandırır"""
+        logger.info("🔚 TERMINATING call", key=b2b_key, active_calls_before=len(self.calls))
         
-        call = self.active_calls.get(b2b_key)
+        call = self.calls.get(b2b_key)
         if call:
             await call.close()
-            self.active_calls.pop(b2b_key, None)
-            logger.info("✅ Call terminated successfully", key=b2b_key, active_calls_after=len(self.active_calls))
+            self.calls.pop(b2b_key, None)
+            logger.info("✅ Call terminated successfully", key=b2b_key, active_calls_after=len(self.calls))
         else:
-            logger.warning("⚠️ Call not found for termination", key=b2b_key, available_calls=list(self.active_calls.keys()))
+            logger.warning("⚠️ Call not found for termination", key=b2b_key, available_calls=list(self.calls.keys()))
 
     def get_call(self, b2b_key: str) -> Optional[Call]:
         """Get call by key"""
-        return self.active_calls.get(b2b_key)
+        return self.calls.get(b2b_key)
 
     async def shutdown(self):
         """Shutdown all active calls"""
-        logger.info("Shutting down call manager", active_calls=len(self.active_calls))
+        logger.info("Shutting down call manager", active_calls=len(self.calls))
         
         # Make a copy of keys to avoid modification during iteration
-        call_keys = list(self.active_calls.keys())
+        call_keys = list(self.calls.keys())
         
         for key in call_keys:
             await self.terminate_call(key) 

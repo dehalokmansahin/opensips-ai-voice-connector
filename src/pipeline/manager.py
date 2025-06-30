@@ -140,6 +140,7 @@ class EnhancedPipelineManager:
         self._pipeline_source: Optional[PipelineSource] = None
         self._pipeline_sink: Optional[PipelineSink] = None
         self._pipeline_ready_event = asyncio.Event()
+        self._output_queue = asyncio.Queue()
         
         # Services with validation
         self._llm_service = llm_service
@@ -249,22 +250,18 @@ class EnhancedPipelineManager:
             min_words = interruption_config.get("min_words", 2)
             strategies.append(MinWordsInterruptionStrategy(min_words=min_words))
             
-            # Volume-based strategy
-            volume_threshold = interruption_config.get("volume_threshold", 0.6)
-            min_duration_ms = interruption_config.get("min_duration_ms", 300)
-            strategies.append(VolumeBasedInterruptionStrategy(
-                volume_threshold=volume_threshold,
-                min_duration_ms=min_duration_ms
-            ))
+            # Volume based strategy
+            if interruption_config.get("use_volume_strategy", False):
+                volume_config = interruption_config.get("volume_strategy_config", {})
+                strategies.append(VolumeBasedInterruptionStrategy(**volume_config))
             
-            self._interruption_manager = InterruptionManager(strategies=strategies)
+            # Create interruption manager
+            self._interruption_manager = InterruptionManager(
+                strategies=strategies,
+                interruption_callback=self._handle_interruption
+            )
+            logger.info("Interruption manager setup complete", strategies=len(strategies))
             
-            logger.info("Interruption manager setup completed",
-                       strategies=[type(s).__name__ for s in strategies],
-                       min_words=min_words,
-                       volume_threshold=volume_threshold,
-                       min_duration_ms=min_duration_ms)
-                       
         except Exception as e:
             logger.error("Failed to setup interruption manager", error=str(e))
             raise PipelineError(f"Interruption manager setup failed: {str(e)}")
@@ -307,273 +304,242 @@ class EnhancedPipelineManager:
         raise PipelineError(f"Critical pipeline error: {error_message}")
     
     async def _output_callback(self, output_type: str, data: Any):
-        """Handle pipeline outputs"""
+        """Handle pipeline outputs by putting them in a queue"""
         try:
-            if output_type == 'audio' and self._audio_out_enabled:
-                logger.debug("Audio output received", size=len(data) if data else 0)
-                # Here you would typically send the audio to the output stream
-                
-            elif output_type == 'text':
-                logger.info("Text output received", text=data[:100] if data else "")
-                # Handle text output (could be LLM response or STT transcription)
-                
-            elif output_type == 'error':
-                await self._handle_processor_error("output_callback", Exception(data))
-                
+            await self._output_queue.put((output_type, data))
         except Exception as e:
             logger.error("Error in output callback", error=str(e))
-    
+
+    async def get_output(self):
+        """Get output from the pipeline queue."""
+        try:
+            return await self._output_queue.get()
+        except asyncio.CancelledError:
+            logger.info("get_output task cancelled.")
+            return None, None
+
     async def start(self) -> None:
-        """Initializes and starts the pipeline."""
+        """Start the pipeline manager and create the pipeline"""
         async with self._lock:
-            if self._is_running:
-                logger.warning("Pipeline start called but already running.")
+            if self.is_running:
+                logger.warning("Pipeline is already running")
                 return
-
+            
+            self._is_running = True
+            self._start_time = asyncio.get_event_loop().time()
+            self._error_count = 0
+            
+            logger.info("🚀 Starting Enhanced Pipeline Manager...")
+            
             try:
-                self._start_time = asyncio.get_event_loop().time()
+                # Setup thread pool executor for CPU-bound tasks
+                self._executor = ThreadPoolExecutor(max_workers=4)
+                
+                # Validate and start services
                 await self._validate_services()
-
-                self._executor = ThreadPoolExecutor(max_workers=5)
-
-                # Create pipeline components
+                
+                # Setup interruption manager
+                await self._setup_interruption_manager()
+                
+                # Create the pipeline
+                self._pipeline_ready_event.clear()
+                
+                # Create pipeline source and sink
                 self._pipeline_source = PipelineSource()
-                self._pipeline_sink = PipelineSink(output_callback=self._output_callback, ready_event=self._pipeline_ready_event)
+                self._pipeline_sink = PipelineSink(
+                    output_callback=self._output_callback,
+                    ready_event=self._pipeline_ready_event
+                )
+                
+                # Create pipeline processors
                 processors = await self._create_pipeline_processors()
                 
-                # Setup interruption if enabled
-                if self._enable_interruption:
-                    await self._setup_interruption_manager()
-
-                # Define pipeline structure
-                self._pipeline = Pipeline([self._pipeline_source] + processors + [self._pipeline_sink])
-
-                # Create and run the pipeline task
-                params = PipelineParams(
-                    pipeline=self._pipeline,
-                    clock=SystemClock(),
+                # Build the pipeline
+                self._pipeline = Pipeline(
+                    processors=[
+                        self._pipeline_source,
+                        *processors,
+                        self._pipeline_sink
+                    ]
                 )
-                self._pipeline_task = PipelineTask(params)
+                
+                # Create and run the pipeline task
+                self._pipeline_task = PipelineTask(
+                    self._pipeline,
+                    params=PipelineParams(
+                        allow_interruptions=self._enable_interruption,
+                        enable_goodbye_frame=True
+                    )
+                )
+                
+                # Run the pipeline in a background task
+                asyncio.create_task(self._pipeline_task.run())
+                
+                # Wait for the pipeline to be ready
+                await asyncio.wait_for(self._pipeline_ready_event.wait(), timeout=10.0)
+                
+                logger.info("✅ Enhanced Pipeline Manager started successfully")
 
-                # Start the pipeline task using PipelineRunner
-                logger.info("🚀 Starting PipelineTask with PipelineRunner...")
-                self._pipeline_runner = PipelineRunner()
-                asyncio.create_task(self._pipeline_runner.run(self._pipeline_task))
-
-                self._is_running = True
-                logger.info("✅ Pipeline manager started successfully.")
-
-            except (PipelineError, ConfigValidationError) as e:
-                logger.error(f"❌ Pipeline startup failed: {e}")
+            except asyncio.TimeoutError:
+                logger.error("Pipeline readiness timed out")
                 await self._cleanup_on_failure()
-                raise
+                raise PipelineError("Pipeline readiness timed out")
             except Exception as e:
-                logger.error(f"❌ Unexpected error during pipeline startup: {e}", exc_info=True)
+                import traceback
+                logger.error(f"Error starting pipeline manager: {e}", exc_info=True, traceback=traceback.format_exc())
                 await self._cleanup_on_failure()
-                raise PipelineError(f"An unexpected error occurred: {e}") from e
-    
+                raise PipelineError(f"Failed to start pipeline: {e}") from e
+
     async def _cleanup_on_failure(self):
-        """Cleanup resources on pipeline start failure"""
-        try:
-            if self._executor:
-                self._executor.shutdown(wait=False)
-                self._executor = None
-                
-            if self._pipeline_task:
-                self._pipeline_task = None
-                
-            if self._pipeline:
-                self._pipeline = None
-                
-            self._is_running = False
-            
-            logger.info("Pipeline cleanup completed after failure")
-            
-        except Exception as e:
-            logger.error("Error during pipeline cleanup", error=str(e))
-    
+        """Cleanup resources on startup failure"""
+        logger.info("Cleaning up resources after startup failure")
+        if self._pipeline_task:
+            await self._pipeline_task.stop()
+        if self._executor:
+            self._executor.shutdown(wait=False)
+        self._is_running = False
+
     async def stop(self) -> None:
-        """Stop the pipeline with proper cleanup"""
+        """Stop the pipeline manager and release resources"""
         async with self._lock:
-            if not self._is_running:
-                logger.info("Pipeline already stopped")
+            if not self.is_running:
+                logger.warning("Pipeline is not running")
                 return
             
+            logger.info("🛑 Stopping Enhanced Pipeline Manager...")
+            
             try:
-                # Send end frame to pipeline
+                # Stop the pipeline task
                 if self._pipeline_task:
-                    await self._pipeline_task.queue_frame(EndFrame())
-                
-                # Stop interruption manager
-                if self._interruption_manager:
-                    await self._interruption_manager.reset_interruption()
-                
+                    await self._pipeline_task.stop()
+                    logger.info("Pipeline task stopped")
+
                 # Shutdown executor
                 if self._executor:
                     self._executor.shutdown(wait=True)
-                    self._executor = None
-                
-                # Calculate runtime stats
-                if self._start_time:
-                    runtime = asyncio.get_event_loop().time() - self._start_time
-                    logger.info("Pipeline runtime statistics",
-                               runtime_seconds=round(runtime, 2),
-                               total_frames=self._frame_count,
-                               error_frames=self._error_frames,
-                               error_rate=round(self._error_frames / max(self._frame_count, 1) * 100, 2))
-                
-                # Reset state
-                self._pipeline_task = None
-                self._pipeline = None
-                self._pipeline_source = None
-                self._pipeline_sink = None
-                self._is_running = False
-                
-                logger.info("✅ Enhanced pipeline stopped successfully")
+                    logger.info("Thread pool executor shut down")
+
+                # Log performance stats
+                stats = self.get_pipeline_stats()
+                logger.info("Pipeline performance stats", **stats)
                 
             except Exception as e:
-                logger.error("❌ Error stopping enhanced pipeline", error=str(e))
-                raise PipelineError(f"Pipeline stop failed: {str(e)}")
-    
-    async def push_audio(self, pcm_bytes: bytes) -> None:
-        """Push raw audio bytes to the pipeline"""
-        if not self._is_running:
-            logger.warning("Pipeline is not running, cannot push audio.")
-            return
+                logger.error(f"Error stopping pipeline manager: {e}")
+            finally:
+                self._is_running = False
+                self._pipeline_task = None
+                self._pipeline = None
+                self._executor = None
+                logger.info("✅ Enhanced Pipeline Manager stopped successfully")
 
-        if not self._pipeline_source:
-            logger.error("Pipeline source not available, cannot push audio.")
+    async def push_audio(self, pcm_bytes: bytes) -> None:
+        """Push raw PCM audio data into the pipeline"""
+        if not self.is_running or not self._pipeline_source:
+            logger.warning("Cannot push audio, pipeline not running or no source", 
+                          is_running=self.is_running,
+                          has_source=bool(self._pipeline_source))
             return
             
         try:
-            # Create AudioRawFrame
-            frame = AudioRawFrame(audio=pcm_bytes, sample_rate=16000, num_channels=1)
+            # Create an AudioRawFrame
+            frame = AudioRawFrame(
+                audio=pcm_bytes, 
+                sample_rate=16000, 
+                num_channels=1
+            )
             
-            # Feed to pipeline source
+            # Feed audio to pipeline source
             await self._pipeline_source.feed_audio(frame)
             
-            # Update performance metrics
+            # Update performance tracking
             self._frame_count += 1
-
+            
         except Exception as e:
             logger.error("Error pushing audio to pipeline", error=str(e))
-            await self._handle_critical_error(f"Failed to push audio: {e}")
+            await self._handle_processor_error("push_audio", e)
 
     async def handle_user_text(self, text: str) -> None:
-        """Handle text input from the user, bypassing STT"""
-        if not self._is_running or not self._pipeline:
-            logger.warning("Pipeline not running or not available, cannot handle user text")
+        """Push user text into the pipeline (for text-based interaction)"""
+        if not self.is_running or not self._pipeline_task:
+            logger.warning("Cannot handle user text, pipeline not running", is_running=self.is_running)
             return
-            
+
         try:
-            # Interruption handling
-            if self._interruption_manager:
-                await self._interruption_manager.append_user_text(text)
-                
-                # Check for interruption
-                interrupted = await self._interruption_manager.check_interruption()
-                if interrupted:
-                    logger.info("🛑 User interrupted bot!", text=text[:30])
-                    await self._handle_interruption()
-            
-            # Send text frame to pipeline
-            if self._pipeline_task:
-                text_frame = TextFrame(text=text)
-                await self._pipeline_task.queue_frame(text_frame)
-                self._frame_count += 1
-                
-                logger.info("User text processed", text=text[:50], frame_count=self._frame_count)
+            # Create a TextFrame and push it into the pipeline
+            frame = TextFrame(text=text)
+            await self._pipeline_task.queue_frame(frame)
+            logger.info("User text pushed to pipeline", text=text)
             
         except Exception as e:
-            logger.error("Error handling user text", error=str(e), text=text[:50])
+            logger.error("Error pushing user text to pipeline", error=str(e))
             await self._handle_processor_error("handle_user_text", e)
-    
+
     async def _handle_interruption(self) -> None:
-        """Handle user interruption"""
+        """Handle interruption events from the InterruptionManager"""
+        if not self._enable_interruption or not self._pipeline_task:
+            return
+        
+        logger.info("🚨 INTERACTION DETECTED! Sending interruption frames.")
+        
         try:
-            if self._pipeline_task:
-                # Send interruption frames
-                await self._pipeline_task.queue_frame(StartInterruptionFrame())
-                
-                # Cancel current bot speech
-                self._bot_speaking = False
-                
-                # Reset TTS if needed
-                if self._tts_service and hasattr(self._tts_service, 'cancel_current_speech'):
-                    await self._tts_service.cancel_current_speech()
-                
-                # Send stop interruption frame
-                await self._pipeline_task.queue_frame(StopInterruptionFrame())
-                
-                logger.info("Interruption handled successfully")
-                
-        except Exception as e:
-            logger.error("Error handling interruption", error=str(e))
-            await self._handle_processor_error("handle_interruption", e)
-    
-    async def set_user_speaking(self, speaking: bool) -> None:
-        """Update user speaking state"""
-        self._user_speaking = speaking
-        
-        if self._interruption_manager:
-            await self._interruption_manager.set_user_speaking(speaking)
-        
-        logger.debug("User speaking state updated", speaking=speaking)
-    
-    def get_pipeline_stats(self) -> Dict[str, Any]:
-        """Get pipeline performance statistics"""
-        runtime = 0
-        if self._start_time:
-            runtime = asyncio.get_event_loop().time() - self._start_time
+            # Send interruption frames to the pipeline
+            await self._pipeline_task.queue_frame(StartInterruptionFrame())
+            await asyncio.sleep(0.1)  # Give some time for processors to react
+            await self._pipeline_task.queue_frame(StopInterruptionFrame())
             
+            logger.info("Interruption frames sent successfully")
+            
+        except Exception as e:
+            logger.error("Failed to handle interruption", error=str(e))
+
+    async def set_user_speaking(self, speaking: bool) -> None:
+        """Notify the interruption manager about user speaking status"""
+        if self._interruption_manager:
+            self._interruption_manager.set_user_speaking(speaking)
+
+    def get_pipeline_stats(self) -> Dict[str, Any]:
+        """Get performance statistics of the pipeline"""
+        if not self._start_time:
+            return {"status": "not_started"}
+        
+        run_duration = asyncio.get_event_loop().time() - self._start_time
+        
         return {
-            "is_running": self._is_running,
-            "runtime_seconds": round(runtime, 2),
-            "total_frames": self._frame_count,
+            "status": "running" if self.is_running else "stopped",
+            "run_duration_seconds": run_duration,
+            "total_frames_processed": self._frame_count,
             "error_frames": self._error_frames,
-            "error_rate": round(self._error_frames / max(self._frame_count, 1) * 100, 2),
-            "error_count": self._error_count,
-            "interruption_enabled": self._enable_interruption,
-            "audio_in_enabled": self._audio_in_enabled,
-            "audio_out_enabled": self._audio_out_enabled,
-            "bot_speaking": self._bot_speaking,
-            "user_speaking": self._user_speaking
+            "error_count_since_reset": self._error_count,
+            "max_errors_allowed": self._max_errors
         }
-    
+
     @property
     def is_running(self) -> bool:
-        """Check if pipeline is running"""
+        """Check if the pipeline is currently running"""
         return self._is_running
-    
+
     @property
     def interruption_enabled(self) -> bool:
         """Check if interruption is enabled"""
         return self._enable_interruption
 
     async def start_stream(self):
-        """Sends a StartFrame to the pipeline and waits for it to be ready."""
-        if self._pipeline:
-            self._pipeline_ready_event.clear()
-            start_frame = StartFrame()
-            logger.info("Sending StartFrame to pipeline and waiting for ready signal...")
-            await self._pipeline.process_frame(start_frame, direction=FrameDirection.DOWNSTREAM)
-            await self._pipeline_ready_event.wait()
-            logger.info("✅ Pipeline is ready.")
-        else:
-            logger.error("Attempted to start stream but pipeline does not exist.")
+        """Helper to send StartFrame to the pipeline"""
+        if self._pipeline_task:
+            logger.info("🚀 Sending StartFrame to pipeline")
+            await self._pipeline_task.queue_frame(StartFrame())
 
     async def stop_stream(self):
-        """Sends an EndFrame to the pipeline."""
-        if self._pipeline:
-            end_frame = EndFrame()
-            logger.info("Sending EndFrame to pipeline")
-            await self._pipeline.process_frame(end_frame, direction=FrameDirection.DOWNSTREAM)
-        else:
-            logger.error("Attempted to stop stream for non-existent pipeline")
-
+        """Helper to send EndFrame to the pipeline"""
+        if self._pipeline_task:
+            logger.info("🎬 Sending EndFrame to pipeline")
+            await self._pipeline_task.queue_frame(EndFrame())
+            
     async def stop_all_pipelines(self):
-        """Stops all running pipelines and cleans up resources."""
-        logger.info("Stopping all pipelines...")
+        """Stops all running pipeline tasks"""
+        logger.info("Stopping all pipeline tasks")
+        # In this manager, we only have one pipeline task at a time
+        await self.stop()
 
 # Backward compatibility alias
 SimplePipelineManager = EnhancedPipelineManager 

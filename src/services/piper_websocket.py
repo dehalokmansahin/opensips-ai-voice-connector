@@ -8,6 +8,7 @@ import logging
 from typing import Optional, AsyncGenerator
 import websockets
 import structlog
+import audioop
 
 from pipecat.frames.frames import (
     Frame,
@@ -15,11 +16,7 @@ from pipecat.frames.frames import (
     TTSStartedFrame,
     TTSStoppedFrame,
 )
-# TTSService base class - simplified version
-class TTSService:
-    """Base TTS Service class"""
-    def __init__(self, **kwargs):
-        pass
+from pipecat.services.ai_services import TTSService
 
 logger = structlog.get_logger()
 
@@ -40,6 +37,7 @@ class PiperWebsocketTTSService(TTSService):
         self._websocket: Optional[websockets.WebSocketClientProtocol] = None
         self._connection_lock = asyncio.Lock()
         self._is_connected = False
+        self._task: Optional[asyncio.Task] = None
         
         logger.info("PiperWebsocketTTSService initialized", 
                    url=self._url, 
@@ -98,8 +96,7 @@ class PiperWebsocketTTSService(TTSService):
             yield TTSStartedFrame()
             
             # TTS isteğini gönder
-            request = {"text": text}
-            await self._websocket.send(json.dumps(request))
+            await self._websocket.send(text)
             logger.debug("TTS request sent")
             
             # Audio chunk'larını al
@@ -128,10 +125,18 @@ class PiperWebsocketTTSService(TTSService):
                         if len(message) > 0:
                             logger.debug("Received audio chunk", size=len(message))
                             
+                            # Ham ses verisini işle
+                            # Piper'dan gelen ses 22050Hz, mono, 16-bit PCM.
+                            # Bunu 8000Hz'e düşürmemiz gerekiyor.
+                            resampled_audio = audioop.ratecv(message, 2, 1, self._sample_rate, self._target_sample_rate, None)[0]
+                            
+                            # PCMU (ulaw) formatına dönüştür
+                            ulaw_audio = audioop.lin2ulaw(resampled_audio, 2)
+
                             # Audio frame oluştur
                             audio_frame = TTSAudioRawFrame(
-                                audio=message,
-                                sample_rate=self._sample_rate,
+                                audio=ulaw_audio, 
+                                sample_rate=self._target_sample_rate,
                                 num_channels=1
                             )
                             
@@ -168,8 +173,7 @@ class PiperWebsocketTTSService(TTSService):
         
         try:
             # TTS isteğini gönder
-            request = {"text": text}
-            await self._websocket.send(json.dumps(request))
+            await self._websocket.send(text)
             
             audio_data = b''
             
@@ -204,3 +208,6 @@ class PiperWebsocketTTSService(TTSService):
         """Şu anki zamanı string olarak döndür"""
         import time
         return str(int(time.time() * 1000)) 
+
+    def can_generate_audio(self) -> bool:
+        return True 

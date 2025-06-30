@@ -126,7 +126,8 @@ class OpenSIPSEngine:
             logger.warning("Using mock OpenSIPS MI connection")
         
         # Call manager
-        self.call_manager = CallManager(pipeline_manager, self.mi_conn)
+        self.call_manager = CallManager(self.mi_conn)
+        self.call_manager.set_pipeline_manager(self.pipeline_manager)
         self.active_calls = {}
         
         # Event handler
@@ -1213,9 +1214,9 @@ class OpenSIPSAIVoiceConnector:
             
             # LLM Service
             try:
-                if self.config.get('llm') and self.config.get('llm.url'):
-                    llm_url = self.config.get('llm.url')
-                    llm_model = self.config.get('llm.model')
+                if self.config.has_section('llm'):
+                    llm_url = self.config.get('llm', 'url')
+                    llm_model = self.config.get('llm', 'model')
                     logger.info("📡 Creating LLM service", url=llm_url, model=llm_model)
                     self.services['llm'] = LlamaWebsocketLLMService(url=llm_url, model=llm_model)
                     services_to_initialize.append(("LLM", self.services['llm']))
@@ -1309,22 +1310,11 @@ class OpenSIPSAIVoiceConnector:
                 config=pipeline_config
             )
             
-            # Start pipeline with timeout
-            pipeline_start_timeout = 15.0  # 15 seconds for pipeline startup
-            try:
-                await asyncio.wait_for(self.pipeline_manager.start(), timeout=pipeline_start_timeout)
-                logger.info("✅ Enhanced Pipeline Manager started successfully")
-                
-                # Log pipeline statistics
-                stats = self.pipeline_manager.get_pipeline_stats()
-                logger.info("📊 Pipeline statistics", stats=stats)
-                
-            except asyncio.TimeoutError:
-                logger.error(f"⏰ Pipeline manager startup timeout ({pipeline_start_timeout}s)")
-                raise ConfigValidationError("Pipeline manager startup timeout")
-            except Exception as e:
-                logger.error("❌ Failed to start Pipeline Manager", error=str(e))
-                raise ConfigValidationError(f"Pipeline manager startup failed: {str(e)}")
+            # Set pipeline manager for call manager
+            self.call_manager.set_pipeline_manager(self.pipeline_manager)
+            
+            # Start the pipeline
+            await self.pipeline_manager.start()
             
             # Initialize OpenSIPS Engine (yeni implementasyon)
             logger.info("🔌 Initializing OpenSIPS Engine...")
@@ -1353,15 +1343,6 @@ class OpenSIPSAIVoiceConnector:
             except Exception as e:
                 logger.error("❌ OpenSIPS Event integration failed", error=str(e))
                 raise ConfigValidationError(f"OpenSIPS Event integration failed: {str(e)}")
-            
-            # Initialize Call Manager (compatibility)
-            logger.info("🔧 Initializing Call Manager...")
-            try:
-                self.call_manager = CallManager(self.pipeline_manager, self.mi_conn)
-                logger.info("✅ Call manager initialized successfully")
-            except Exception as e:
-                logger.error("❌ Call Manager initialization failed", error=str(e))
-                raise ConfigValidationError(f"Call Manager initialization failed: {str(e)}")
             
             # Final success message
             logger.info("🎉 All AI services initialized successfully!")
