@@ -105,29 +105,14 @@ class OpenSIPSEngine:
     Eski engine.py mantığını koruyarak Pipecat pipeline ile entegre eder
     """
     
-    def __init__(self, pipeline_manager):
+    def __init__(self, call_manager, mi_conn):
         """
         Args:
-            pipeline_manager: Pipecat pipeline manager
+            call_manager: The application's CallManager instance.
+            mi_conn: The application's MI connection instance.
         """
-        self.pipeline_manager = pipeline_manager
-        
-        # OpenSIPS MI configuration
-        mi_cfg = Config.get("opensips", {})
-        mi_ip = mi_cfg.get("ip", "127.0.0.1")
-        mi_port = int(mi_cfg.get("port", "8080"))
-        
-        # Initialize MI connection
-        if OPENSIPS_AVAILABLE:
-            self.mi_conn = OpenSIPSMI(conn="datagram", datagram_ip=mi_ip, datagram_port=mi_port)
-            logger.info("OpenSIPS MI connection initialized", ip=mi_ip, port=mi_port)
-        else:
-            self.mi_conn = MockOpenSIPSMI(ip=mi_ip, port=mi_port)
-            logger.warning("Using mock OpenSIPS MI connection")
-        
-        # Call manager
-        self.call_manager = CallManager(self.mi_conn)
-        self.call_manager.set_pipeline_manager(self.pipeline_manager)
+        self.call_manager = call_manager
+        self.mi_conn = mi_conn
         self.active_calls = {}
         
         # Event handler
@@ -1066,36 +1051,36 @@ class SIPListener:
             logger.error("Error stopping SIP listener", error=str(e))
 
 class OpenSIPSAIVoiceConnector:
-    """OpenSIPS AI Voice Connector Ana Sınıfı"""
+    """Main application class for the OpenSIPS AI Voice Connector"""
     
     def __init__(self, config_file: str = None, test_mode: bool = False):
+        self.config_file = config_file
         self.test_mode = test_mode
-        self.config = None
-        self.config_file = config_file or 'cfg/opensips-ai-voice-connector.ini'
-        self.running = False
-        
-        # Services
-        self.services = {}
-        self.pipeline_manager = None
-        
-        # OpenSIPS Engine - yeni implementasyon
-        self.opensips_engine = None
-        
-        # Legacy components (will be removed)
-        self.call_manager = None
-        self.opensips_handler = None
-        self.sip_listener = None
-        
-        # Background tasks
-        self._background_tasks = []
-        
-        # OpenSIPS MI connection
         self.mi_conn = None
+        self.event_handler = None
+        self.sip_listener = None
+        self.engine = None
         
-        logger.info("OpenSIPS AI Voice Connector initialized", test_mode=test_mode)
-    
+        # Pipeline and services
+        self.pipeline_manager = None
+        self.llm_service = None
+        self.stt_service = None
+        self.tts_service = None
+        
+        # Load config
+        self.load_config()
+        
+        # Initialize MI connection early
+        self.initialize_mi_connection()
+        
+        # Initialize CallManager
+        self.call_manager = CallManager(self.mi_conn)
+        
+        # FastAPI app
+        self.app = FastAPI()
+
     def load_config(self):
-        """Konfigürasyon dosyasını yükle"""
+        """Loads configuration from file and environment variables"""
         try:
             # Initialize Config singleton
             Config.init(self.config_file)
@@ -1172,7 +1157,7 @@ class OpenSIPSAIVoiceConnector:
                 
                 # Initialize OpenSIPS Engine (test mode)
                 logger.info("Initializing OpenSIPS Engine...")
-                self.opensips_engine = OpenSIPSEngine(self.pipeline_manager)
+                self.engine = OpenSIPSEngine(self.call_manager, self.mi_conn)
                 logger.info("OpenSIPS Engine initialized successfully")
                 
                 # Initialize OpenSIPS Event Listener (test mode)
@@ -1316,33 +1301,24 @@ class OpenSIPSAIVoiceConnector:
             # Start the pipeline
             await self.pipeline_manager.start()
             
-            # Initialize OpenSIPS Engine (yeni implementasyon)
+            # Initialize OpenSIPS Engine
             logger.info("🔌 Initializing OpenSIPS Engine...")
-            try:
-                self.opensips_engine = OpenSIPSEngine(self.pipeline_manager)
-                logger.info("✅ OpenSIPS Engine initialized successfully")
-            except Exception as e:
-                logger.error("❌ OpenSIPS Engine initialization failed", error=str(e))
-                raise ConfigValidationError(f"OpenSIPS Engine initialization failed: {str(e)}")
+            self.engine = OpenSIPSEngine(self.call_manager, self.mi_conn)
             
-            # Initialize OpenSIPS Event Listener (normal mode)
-            logger.info("🔔 Initializing OpenSIPS Event Listener...")
             try:
-                event_port = int(self.config.get('engine', 'event_port', fallback='8090'))
-                self.opensips_event_listener = OpenSIPSEventListener(port=event_port)
-                
-                # Initialize OpenSIPS MI Client  
-                opensips_ip = self.config.get('opensips', 'ip', fallback='172.20.0.6')
-                opensips_port = int(self.config.get('opensips', 'port', fallback='8087'))
-                self.opensips_mi_client = OpenSIPSMIClient(host=opensips_ip, port=opensips_port)
-                
-                logger.info("✅ OpenSIPS Event integration initialized",
-                           event_port=event_port,
-                           mi_host=opensips_ip,
-                           mi_port=opensips_port)
+                # Check for OpenSIPS availability and start event handler
+                if OPENSIPS_AVAILABLE:
+                    logger.info("🎯 Starting OpenSIPS Event Handler on port 8090...")
+                    await self.start_opensips_handler()
+                    logger.info("✅ OpenSIPS Event Handler initialized successfully!")
+                else:
+                    logger.warning("OpenSIPS library not available, using mock")
+                    self.engine = OpenSIPSEngine(self.call_manager, self.mi_conn)
+                    logger.info("✅ OpenSIPS Engine initialized successfully (mock mode)")
+
             except Exception as e:
-                logger.error("❌ OpenSIPS Event integration failed", error=str(e))
-                raise ConfigValidationError(f"OpenSIPS Event integration failed: {str(e)}")
+                logger.error("❌ Failed to initialize OpenSIPS Engine", error=str(e))
+                raise ConfigValidationError(f"OpenSIPS Engine initialization failed: {str(e)}")
             
             # Final success message
             logger.info("🎉 All AI services initialized successfully!")
@@ -1424,14 +1400,14 @@ class OpenSIPSAIVoiceConnector:
             event_host = self.config.get('engine', 'event_ip', fallback='0.0.0.0')
             
             # Initialize OpenSIPS event handler
-            self.opensips_handler = OpenSIPSEventHandler(
+            self.event_handler = OpenSIPSEventHandler(
                 host=event_host, 
                 port=event_port, 
                 mi_conn=self.mi_conn
             )
             
             # Set call manager
-            self.opensips_handler.set_call_manager(self.call_manager)
+            self.event_handler.set_call_manager(self.call_manager)
             
             logger.info("✅ OpenSIPS Event Handler initialized on", host=event_host, port=event_port)
             
@@ -1465,7 +1441,7 @@ class OpenSIPSAIVoiceConnector:
         """OpenSIPS event handler infinite loop'unu çalıştır"""
         try:
             logger.info("🔄 Starting OpenSIPS Event Handler infinite loop...")
-            await self.opensips_handler.start()
+            await self.event_handler.start()
         except Exception as e:
             logger.error("OpenSIPS handler loop error", error=str(e))
             raise
@@ -1505,10 +1481,10 @@ class OpenSIPSAIVoiceConnector:
             logger.info("   ✅ OpenSIPS Engine (NEW)")
             
             # 4. Start OpenSIPS Engine (Event Handler)
-            if self.opensips_engine:
+            if self.engine:
                 logger.info("🚀 Starting OpenSIPS Engine...")
                 try:
-                    await self.opensips_engine.start_event_handler()
+                    await self.engine.start_event_handler()
                     logger.info("✅ OpenSIPS Engine started successfully!")
                 except Exception as e:
                     logger.error("❌ Failed to start OpenSIPS Engine", error=str(e), exc_info=True)
@@ -1570,9 +1546,9 @@ class OpenSIPSAIVoiceConnector:
         self.running = False
         
         # Stop OpenSIPS Engine (yeni implementasyon)
-        if self.opensips_engine:
+        if self.engine:
             try:
-                await self.opensips_engine.shutdown()
+                await self.engine.shutdown()
                 logger.info("OpenSIPS Engine stopped")
             except Exception as e:
                 logger.error("Error stopping OpenSIPS Engine", error=str(e))
@@ -1592,8 +1568,8 @@ class OpenSIPSAIVoiceConnector:
             await self.sip_listener.stop()
             logger.info("SIP listener stopped")
         
-        if self.opensips_handler:
-            await self.opensips_handler.stop()
+        if self.event_handler:
+            await self.event_handler.stop()
             logger.info("OpenSIPS event handler stopped")
         
         # Stop pipeline manager
