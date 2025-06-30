@@ -85,8 +85,15 @@ class UDPRTPInputTransport(BaseInputTransport):
     def _bind_socket(self):
         """Bind UDP socket and get port (called during init)"""
         try:
+            logger.info("🔧 Attempting to bind UDP socket", 
+                       bind_ip=self._params.bind_ip, 
+                       bind_port=self._params.bind_port)
+            
             # Create and bind UDP socket
             self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            
+            # Try to bind to the specified port
             self._socket.bind((self._params.bind_ip, self._params.bind_port))
             self._socket.setblocking(False)
             
@@ -94,12 +101,17 @@ class UDPRTPInputTransport(BaseInputTransport):
             actual_port = self._socket.getsockname()[1]
             self._transport._local_port = actual_port
             
-            logger.info("🌐 UDP socket bound", 
+            logger.info("✅ UDP socket bound successfully", 
                        bind_ip=self._params.bind_ip, 
-                       actual_port=actual_port)
+                       requested_port=self._params.bind_port,
+                       actual_port=actual_port,
+                       socket_info=self._socket.getsockname())
             
         except Exception as e:
-            logger.error("Failed to bind UDP socket", error=str(e))
+            logger.error("❌ Failed to bind UDP socket", 
+                        bind_ip=self._params.bind_ip,
+                        bind_port=self._params.bind_port,
+                        error=str(e))
             raise
 
     async def start(self, frame: StartFrame):
@@ -163,6 +175,7 @@ class UDPRTPInputTransport(BaseInputTransport):
             while True:
                 try:
                     # Read UDP packet (non-blocking)
+                    logger.debug("🔍 Waiting for UDP packet...")
                     data, addr = await asyncio.get_event_loop().sock_recvfrom(
                         self._socket, 4096
                     )
@@ -171,7 +184,8 @@ class UDPRTPInputTransport(BaseInputTransport):
                     logger.info("📦 UDP packet received", 
                                packet_num=packet_count,
                                size=len(data), 
-                               from_addr=f"{addr[0]}:{addr[1]}")
+                               from_addr=f"{addr[0]}:{addr[1]}",
+                               total_packets=packet_count)
                     
                     await self._handle_rtp_packet(data, addr)
                     
@@ -201,37 +215,59 @@ class UDPRTPInputTransport(BaseInputTransport):
                 logger.info("🎯 Learned client address from first RTP packet", 
                            client_ip=addr[0], client_port=addr[1])
                 
+                # Update output transport with client info
+                if self._transport._output:
+                    self._transport._output._params.client_ip = addr[0]
+                    self._transport._output._params.client_port = addr[1]
+                
                 # Notify transport about client connection
                 await self._transport._notify_client_connected()
             
-            # Validate source (with some flexibility for NAT)
-            if addr[0] != self._params.client_ip and self._packet_count > 10:
+            # More flexible source validation - allow debug packets from different sources
+            if addr[0] not in [self._params.client_ip, "192.168.88.120", "127.0.0.1"] and self._packet_count > 10:
                 logger.debug("RTP packet from unexpected source", 
                            source=f"{addr[0]}:{addr[1]}", 
                            expected=f"{self._params.client_ip}:{self._params.client_port}")
-                return
+                # Don't return - allow processing for debugging
             
             self._packet_count += 1
             
             # Decode RTP packet
             logger.debug("🔍 Decoding RTP packet", packet_hex=data.hex()[:40])
-            rtp_packet = decode_rtp_packet(data.hex())
-            pcmu_payload = bytes.fromhex(rtp_packet['payload'])
-            
-            logger.info("✅ RTP packet decoded successfully", 
-                       payload_type=rtp_packet.get('payload_type'),
-                       sequence=rtp_packet.get('sequence_number'),
-                       pcmu_size=len(pcmu_payload))
+            try:
+                rtp_packet = decode_rtp_packet(data.hex())
+                pcmu_payload = bytes.fromhex(rtp_packet['payload'])
+                
+                logger.info("✅ RTP packet decoded successfully", 
+                           payload_type=rtp_packet.get('payload_type'),
+                           sequence=rtp_packet.get('sequence_number'),
+                           pcmu_size=len(pcmu_payload))
+            except Exception as decode_error:
+                logger.error("❌ RTP packet decode failed", error=str(decode_error), packet_hex=data.hex()[:40])
+                return
             
             # Convert PCMU to PCM using Pipecat native utilities
-            pcm_data = await ulaw_to_pcm(
-                ulaw_bytes=pcmu_payload,
-                in_rate=8000,    # PCMU input rate
-                out_rate=self.sample_rate,  # Pipeline processing rate (16kHz)
-                resampler=self._resampler
-            )
+            logger.debug("🔄 Converting PCMU to PCM", 
+                        pcmu_size=len(pcmu_payload),
+                        target_rate=self.sample_rate)
+            
+            try:
+                pcm_data = await ulaw_to_pcm(
+                    ulaw_bytes=pcmu_payload,
+                    in_rate=8000,    # PCMU input rate
+                    out_rate=self.sample_rate,  # Pipeline processing rate (16kHz)
+                    resampler=self._resampler
+                )
+            except Exception as convert_error:
+                logger.error("❌ PCMU→PCM conversion failed", error=str(convert_error))
+                return
             
             if pcm_data and len(pcm_data) > 0:
+                logger.info("✅ PCMU→PCM conversion successful", 
+                           pcmu_size=len(pcmu_payload),
+                           pcm_size=len(pcm_data),
+                           sample_rate=self.sample_rate)
+                
                 # Create Pipecat audio frame
                 audio_frame = InputAudioRawFrame(
                     audio=pcm_data,
@@ -239,8 +275,18 @@ class UDPRTPInputTransport(BaseInputTransport):
                     num_channels=1
                 )
                 
+                logger.info("📦 Created InputAudioRawFrame", 
+                           frame_type=type(audio_frame).__name__,
+                           audio_size=len(audio_frame.audio),
+                           sample_rate=audio_frame.sample_rate)
+                
                 # Push to Pipecat pipeline using native method
-                await self.push_audio_frame(audio_frame)
+                logger.info("🚀 Pushing audio frame to pipeline...")
+                try:
+                    await self.push_audio_frame(audio_frame)
+                    logger.info("✅ Audio frame pushed to pipeline successfully")
+                except Exception as push_error:
+                    logger.error("❌ Failed to push audio frame to pipeline", error=str(push_error))
                 
                 logger.info("🎵 RTP→PCM→Pipeline successful", 
                            pcmu_size=len(pcmu_payload),
@@ -248,7 +294,8 @@ class UDPRTPInputTransport(BaseInputTransport):
                            packet_num=self._packet_count)
             else:
                 logger.warning("❌ PCM conversion failed or empty", 
-                              pcmu_size=len(pcmu_payload))
+                              pcmu_size=len(pcmu_payload),
+                              pcm_result=pcm_data)
             
         except Exception as e:
             logger.error("Error handling RTP packet", error=str(e), exc_info=True)

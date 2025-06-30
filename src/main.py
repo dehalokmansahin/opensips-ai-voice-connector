@@ -13,6 +13,7 @@ from pathlib import Path
 import configparser
 import structlog
 from typing import Dict, Any
+import random
 
 # FastAPI is optional for test mode
 try:
@@ -388,40 +389,51 @@ class OpenSIPSEngine:
         """Start OpenSIPS event handler and SIP listener"""
         try:
             # Get configuration
-            engine_cfg = get_config_section("engine")
-            host_ip = engine_cfg.get("event_ip", "0.0.0.0")
-            event_port = int(engine_cfg.get("event_port", "8090"))
-            sip_port = int(engine_cfg.get("sip_port", "8089"))
+            opensips_cfg = get_config_section("opensips")
+            sip_host_ip = opensips_cfg.get("host", "0.0.0.0")
+            sip_port = opensips_cfg.getint("sip_port", 8089)
+            event_port = opensips_cfg.getint("event_port", 8090)
             
-            # 1. Initialize event handler for E_UA_SESSION events
-            if OPENSIPS_AVAILABLE:
-                self.event_handler = OpenSIPSEventHandler(
-                    host=host_ip, port=event_port, mi_conn=self.mi_conn
-                )
-                # Subscribe to E_UA_SESSION events
-                self.event_subscription = self.event_handler.async_subscribe(
-                    "E_UA_SESSION", self.udp_handler
-                )
-                
-                # Get actual bound port
-                _, actual_port = self.event_subscription.socket.sock.getsockname()
-                logger.info("OpenSIPS event handler started", ip=host_ip, port=actual_port)
-                
-            else:
-                # Mock event handler for development
-                self.event_handler = MockOpenSIPSEventHandler()
-                logger.warning("Using mock OpenSIPS event handler", ip=host_ip, port=event_port)
+            # 1. Initialize and start OpenSIPS Event Handler
+            logger.info("🔄 Creating OpenSIPS Event Handler...")
+            self.event_handler = OpenSIPSEventHandler(host=sip_host_ip, port=event_port, mi_conn=self.mi_conn)
+            self.event_handler.set_call_manager(self.call_manager)
             
-            # 2. Initialize and start SIP Listener for INVITE messages
-            self.sip_listener = SIPListener(host=host_ip, port=sip_port, call_manager=self.call_manager)
+            # Start event handler as background task
+            logger.info("🔄 Starting OpenSIPS event handler task...")
+            self.event_handler_task = asyncio.create_task(self.event_handler.start())
+            logger.info("✅ OpenSIPS event handler task created", ip=sip_host_ip, port=event_port)
+            
+            # 2. Initialize and start SIP Listener for INVITE messages  
+            logger.info("🔄 Creating SIP Listener...")
+            self.sip_listener = SIPListener(host=sip_host_ip, port=sip_port, call_manager=self.call_manager)
+            
+            # CRITICAL FIX: Actually start the SIP listener task
+            logger.info("🔄 Starting SIP Listener task...")
             self.sip_listener_task = asyncio.create_task(self.sip_listener.start())
-            logger.info("SIP Listener started", ip=host_ip, port=sip_port)
+            logger.info("✅ SIP Listener task created", ip=sip_host_ip, port=sip_port)
+            
+            # Give tasks a moment to initialize
+            await asyncio.sleep(0.2)
+            
+            # Verify tasks are running
+            if self.event_handler_task.done():
+                logger.error("❌ Event handler task completed unexpectedly")
+                if self.event_handler_task.exception():
+                    logger.error("Event handler exception", error=str(self.event_handler_task.exception()))
+            else:
+                logger.info("✅ Event handler task is running")
                 
-            return True
+            if self.sip_listener_task.done():
+                logger.error("❌ SIP Listener task completed unexpectedly")
+                if self.sip_listener_task.exception():
+                    logger.error("SIP Listener exception", error=str(self.sip_listener_task.exception()))
+            else:
+                logger.info("✅ SIP Listener task is running")
             
         except Exception as e:
             logger.error("Failed to start OpenSIPS event handler and SIP listener", error=str(e))
-            return False
+            raise
 
     async def shutdown(self):
         """Shutdown OpenSIPS engine"""
@@ -789,19 +801,30 @@ class SIPListener:
     async def start(self):
         """SIP listener'ı başlat"""
         try:
+            logger.info("🔧 Creating UDP socket for SIP listener", 
+                       bind_host=self.host, 
+                       bind_port=self.port)
+            
+            # Create UDP socket
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            
+            # Bind socket
+            logger.info("🔗 Binding SIP UDP socket", 
+                       host=self.host, 
+                       port=self.port)
             self.socket.bind((self.host, self.port))
             self.socket.setblocking(False)
-            self.running = True
             
-            # Enhanced logging for diagnostics
+            # Get actual bound address
             actual_host, actual_port = self.socket.getsockname()
-            logger.info("🚀 SIP Listener started successfully", 
-                       configured_host=self.host, 
-                       configured_port=self.port,
-                       actual_host=actual_host,
-                       actual_port=actual_port)
+            logger.info("✅ SIP UDP socket bound successfully", 
+                       actual_host=actual_host, 
+                       actual_port=actual_port,
+                       configured_host=self.host,
+                       configured_port=self.port)
+            
+            self.running = True
             
             # Log container network info for diagnostics
             try:
@@ -814,173 +837,198 @@ class SIPListener:
             except Exception as e:
                 logger.warning("Could not get container network info", error=str(e))
             
-            # Listen for incoming SIP messages from OpenSIPS
+            # Start UDP reader task
+            logger.info("🔄 Starting SIP UDP reader loop...")
             message_count = 0
+            loop_count = 0
+            
             while self.running:
                 try:
-                    loop = asyncio.get_event_loop()
-                    data, addr = await loop.sock_recvfrom(self.socket, 4096)
+                    loop_count += 1
+                    if loop_count % 100 == 0:  # Log every 100 loops to show it's running
+                        logger.info("📡 SIP UDP reader loop active", loop_count=loop_count)
+                    
+                    # Read UDP packet with asyncio
+                    logger.debug("📡 Waiting for SIP UDP message...")
+                    data, addr = await asyncio.get_event_loop().sock_recvfrom(
+                        self.socket, 4096
+                    )
                     
                     message_count += 1
-                    logger.info("📨 SIP message received", 
+                    logger.info("📨 SIP UDP message received", 
                                message_number=message_count,
-                               from_addr=f"{addr[0]}:{addr[1]}",
-                               data_size=len(data))
+                               from_addr=f"{addr[0]}:{addr[1]}", 
+                               size=len(data),
+                               data_preview=data[:50].decode('utf-8', errors='ignore'))
                     
                     # Process SIP message
-                    await self.handle_sip_message(data.decode('utf-8'), addr)
+                    sip_data = data.decode('utf-8', errors='ignore')
+                    await self.handle_sip_message(sip_data, addr)
                     
                 except asyncio.CancelledError:
-                    logger.info("SIP listener cancelled")
+                    logger.info("SIP UDP reader cancelled")
                     break
+                except ConnectionResetError:
+                    logger.warning("SIP UDP connection reset, continuing...")
+                    await asyncio.sleep(0.01)
                 except Exception as e:
-                    logger.error("Error in SIP listener", error=str(e))
-                    await asyncio.sleep(0.1)
+                    logger.error("Error in SIP UDP reader", 
+                                error=str(e), 
+                                error_type=type(e).__name__)
+                    await asyncio.sleep(0.01)  # Brief pause on error
+                    
+            logger.info("🛑 SIP UDP reader loop ended", 
+                       total_messages=message_count,
+                       total_loops=loop_count)
                     
         except Exception as e:
             logger.error("💥 Failed to start SIP listener", 
                         host=self.host, 
                         port=self.port, 
-                        error=str(e))
+                        error=str(e), 
+                        error_type=type(e).__name__,
+                        exc_info=True)
             raise
     
     async def handle_sip_message(self, sip_data: str, addr):
-        """SIP mesajını işle"""
+        """Handle incoming SIP message"""
         try:
             logger.info("🔍 Processing SIP message", 
-                       from_addr=f"{addr[0]}:{addr[1]}", 
-                       message_size=len(sip_data))
-            logger.debug("SIP message content preview", 
-                        content=sip_data[:300] + "..." if len(sip_data) > 300 else sip_data)
+                       from_addr=addr, 
+                       size=len(sip_data),
+                       preview=sip_data[:200])
             
-            # Parse SIP method
+            # Parse SIP headers
             lines = sip_data.strip().split('\n')
             if not lines:
                 logger.warning("Empty SIP message received")
                 return
+            
+            request_line = lines[0].strip()
+            logger.info("📨 SIP request line", request_line=request_line)
+            
+            # Extract method
+            parts = request_line.split()
+            if len(parts) < 3:
+                logger.warning("Invalid SIP request line", request_line=request_line)
+                return
                 
-            first_line = lines[0].strip()
-            logger.info("📋 SIP method detected", method_line=first_line)
+            method = parts[0].upper()
+            logger.info("🎯 SIP method detected", method=method)
             
-            # Debug: Full SIP message for ACK detection
-            logger.debug("Full SIP message details", method=first_line, full_message=sip_data[:500])
-            
-            if first_line.startswith('INVITE'):
-                logger.info("🎯 Processing INVITE message")
+            # Route to appropriate handler
+            if method == "INVITE":
+                logger.info("📞 Processing INVITE message")
                 await self.handle_invite(sip_data, addr)
-            elif first_line.startswith('BYE'):
-                logger.info("📞 Processing BYE message")
+            elif method == "BYE":
+                logger.info("👋 Processing BYE message")
                 await self.handle_bye(sip_data, addr)
-            elif first_line.startswith('CANCEL'):
-                logger.info("🚫 Processing CANCEL message")
+            elif method == "CANCEL":
+                logger.info("⏹️ Processing CANCEL message")
                 await self.handle_cancel(sip_data, addr)
-            elif first_line.startswith('ACK'):
+            elif method == "ACK":
                 logger.info("✅ Processing ACK message")
                 await self.handle_ack(sip_data, addr)
             else:
-                logger.warning("❓ Unhandled SIP method", 
-                              method=first_line, 
-                              from_addr=f"{addr[0]}:{addr[1]}")
+                logger.info("❓ Unknown SIP method", method=method)
                 
         except Exception as e:
-            logger.error("💥 Error handling SIP message", 
+            logger.error("Error processing SIP message", 
+                        from_addr=addr, 
                         error=str(e), 
-                        from_addr=f"{addr[0]}:{addr[1]}")
-            import traceback
-            logger.debug("SIP message handling traceback", traceback=traceback.format_exc())
-    
+                        sip_preview=sip_data[:100] if sip_data else "")
+
     async def handle_invite(self, sip_data: str, addr):
-        """INVITE mesajını işle"""
+        """Handle incoming INVITE message"""
         try:
-            logger.info("Processing INVITE from OpenSIPS", from_addr=addr)
+            logger.info("📞 Processing INVITE from external client", from_addr=addr)
             
-            # Parse basic SIP headers - handle multiple Via headers and Record-Route
+            # Parse SIP headers
             headers = {}
-            via_headers = []  # Store all Via headers
-            record_route_headers = []  # Store all Record-Route headers
-            body = ""
-            in_body = False
+            lines = sip_data.strip().split('\n')
+            sdp_started = False
+            sdp_lines = []
             
-            for line in sip_data.split('\n'):
+            for line in lines:
                 line = line.strip()
-                if not line:
-                    in_body = True
-                    continue
-                    
-                if in_body:
-                    body += line + '\n'
-                elif ':' in line:
+                if sdp_started:
+                    sdp_lines.append(line)
+                elif ':' in line and not sdp_started:
                     key, value = line.split(':', 1)
-                    key_lower = key.strip().lower()
-                    value_clean = value.strip()
+                    headers[key.strip().lower()] = value.strip()
+                elif line == '':
+                    # Empty line indicates start of SDP body
+                    sdp_started = True
                     
-                    # Handle multiple Via headers specially
-                    if key_lower == 'via':
-                        via_headers.append(value_clean)
-                        headers['via'] = via_headers[0]  # Keep first for compatibility
-                    # Handle Record-Route headers (critical for ACK routing!)
-                    elif key_lower == 'record-route':
-                        record_route_headers.append(value_clean)
-                        headers['record-route'] = value_clean  # Store for response
-                    else:
-                        headers[key_lower] = value_clean
+            logger.info("📋 SIP headers parsed", 
+                       header_count=len(headers),
+                       call_id=headers.get('call-id', 'Unknown'))
             
-            # Extract call information
-            call_id = headers.get('call-id', 'unknown')
+            # Extract key information
+            call_id = headers.get('call-id', f'call-{random.randint(100000, 999999)}')
             from_header = headers.get('from', '')
             to_header = headers.get('to', '')
             
-            logger.info("INVITE details", call_id=call_id, from_=from_header, to=to_header)
+            logger.info("📞 INVITE details", 
+                       call_id=call_id, 
+                       from_header=from_header[:50],
+                       to_header=to_header[:50])
             
-            # Parse SDP from body
-            sdp_body = body.strip()
-            if not sdp_body:
-                logger.error("No SDP body in INVITE", call_id=call_id)
-                await self.send_response(addr, call_id, '400', 'Bad Request - Missing SDP')
-                return
+            # Parse SDP if present
+            sdp_body = '\n'.join(sdp_lines) if sdp_lines else ''
+            sdp_info = None
             
-            logger.info("SDP body received", call_id=call_id, sdp_preview=sdp_body[:100])
+            if sdp_body.strip():
+                logger.info("🎵 SDP body found", sdp_size=len(sdp_body))
+                try:
+                    sdp_info = self._parse_sdp_body(sdp_body)
+                    logger.info("🎵 SDP parsed successfully", 
+                               rtp_port=sdp_info.get('rtp_port'),
+                               codec=sdp_info.get('codec'))
+                except Exception as e:
+                    logger.error("Failed to parse SDP", error=str(e))
+            else:
+                logger.warning("No SDP body found in INVITE")
             
-            # Parse SDP using static utility method
-            sdp_info = self._parse_sdp_body(sdp_body)
-            
-            if not sdp_info:
-                logger.error("Failed to parse SDP", call_id=call_id)
-                await self.send_response(addr, call_id, '400', 'Bad Request - Invalid SDP')
-                return
-            
-            logger.info("SDP parsed successfully", call_id=call_id, sdp_info=sdp_info)
-            
-            # Create call via call manager
+            # Create call using CallManager
             if self.call_manager:
-                logger.info("🔧 CALLING create_call method", call_id=call_id, call_manager_type=type(self.call_manager).__name__)
+                logger.info("📞 Creating call via CallManager", call_id=call_id)
                 
                 try:
-                    call = await self.call_manager.create_call(call_id, sdp_info)
-                    logger.info("🔧 create_call RETURNED", call_id=call_id, call_result=call, call_type=type(call).__name__ if call else "None")
+                    call = await self.call_manager.create_call(call_id, sdp_info or {})
+                    
+                    if call:
+                        logger.info("✅ Call created successfully", call_id=call_id)
+                        
+                        # Start the call
+                        sdp_response = await call.start()
+                        
+                        logger.info("🎵 Call started, generating SIP response", 
+                                   call_id=call_id,
+                                   has_sdp_response=bool(sdp_response))
+                        
+                        # Send 200 OK response
+                        await self.send_response(
+                            addr, call_id, "200", "OK", 
+                            request_headers=headers,
+                            body=sdp_response
+                        )
+                        
+                        logger.info("✅ 200 OK sent to client", call_id=call_id, to_addr=addr)
+                        
+                    else:
+                        logger.error("Failed to create call", call_id=call_id)
+                        await self.send_response(addr, call_id, "500", "Internal Server Error", request_headers=headers)
+                        
                 except Exception as e:
-                    import traceback
-                    logger.error("💥 EXCEPTION in create_call CALL", call_id=call_id, error=str(e), traceback=traceback.format_exc())
-                    call = None
-                
-                if call:
-                    # Send 200 OK response with SDP
-                    response_sdp = call.get_sdp_body()
-                    logger.info("🎯 Sending 200 OK with Record-Route", 
-                               call_id=call_id, 
-                               has_record_route='record-route' in headers,
-                               record_route=headers.get('record-route', 'N/A'))
-                    await self.send_response(addr, call_id, '200', 'OK', headers, response_sdp, via_headers)
-                    logger.info("Call created and 200 OK sent", call_id=call_id)
-                else:
-                    logger.error("Failed to create call", call_id=call_id)
-                    await self.send_response(addr, call_id, '500', 'Internal Server Error', headers, None, via_headers)
+                    logger.error("Error creating/starting call", call_id=call_id, error=str(e))
+                    await self.send_response(addr, call_id, "500", "Internal Server Error", request_headers=headers)
             else:
-                logger.error("No call manager available")
-                await self.send_response(addr, call_id, '500', 'Internal Server Error', headers, None, via_headers)
+                logger.error("No CallManager available")
+                await self.send_response(addr, call_id, "500", "Internal Server Error", request_headers=headers)
                 
         except Exception as e:
-            logger.error("Error handling INVITE", error=str(e))
+            logger.error("Error handling INVITE", from_addr=addr, error=str(e), exc_info=True)
     
     async def handle_bye(self, sip_data: str, addr):
         """BYE mesajını işle"""
@@ -1253,8 +1301,6 @@ class OpenSIPSAIVoiceConnector:
             logger.info(f"Service {service_name} stopped.")
         except Exception as e:
             logger.error(f"Error stopping service {service_name}", error=str(e))
-
-
 
     async def start_opensips_handler(self):
         """Initializes and starts the OpenSIPS event handler."""

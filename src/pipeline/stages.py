@@ -1,25 +1,18 @@
 """
-Pipeline Stages - Pipecat FrameProcessor uyumlu versiyon
+Native Pipecat Pipeline Stages
+Pipecat'in frame processor pattern'ini kullanarak VAD, STT, LLM, TTS işlemleri
 """
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Optional, Dict, Any, AsyncGenerator
 import structlog
 
 from pipecat.frames.frames import (
-    Frame,
-    AudioRawFrame,
-    StartFrame,
-    EndFrame,
-    UserStartedSpeakingFrame,
-    UserStoppedSpeakingFrame,
-    InterimTranscriptionFrame,
-    TranscriptionFrame,
-    LLMTextFrame,
-    TextFrame,
-    LLMFullResponseStartFrame,
-    LLMFullResponseEndFrame,
+    Frame, AudioRawFrame, InputAudioRawFrame, OutputAudioRawFrame,
+    StartFrame, EndFrame, TranscriptionFrame, LLMTextFrame, TextFrame,
+    LLMFullResponseStartFrame, LLMFullResponseEndFrame,
+    UserStartedSpeakingFrame, UserStoppedSpeakingFrame
 )
 from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
 
@@ -76,7 +69,13 @@ class VADProcessor(FrameProcessor):
         
         if isinstance(frame, StartFrame):
             logger.info("🎤 VAD processor started!")
-        elif isinstance(frame, AudioRawFrame):
+        elif isinstance(frame, (AudioRawFrame, InputAudioRawFrame)):
+            # Handle both AudioRawFrame and InputAudioRawFrame
+            logger.info("🎤 VAD received audio frame", 
+                       frame_type=type(frame).__name__,
+                       audio_size=len(frame.audio) if frame.audio else 0,
+                       sample_rate=getattr(frame, 'sample_rate', 'unknown'))
+            
             # Improved VAD with timing controls
             if frame.audio and len(frame.audio) > 0:
                 logger.debug("🎤 VAD processing audio frame", frame_size=len(frame.audio))
@@ -93,11 +92,18 @@ class VADProcessor(FrameProcessor):
                     
                     is_active = rms > self._speech_threshold
                     
+                    logger.debug("🎤 VAD analysis", 
+                                rms=rms, 
+                                threshold=self._speech_threshold,
+                                is_active=is_active,
+                                is_speaking=self._is_speaking)
+                    
                     # Speech detection logic with timing
                     if is_active:
                         if not self._is_speaking:
                             if self._speech_start_time is None:
                                 self._speech_start_time = current_time
+                                logger.debug("🎤 Speech detection started", rms=rms)
                             elif (current_time - self._speech_start_time) >= self._min_speech_duration_ms:
                                 self._is_speaking = True
                                 self._silence_start_time = None
@@ -111,6 +117,7 @@ class VADProcessor(FrameProcessor):
                         if self._is_speaking:
                             if self._silence_start_time is None:
                                 self._silence_start_time = current_time
+                                logger.debug("🎤 Silence detection started")
                             elif (current_time - self._silence_start_time) >= self._min_silence_duration_ms:
                                 self._is_speaking = False
                                 self._speech_start_time = None
@@ -122,9 +129,13 @@ class VADProcessor(FrameProcessor):
                             
                 except Exception as e:
                     logger.warning("VAD processing error", error=str(e), frame_size=len(frame.audio))
+            else:
+                logger.warning("🎤 VAD received empty audio frame")
         
         # Frame'i devam ettir
+        logger.debug("🎤 VAD pushing frame downstream", frame_type=type(frame).__name__)
         await self.push_frame(frame, direction)
+        logger.debug("🎤 VAD frame pushed successfully")
 
 class STTProcessor(FrameProcessor):
     """Speech-to-Text processor using Vosk WebSocket - basitleştirilmiş"""
@@ -164,13 +175,33 @@ class STTProcessor(FrameProcessor):
                 self._is_started = False
                 logger.info("STT service stopped")
         
-        elif isinstance(frame, AudioRawFrame):
+        elif isinstance(frame, (AudioRawFrame, InputAudioRawFrame)):
+            # Handle audio frames for STT
+            logger.info("🗣️ STT received audio frame", 
+                       frame_type=type(frame).__name__,
+                       audio_size=len(frame.audio) if frame.audio else 0,
+                       stt_started=self._is_started)
+            
             # Ses frame'ini STT servisine gönder
             if self._is_started and frame.audio:
+                logger.debug("🗣️ Sending audio to STT service", audio_size=len(frame.audio))
                 await self._stt_service.run_stt(frame.audio)
+                logger.debug("🗣️ Audio sent to STT service successfully")
+            elif not self._is_started:
+                logger.warning("🗣️ STT service not started, dropping audio frame")
+            elif not frame.audio:
+                logger.warning("🗣️ Empty audio frame received")
+        
+        elif isinstance(frame, UserStartedSpeakingFrame):
+            logger.info("🗣️ STT received UserStartedSpeakingFrame")
+        
+        elif isinstance(frame, UserStoppedSpeakingFrame):
+            logger.info("🗣️ STT received UserStoppedSpeakingFrame")
         
         # Frame'i devam ettir
+        logger.debug("🗣️ STT pushing frame downstream", frame_type=type(frame).__name__)
         await self.push_frame(frame, direction)
+        logger.debug("🗣️ STT frame pushed successfully")
 
 class LLMProcessor(FrameProcessor):
     """Large Language Model processor using LLaMA WebSocket"""
