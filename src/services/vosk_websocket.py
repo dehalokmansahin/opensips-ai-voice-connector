@@ -82,9 +82,11 @@ class VoskWebsocketSTTService(STTService):
         await super()._process_frame(frame, direction)
 
         if isinstance(frame, StartFrame):
-            # Start listening for transcriptions
+            # Bypass TaskManager completely - use direct asyncio
+            logger.info("Vosk service starting with direct asyncio task creation")
             if not self._listener_task:
-                self._listener_task = self.create_task(self._listener())
+                self._listener_task = asyncio.create_task(self._listener())
+                logger.info("✅ Vosk listener task created with asyncio")
         
         elif isinstance(frame, AudioRawFrame):
             if self._websocket:
@@ -108,7 +110,11 @@ class VoskWebsocketSTTService(STTService):
             
             # Stop the listener task
             if self._listener_task:
-                await self.cancel_task(self._listener_task)
+                self._listener_task.cancel()
+                try:
+                    await self._listener_task
+                except asyncio.CancelledError:
+                    pass
                 self._listener_task = None
             
             # Forward the EndFrame to signal pipeline completion
@@ -116,6 +122,20 @@ class VoskWebsocketSTTService(STTService):
         else:
             # Forward other frames like UserStartedSpeaking, etc.
             await self.push_frame(frame, direction)
+
+    async def _start_listener_immediately(self):
+        """Start listener immediately - TaskManager should be ready by first audio frame"""
+        try:
+            self._listener_task = self.create_task(self._listener())
+            logger.info("Successfully started Vosk listener task")
+        except Exception as e:
+            if "TaskManager is still not initialized" in str(e):
+                logger.warning("TaskManager still not ready, using asyncio fallback")
+                # Direct asyncio fallback
+                self._listener_task = asyncio.create_task(self._listener())
+            else:
+                logger.error(f"Unexpected error starting Vosk listener: {e}")
+                raise
 
     def run_stt(self, frame_iterator: AsyncGenerator[Frame, None]) -> AsyncGenerator[Frame, None]:
         # This method is not used in the processor-based service model.

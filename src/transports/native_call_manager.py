@@ -81,63 +81,146 @@ class NativeCall:
             max_port = int(rtp_cfg.get("max_port", 35100))
             bind_port = random.randint(min_port, max_port)
             logger.info("🎲 Selected RTP bind port", call_id=self.call_id, bind_port=bind_port)
+            
             # Create transport bound to chosen port
             rtp_ip = self._get_rtp_ip()
-            # Bind to all interfaces but advertise external IP in SDP
-            bind_ip = "0.0.0.0"  # Bind to all interfaces in container
+            
+            # ===== RTP TEST MODE =====
+            # Skip complex pipeline setup, just test RTP reception
+            logger.warning("🧪 ENTERING RTP TEST MODE - Pipeline bypassed!")
+            
+            # Create transport with correct parameters
+            from transports.pipecat_udp_transport import UDPRTPTransportParams
+            transport_params = UDPRTPTransportParams(
+                bind_ip="0.0.0.0",
+                bind_port=bind_port,
+                audio_in_enabled=True,
+                audio_out_enabled=True
+            )
+            
+            # Create transport using the factory function
             self.transport = create_opensips_rtp_transport(
-                bind_ip=bind_ip,
+                bind_ip="0.0.0.0",
                 bind_port=bind_port
             )
             
-            logger.info("🌐 UDP socket bound", 
-                       bind_ip=bind_ip, 
-                       bind_port=bind_port,
-                       advertise_ip=rtp_ip)
+            # Override the input transport's RTP handler for test mode
+            input_transport = self.transport.input()
+            original_handle_rtp = input_transport._handle_rtp_packet
             
-            # 2. Register event handlers
-            @self.transport.event_handler("on_client_connected")
-            async def on_client_connected(client_ip: str, client_port: int):
-                logger.info("🎯 RTP client connected", 
+            async def test_rtp_handler(data: bytes, addr: tuple):
+                """Test RTP packet handler - logs packets and echoes them back"""
+                logger.info("🎤 RTP PACKET RECEIVED!", 
                            call_id=self.call_id,
-                           client_ip=client_ip, 
-                           client_port=client_port)
-                self.client_connected = True
+                           packet_size=len(data),
+                           from_addr=f"{addr[0]}:{addr[1]}",
+                           packet_preview=data[:20].hex() if len(data) >= 20 else data.hex())
+                
+                # Try to decode RTP packet
+                try:
+                    from transports.rtp_utils import decode_rtp_packet
+                    # Convert bytes to hex string for decode_rtp_packet
+                    data_hex = data.hex()
+                    rtp_info = decode_rtp_packet(data_hex)
+                    logger.info("🎵 RTP decoded", 
+                               call_id=self.call_id,
+                               payload_type=rtp_info.get('payload_type'),
+                               sequence=rtp_info.get('sequence_number'),
+                               timestamp=rtp_info.get('timestamp'))
+                except Exception as decode_err:
+                    logger.warning("⚠️ RTP decode failed", 
+                                  call_id=self.call_id, 
+                                  error=str(decode_err),
+                                  raw_data=data_hex[:40] if len(data_hex) > 40 else data_hex)
+                
+                # Echo back the packet (simple test)
+                try:
+                    if hasattr(input_transport, '_socket') and input_transport._socket:
+                        input_transport._socket.sendto(data, addr)
+                        logger.info("🔊 RTP packet echoed back", 
+                                   call_id=self.call_id,
+                                   to_addr=f"{addr[0]}:{addr[1]}")
+                except Exception as echo_err:
+                    logger.error("❌ Failed to echo RTP packet", 
+                                call_id=self.call_id, 
+                                error=str(echo_err))
+
+            # ===== CRITICAL FIX: Direct asyncio UDP reader for test mode =====
+            async def test_udp_reader():
+                """Direct UDP reader for test mode (bypasses TaskManager)"""
+                logger.info("🔄 Test UDP reader started", call_id=self.call_id)
+                
+                socket = input_transport._socket
+                if not socket:
+                    logger.error("❌ No socket available for UDP reader", call_id=self.call_id)
+                    return
+                
+                try:
+                    packet_count = 0
+                    while True:
+                        try:
+                            logger.debug("🔍 Waiting for UDP packet...", call_id=self.call_id)
+                            data, addr = await asyncio.get_event_loop().sock_recvfrom(socket, 4096)
+                            
+                            packet_count += 1
+                            logger.info("📦 Test UDP packet received!", 
+                                       call_id=self.call_id,
+                                       packet_num=packet_count,
+                                       size=len(data), 
+                                       from_addr=f"{addr[0]}:{addr[1]}")
+                            
+                            await test_rtp_handler(data, addr)
+                            
+                        except Exception as recv_error:
+                            logger.error("Error in test UDP reader", 
+                                        call_id=self.call_id, 
+                                        error=str(recv_error))
+                            await asyncio.sleep(0.01)
+                            
+                except asyncio.CancelledError:
+                    logger.info("Test UDP reader cancelled", call_id=self.call_id)
+                except Exception as fatal_error:
+                    logger.error("Fatal error in test UDP reader", 
+                                call_id=self.call_id, 
+                                error=str(fatal_error))
             
-            @self.transport.event_handler("on_rtp_ready")
-            async def on_rtp_ready():
-                logger.info("🎵 RTP transport ready", call_id=self.call_id)
+            # Start test UDP reader with direct asyncio (no TaskManager needed)
+            self._test_udp_task = asyncio.create_task(test_udp_reader())
+            logger.info("🎯 Test UDP reader task started via asyncio", call_id=self.call_id)
             
-            # 3. Create processors
-            processors = await self._create_processors()
+            # Override transport's UDP task startup to prevent TaskManager issues
+            input_transport._udp_task = self._test_udp_task
             
-            # 4. Create pipeline: Input → Processors → Output
+            # Start the transport
+            logger.info("🎵 Starting RTP transport...", call_id=self.call_id)
+            
+            # Create minimal pipeline for transport startup
+            from pipecat.frames.frames import StartFrame
+            from pipecat.pipeline.pipeline import Pipeline
+            from pipecat.pipeline.task import PipelineTask
+            
+            # Create simple pipeline: input -> output (echo mode)
             self.pipeline = Pipeline([
                 self.transport.input(),
-                *processors,
                 self.transport.output()
             ])
             
-            # 5. Create pipeline task
+            # Create pipeline task
             self.pipeline_task = PipelineTask(self.pipeline)
             
-            # 6. Create pipeline runner (disable signal handling for Windows compatibility)
-            self.pipeline_runner = PipelineRunner(handle_sigint=False)
-            
-            # 7. Start pipeline and wait for it to be ready
-            logger.info("🎵 Starting pipeline...", call_id=self.call_id)
-            
-            # Create the pipeline running task but don't start it yet
+            # Start the pipeline in the background
             self._pipeline_running_task = asyncio.create_task(self._run_pipeline())
             
-            # Give the pipeline a moment to initialize
+            # Give it a moment to start
             await asyncio.sleep(0.1)
             
-            # 8. Generate SDP response (socket is already bound with actual port)
+            # Generate SDP response
             sdp_response = self._generate_sdp_response(rtp_ip)
+            self._sdp_response = sdp_response
             
             self.is_running = True
-            logger.info("✅ Native call started successfully", call_id=self.call_id)
+            logger.info("✅ Native call started successfully (RTP TEST MODE)", call_id=self.call_id)
+            logger.info("🎯 Test mode: Packets will be logged and echoed back", call_id=self.call_id)
             
             return sdp_response
             

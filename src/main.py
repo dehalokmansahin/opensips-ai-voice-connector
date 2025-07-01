@@ -504,17 +504,16 @@ class OpenSIPSEventHandler:
             return
 
         if method == 'INVITE':
-            await self.handle_invite(key, params)
+            await self.handle_invite(call_id, params)
         elif method == 'BYE':
-            await self.handle_bye(key, params)
+            await self.handle_bye(call_id, params)
         elif method == 'CANCEL':
-            await self.handle_cancel(key, params)
+            await self.handle_cancel(call_id, params)
         else:
             logger.warning(f"Unhandled method in session event: {method}")
 
-    async def handle_invite(self, call_key: str, params: dict):
+    async def handle_invite(self, call_id: str, params: dict):
         """Handles a new INVITE."""
-        call_id = params.get('callid')
         sdp_body = params.get('body', '')
         
         logger.info(f"Handling INVITE for call {call_id}")
@@ -524,7 +523,7 @@ class OpenSIPSEventHandler:
             
             if not sdp_info or not sdp_info.get('media_port'):
                 logger.warning("INVITE without valid SDP media info.")
-                await self.send_response(call_key, 'INVITE', 400, 'Bad Request - No Media Port', params)
+                await self.send_response(call_id, 'INVITE', 400, 'Bad Request - No Media Port', params)
                 return
             
             logger.info(f"Creating call for {call_id}")
@@ -536,32 +535,30 @@ class OpenSIPSEventHandler:
             )
 
             # Send 180 Ringing
-            await self.send_response(call_key, call_id, '180', 'Ringing', params)
+            await self.send_response(call_id, '180', 'Ringing', params)
             
             # After call setup, get the SDP response and send 200 OK
             sdp_response = call.get_sdp_body()
-            await self.send_response(call_key, call_id, '200', 'OK', params, body=sdp_response)
+            await self.send_response(call_id, '200', 'OK', params, body=sdp_response)
 
         except Exception as e:
             logger.error(f"Error handling INVITE for {call_id}: {e}", exc_info=True)
-            await self.send_response(call_key, 'INVITE', 500, "Internal Server Error", params)
+            await self.send_response(call_id, 'INVITE', 500, "Internal Server Error", params)
 
-    async def handle_bye(self, call_key: str, params: dict):
+    async def handle_bye(self, call_id: str, params: dict):
         """Handles a BYE request."""
-        call_id = params.get('callid')
         logger.info(f"Handling BYE for call {call_id}")
-        await self.call_manager.terminate_call(call_key)
+        await self.call_manager.terminate_call(call_id)
         # BYE does not require a response in the same way
         # OpenSIPS will handle transaction
 
-    async def handle_cancel(self, call_key: str, params: dict):
+    async def handle_cancel(self, call_id: str, params: dict):
         """Handles a CANCEL request."""
-        call_id = params.get('callid')
         logger.info(f"Handling CANCEL for call {call_id}")
-        await self.call_manager.terminate_call(call_key)
+        await self.call_manager.terminate_call(call_id)
         # CANCEL handling in OpenSIPS is complex, this is a simplification
 
-    async def send_response(self, call_key: str, method: str, code: int, reason: str, body: str = None):
+    async def send_response(self, call_id: str, method: str, code: int, reason: str, body: str = None):
         """Sends a response back to OpenSIPS via MI."""
         if not self.mi_conn:
             logger.error("MI connection not available, cannot send response.")
@@ -569,7 +566,7 @@ class OpenSIPSEventHandler:
 
         try:
             params = {
-                'key': call_key,
+                'key': call_id,
                 'method': method,
                 'code': code,
                 'reason': reason
@@ -578,9 +575,9 @@ class OpenSIPSEventHandler:
                 params['body'] = body
             
             self.mi_conn.execute('ua_session_reply', params)
-            logger.info(f"Sent {code} {reason} for {method} on call {call_key}")
+            logger.info(f"Sent {code} {reason} for {method} on call {call_id}")
         except Exception as e:
-            logger.error(f"Failed to send MI reply for {call_key}: {e}")
+            logger.error(f"Failed to send MI reply for {call_id}: {e}")
 
     async def stop(self):
         """Stops the event listener."""
@@ -591,14 +588,16 @@ class OpenSIPSEventHandler:
 
 class SIPListener:
     """
-    Listens for SIP messages directly on a UDP socket.
-    Used for local testing without a full OpenSIPS instance.
+    UDP-based SIP message handler for OAVC integration.
     """
     def __init__(self, host="0.0.0.0", port=8089, call_manager=None):
         self.host = host
         self.port = port
-        self.transport = None
         self.call_manager = call_manager
+        self.transport = None
+        # Track SIP transactions to avoid duplicate responses
+        self._call_tags = {}  # call_id -> tag mapping
+        self._sent_responses = set()  # track (call_id, status_code) to avoid duplicates
 
     def _parse_sdp_body(self, sdp_str: str) -> dict:
         """
@@ -684,16 +683,30 @@ class SIPListener:
         header_str = parts[0]
         sdp_body = parts[1] if len(parts) > 1 else ""
 
+        # ===== SIMPLE FIX: Extract Via headers from raw SIP =====
+        # Parse headers normally for other fields
         headers = {}
+        original_headers = {}
+        
         lines = header_str.split('\r\n')
         last_key = None
-        for line in lines[1:]:
+        
+        # Store raw SIP for Via extraction
+        self._raw_sip_data = sip_data
+        
+        for line in lines[1:]:  # Skip first line (request line)
             if line.startswith((' ', '\t')) and last_key:
-                headers[last_key] += ' ' + line.lstrip()
+                # Handle header continuation
+                if last_key in original_headers:
+                    original_headers[last_key] += ' ' + line.lstrip()
+                    headers[last_key.lower()] += ' ' + line.lstrip()
             elif ': ' in line:
                 key, value = line.split(': ', 1)
-                last_key = key.lower()
-                headers[last_key] = value
+                last_key = key
+                
+                # Store with original casing (overwrites duplicates for simplicity)
+                original_headers[key] = value
+                headers[key.lower()] = value
 
         call_id = headers.get('call-id')
         to_header_str = headers.get('to')
@@ -704,14 +717,14 @@ class SIPListener:
 
         if 'tag=' in (to_header_str or ""):
              logger.info(f"Re-INVITE for call {call_id}, not currently supported.")
-             await self.send_response(addr, call_id, '481', 'Call/Transaction Does Not Exist', headers)
+             await self.send_response(addr, call_id, '481', 'Call/Transaction Does Not Exist', original_headers, sip_data=sip_data)
              return
              
         sdp_info = self._parse_sdp_body(sdp_body)
         
         if not sdp_info or not sdp_info.get('media_port'):
             logger.warning("INVITE without valid SDP media info.")
-            await self.send_response(addr, call_id, '400', 'Bad Request - No Media Port', headers)
+            await self.send_response(addr, call_id, '400', 'Bad Request - No Media Port', original_headers, sip_data=sip_data)
             return
             
         logger.info(f"Creating call for {call_id}")
@@ -723,22 +736,22 @@ class SIPListener:
                 sdp_info=sdp_info
             )
 
-            # Send 180 Ringing
-            await self.send_response(addr, call_id, '180', 'Ringing', headers)
+            # Send 180 Ringing (pass raw SIP data for Via extraction)
+            await self.send_response(addr, call_id, '180', 'Ringing', original_headers, sip_data=sip_data)
             
             # Get the SDP response that was generated during call creation
             sdp_response = call.get_sdp_body()
             if not sdp_response:
                 logger.error(f"No SDP response available for call {call_id}")
-                await self.send_response(addr, call_id, '500', 'Internal Server Error', headers)
+                await self.send_response(addr, call_id, '500', 'Internal Server Error', original_headers, sip_data=sip_data)
                 return
             
-            # Send 200 OK with SDP
-            await self.send_response(addr, call_id, '200', 'OK', headers, body=sdp_response)
+            # Send 200 OK with SDP (pass raw SIP data for Via extraction)
+            await self.send_response(addr, call_id, '200', 'OK', original_headers, body=sdp_response, sip_data=sip_data)
             
         except Exception as e:
             logger.error(f"Failed to create call {call_id}", error=str(e))
-            await self.send_response(addr, call_id, '500', 'Internal Server Error', headers)
+            await self.send_response(addr, call_id, '500', 'Internal Server Error', original_headers, sip_data=sip_data)
 
     async def handle_bye(self, sip_data: str, addr):
         """Handles a BYE request."""
@@ -749,8 +762,14 @@ class SIPListener:
         
         if call_id:
             await self.call_manager.terminate_call(call_id)
-            # Send 200 OK for BYE
-            await self.send_response(addr, call_id, '200', 'OK', headers)
+            # Send 200 OK for BYE (pass raw SIP data for Via extraction)
+            await self.send_response(addr, call_id, '200', 'OK', headers, sip_data=sip_data)
+            
+            # Cleanup tracking for this call
+            self._call_tags.pop(call_id, None)
+            # Remove all responses for this call from tracking
+            self._sent_responses = {r for r in self._sent_responses if not r.startswith(f"{call_id}_")}
+            logger.debug(f"Cleaned up tracking for call {call_id}")
         else:
             logger.warning("BYE without Call-ID received.")
 
@@ -762,29 +781,86 @@ class SIPListener:
         logger.info(f"Handling CANCEL for {call_id} from {addr}")
         
         if call_id:
-            # First, reply to the CANCEL itself with a 200 OK
-            await self.send_response(addr, call_id, '200', 'OK', headers)
+            # First, reply to the CANCEL itself with a 200 OK (pass raw SIP data)
+            await self.send_response(addr, call_id, '200', 'OK', headers, sip_data=sip_data)
             # Then, terminate the original INVITE transaction with a 487
             await self.call_manager.terminate_call(call_id)
             # You would also send a 487 to the original INVITE, which is complex here
+            
+            # Cleanup tracking for this call
+            self._call_tags.pop(call_id, None)
+            # Remove all responses for this call from tracking
+            self._sent_responses = {r for r in self._sent_responses if not r.startswith(f"{call_id}_")}
+            logger.debug(f"Cleaned up tracking for call {call_id}")
         else:
             logger.warning("CANCEL without Call-ID received.")
 
     async def handle_ack(self, sip_data: str, addr):
-        """Handles an ACK request."""
-        headers = {h.split(': ')[0]: h.split(': ')[1] for h in sip_data.split('\r\n')[1:] if ': ' in h}
-        call_id = headers.get('Call-ID')
-        logger.info(f"ACK for {call_id} received from {addr}, no action needed.")
-        # ACK is hop-by-hop and doesn't require a response. 
-        # Here we might confirm the call is fully established.
-
-    async def send_response(self, addr: tuple[str, int], call_id: str, status_code: str, reason_phrase: str, request_headers: dict, body: str = ""):
+        """Handle ACK message - Critical for RTP flow!"""
         try:
+            logger.info("✅ ACK RECEIVED from %s", addr)
+            logger.debug("ACK message content: %s", sip_data[:200])  # First 200 chars
+            
+            # Parse headers from first line and headers section
+            lines = sip_data.strip().split('\r\n')
+            if not lines:
+                logger.warning("⚠️ Empty ACK message")
+                return
+            
+            # Parse headers
+            headers = {}
+            for line in lines[1:]:
+                if not line.strip():
+                    break
+                if ': ' in line:
+                    key, value = line.split(': ', 1)
+                    headers[key] = value
+            
+            call_id = headers.get('Call-ID')
+            if call_id:
+                logger.info("🎯 ACK for call %s - RTP flow should start now!", call_id)
+                
+                # Get the call and check its RTP status
+                call = self.call_manager.get_call(call_id)
+                if call:
+                    local_port = getattr(call.transport, 'local_port', 'unknown') if hasattr(call, 'transport') else 'unknown'
+                    logger.info("📞 Call found, RTP should be active", 
+                               call_id=call_id,
+                               local_port=local_port,
+                               call_running=call.is_running if hasattr(call, 'is_running') else 'unknown')
+                    
+                    # Force log the UDP reader status
+                    if hasattr(call, 'transport') and hasattr(call.transport, 'input'):
+                        input_transport = call.transport.input()
+                        if hasattr(input_transport, '_udp_task'):
+                            task_status = 'running' if input_transport._udp_task and not input_transport._udp_task.done() else 'stopped'
+                            logger.info("🔄 UDP Reader Task Status", 
+                                       call_id=call_id, 
+                                       task_status=task_status)
+                else:
+                    logger.warning("⚠️ ACK for unknown call", call_id=call_id)
+            else:
+                logger.warning("⚠️ ACK without Call-ID")
+                
+        except Exception as e:
+            logger.error("Error handling ACK: %s", str(e), exc_info=True)
+
+    async def send_response(self, addr: tuple[str, int], call_id: str, status_code: str, reason_phrase: str, request_headers: dict, body: str = "", sip_data: str = ""):
+        try:
+            # Check for duplicate response (same call_id + status_code)
+            response_key = f"{call_id}_{status_code}"
+            if response_key in self._sent_responses:
+                logger.debug(f"Skipping duplicate {status_code} response for call {call_id}")
+                return
+            
             # Case-insensitive dictionary for headers
             headers = {k.lower(): v for k, v in request_headers.items()}
             original_headers = request_headers
 
-            tag = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
+            # Get or create consistent tag for this call
+            if call_id not in self._call_tags:
+                self._call_tags[call_id] = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
+            tag = self._call_tags[call_id]
             
             response_lines = []
             response_lines.append(f"SIP/2.0 {status_code} {reason_phrase}")
@@ -792,21 +868,45 @@ class SIPListener:
             # Reconstruct required headers, using original casing if available, otherwise what we have.
             to_header = original_headers.get('To', headers.get('to'))
             from_header = original_headers.get('From', headers.get('from'))
-            via_header = original_headers.get('Via', headers.get('via'))
             cseq_header = original_headers.get('CSeq', headers.get('cseq'))
             
             if not to_header:
                 logger.error("'To' header missing from request headers, cannot send response.")
                 return
 
-            # Append with a default empty tag if not present
+            # Append with consistent tag if not present
             if 'tag=' not in to_header:
                 to_header += f';tag={tag}'
 
             # Add headers with proper formatting
             response_lines.append(f"To: {to_header}")
             response_lines.append(f"From: {from_header}")
-            response_lines.append(f"Via: {via_header}")
+            
+            # ===== FINAL FIX: Extract Via headers from raw SIP properly =====
+            via_headers_added = False
+            if sip_data:
+                # Extract all Via headers from raw SIP message
+                sip_lines = sip_data.split('\r\n')
+                for line in sip_lines:
+                    if line.lower().startswith('via:'):
+                        # Add Via header exactly as it appears in original request
+                        response_lines.append(line)
+                        via_headers_added = True
+                
+                if via_headers_added:
+                    logger.debug(f"📡 Extracted Via headers from raw SIP message")
+            
+            # Fallback to original method if raw extraction failed
+            if not via_headers_added:
+                via_header = original_headers.get('Via', headers.get('via'))
+                if via_header:
+                    if isinstance(via_header, list):
+                        for via in via_header:
+                            response_lines.append(f"Via: {via}")
+                    else:
+                        response_lines.append(f"Via: {via_header}")
+                    logger.warning("⚠️ Using fallback Via header method")
+            
             response_lines.append(f"Call-ID: {call_id}")
             response_lines.append(f"CSeq: {cseq_header}")
             response_lines.append("Server: OpenSIPS AI Voice Connector")
@@ -828,6 +928,8 @@ class SIPListener:
             
             if self.transport:
                 self.transport.sendto(response.encode('utf-8'), addr)
+                # Mark as sent to prevent duplicates
+                self._sent_responses.add(response_key)
                 logger.info(f"Sent SIP {status_code} response to {addr}")
                 logger.debug(f"SIP Response:\n{response}")
             else:

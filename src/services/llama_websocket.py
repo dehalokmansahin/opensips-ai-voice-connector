@@ -133,17 +133,27 @@ class LlamaWebsocketLLMService(LLMService):
             try:
                 self._websocket = await websockets.connect(self._url)
                 logger.info("Connected to LLaMA WebSocket.")
-                self._listener_task = asyncio.create_task(self._listener())
+                await self._start_listener_immediately()
             except Exception as e:
                 logger.error(f"Failed to connect to LLaMA WebSocket: {e}")
 
+    async def _start_listener_immediately(self):
+        """Start listener immediately with asyncio fallback"""
+        try:
+            self._listener_task = self.create_task(self._listener())
+            logger.info("Successfully started LLaMA listener task")
+        except Exception as e:
+            if "TaskManager is still not initialized" in str(e):
+                logger.warning("TaskManager still not ready, using asyncio fallback")
+                # Direct asyncio fallback
+                self._listener_task = asyncio.create_task(self._listener())
+            else:
+                logger.error(f"Unexpected error starting LLaMA listener: {e}")
+                raise
+
     async def stop_listening(self):
         if self._listener_task:
-            self._listener_task.cancel()
-            try:
-                await self._listener_task
-            except asyncio.CancelledError:
-                pass
+            await self.cancel_task(self._listener_task)
             self._listener_task = None
 
         if self._websocket:
