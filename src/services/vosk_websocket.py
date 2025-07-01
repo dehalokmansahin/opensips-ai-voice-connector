@@ -84,7 +84,7 @@ class VoskWebsocketSTTService(STTService):
         if isinstance(frame, StartFrame):
             # Start listening for transcriptions
             if not self._listener_task:
-                self._listener_task = asyncio.create_task(self._listener())
+                self._listener_task = self.create_task(self._listener())
         
         elif isinstance(frame, AudioRawFrame):
             if self._websocket:
@@ -108,11 +108,7 @@ class VoskWebsocketSTTService(STTService):
             
             # Stop the listener task
             if self._listener_task:
-                self._listener_task.cancel()
-                try:
-                    await self._listener_task
-                except asyncio.CancelledError:
-                    pass
+                await self.cancel_task(self._listener_task)
                 self._listener_task = None
             
             # Forward the EndFrame to signal pipeline completion

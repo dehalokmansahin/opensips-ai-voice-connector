@@ -376,6 +376,11 @@ class UDPRTPOutputTransport(BaseOutputTransport):
     async def _send_rtp_packet(self, pcmu_payload: bytes):
         """Send a single RTP packet"""
         try:
+            # Check if we have client address
+            if not self._params.client_ip or not self._params.client_port:
+                logger.warning("⚠️ No client address available for RTP packet")
+                return
+            
             # Generate RTP packet
             rtp_packet_data = {
                 'version': 2,
@@ -393,23 +398,33 @@ class UDPRTPOutputTransport(BaseOutputTransport):
             rtp_packet_hex = generate_rtp_packet(rtp_packet_data)
             rtp_packet_bytes = bytes.fromhex(rtp_packet_hex)
             
-            # Send via transport socket
+            # Send via transport socket (reuse input socket for full duplex)
             if self._transport._input and self._transport._input._socket:
-                self._transport._input._socket.sendto(
-                    rtp_packet_bytes,
-                    (self._params.client_ip, self._params.client_port)
-                )
-                
-                logger.debug("📤 RTP packet sent", 
-                           seq=self._sequence_number,
-                           dest=f"{self._params.client_ip}:{self._params.client_port}")
+                try:
+                    self._transport._input._socket.sendto(
+                        rtp_packet_bytes,
+                        (self._params.client_ip, self._params.client_port)
+                    )
+                    
+                    logger.info("📤 RTP packet sent successfully", 
+                               seq=self._sequence_number,
+                               dest=f"{self._params.client_ip}:{self._params.client_port}",
+                               size=len(rtp_packet_bytes))
+                except Exception as send_error:
+                    logger.error("❌ Failed to send RTP packet", 
+                               error=str(send_error),
+                               dest=f"{self._params.client_ip}:{self._params.client_port}")
+                    return
+            else:
+                logger.error("❌ No socket available for sending RTP packet")
+                return
             
             # Update RTP state
             self._sequence_number = (self._sequence_number + 1) % 65536
             self._timestamp = (self._timestamp + 160) % 0x100000000  # 20ms at 8kHz
             
         except Exception as e:
-            logger.error("Error sending RTP packet", error=str(e))
+            logger.error("❌ Error in _send_rtp_packet", error=str(e), exc_info=True)
 
 
 class UDPRTPTransport(BaseTransport):

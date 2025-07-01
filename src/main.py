@@ -716,18 +716,29 @@ class SIPListener:
             
         logger.info(f"Creating call for {call_id}")
         
-        # Corrected call to create_call
-        call = await self.call_manager.create_call(
-            call_id=call_id,
-            sdp_info=sdp_info
-        )
+        try:
+            # Create call - this already starts the call and generates SDP
+            call = await self.call_manager.create_call(
+                call_id=call_id,
+                sdp_info=sdp_info
+            )
 
-        # Send 180 Ringing
-        await self.send_response(addr, call_id, '180', 'Ringing', headers)
-        
-        # After call setup, get the SDP response and send 200 OK
-        sdp_response = await call.start() # Call start now returns the SDP
-        await self.send_response(addr, call_id, '200', 'OK', headers, body=sdp_response)
+            # Send 180 Ringing
+            await self.send_response(addr, call_id, '180', 'Ringing', headers)
+            
+            # Get the SDP response that was generated during call creation
+            sdp_response = call.get_sdp_body()
+            if not sdp_response:
+                logger.error(f"No SDP response available for call {call_id}")
+                await self.send_response(addr, call_id, '500', 'Internal Server Error', headers)
+                return
+            
+            # Send 200 OK with SDP
+            await self.send_response(addr, call_id, '200', 'OK', headers, body=sdp_response)
+            
+        except Exception as e:
+            logger.error(f"Failed to create call {call_id}", error=str(e))
+            await self.send_response(addr, call_id, '500', 'Internal Server Error', headers)
 
     async def handle_bye(self, sip_data: str, addr):
         """Handles a BYE request."""
@@ -792,24 +803,33 @@ class SIPListener:
             if 'tag=' not in to_header:
                 to_header += f';tag={tag}'
 
-            response_lines.append(to_header)
-            response_lines.append(from_header)
-            response_lines.append(via_header)
-
+            # Add headers with proper formatting
+            response_lines.append(f"To: {to_header}")
+            response_lines.append(f"From: {from_header}")
+            response_lines.append(f"Via: {via_header}")
             response_lines.append(f"Call-ID: {call_id}")
             response_lines.append(f"CSeq: {cseq_header}")
             response_lines.append("Server: OpenSIPS AI Voice Connector")
             response_lines.append("Allow: INVITE, ACK, CANCEL, BYE, OPTIONS")
-            response_lines.append("Content-Type: application/sdp")
-            response_lines.append(f"Content-Length: {len(body)}")
-            response_lines.append("")
-            response_lines.append(body)
+            
+            # Only set Content-Type and Content-Length if there's a body
+            if body:
+                response_lines.append("Content-Type: application/sdp")
+                response_lines.append(f"Content-Length: {len(body)}")
+            else:
+                response_lines.append("Content-Length: 0")
+            
+            response_lines.append("")  # Empty line before body
+            
+            if body:
+                response_lines.append(body)
 
             response = "\r\n".join(response_lines)
             
             if self.transport:
                 self.transport.sendto(response.encode('utf-8'), addr)
-                logger.debug(f"Sent SIP response to {addr}:\n{response}")
+                logger.info(f"Sent SIP {status_code} response to {addr}")
+                logger.debug(f"SIP Response:\n{response}")
             else:
                 logger.error("SIP transport not available, cannot send response.")
         except KeyError as e:

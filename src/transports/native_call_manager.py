@@ -118,16 +118,22 @@ class NativeCall:
                 self.transport.output()
             ])
             
-            # 5. Create and start pipeline task
+            # 5. Create pipeline task
             self.pipeline_task = PipelineTask(self.pipeline)
             
-            # 6. Start the pipeline runner (disable signal handling for Windows compatibility)
+            # 6. Create pipeline runner (disable signal handling for Windows compatibility)
             self.pipeline_runner = PipelineRunner(handle_sigint=False)
             
-            # Start pipeline in background
-            asyncio.create_task(self._run_pipeline())
+            # 7. Start pipeline and wait for it to be ready
+            logger.info("🎵 Starting pipeline...", call_id=self.call_id)
             
-            # 7. Generate SDP response (socket is already bound with actual port)
+            # Create the pipeline running task but don't start it yet
+            self._pipeline_running_task = asyncio.create_task(self._run_pipeline())
+            
+            # Give the pipeline a moment to initialize
+            await asyncio.sleep(0.1)
+            
+            # 8. Generate SDP response (socket is already bound with actual port)
             sdp_response = self._generate_sdp_response(rtp_ip)
             
             self.is_running = True
@@ -152,9 +158,10 @@ class NativeCall:
         processors = []
         
         try:
-            # 0. U-Law Decoder
-            ulaw_decoder = ULawDecoder()
-            processors.append(ulaw_decoder)
+            # NOT: U-Law decoder kaldırıldı - Pipecat'in native audio conversion'ını kullanıyoruz
+            # # 0. U-Law Decoder
+            # ulaw_decoder = ULawDecoder()
+            # processors.append(ulaw_decoder)
 
             # 1. VAD Processor
             vad_config = get_config("vad", {})
@@ -187,12 +194,36 @@ class NativeCall:
             raise
     
     def _get_rtp_ip(self) -> str:
-        """Get RTP IP address"""
-        # Hardcoded external IP for testing - REMOVE IN PRODUCTION
-        # Bu IP Docker host'un IP'si olmalı ve client'ın erişebileceği bir IP olmalı
-        rtp_ip = "192.168.88.120"  # Docker host IP
-        logger.info("🌐 Using hardcoded IP for testing", rtp_ip=rtp_ip)
-        return rtp_ip
+        """Get RTP IP address - dynamic detection"""
+        try:
+            # Önce config'den al
+            rtp_cfg = get_section("rtp") or {}
+            configured_ip = rtp_cfg.get("ip")
+            
+            if configured_ip and configured_ip != "0.0.0.0":
+                logger.info("🌐 Using configured RTP IP", rtp_ip=configured_ip)
+                return configured_ip
+            
+            # Client 192.168.88.1'den geliyor, Docker container'ı 172.18.0.6
+            # Bu durumda Docker host'un client network'ündeki IP'sini kullanmalıyız
+            
+            # Docker Desktop Windows'ta client'ın erişebileceği IP:
+            # Genellikle Docker Desktop host'un Wi-Fi IP'si
+            
+            # Ana makine Wi-Fi IP'si (client'ın network'ünden erişilebilir)
+            # Bu IP client'ın 192.168.88.1 network'ünden erişilebilir olmalı
+            host_wifi_ip = "192.168.1.120"  # Ana makine Wi-Fi IP'si
+            
+            logger.info("🌐 Using host Wi-Fi IP for RTP", 
+                       host_ip=host_wifi_ip,
+                       note="Client should be able to reach this IP")
+            
+            return host_wifi_ip
+            
+        except Exception as e:
+            logger.error("Error getting RTP IP", error=str(e))
+            # Fallback to localhost if everything fails
+            return "127.0.0.1"
     
     def _generate_sdp_response(self, rtp_ip: str) -> str:
         """Generate SDP response"""
@@ -281,11 +312,17 @@ class NativeCallManager:
                 logger.info("📞 Call already exists, returning existing call", call_id=call_id)
                 return existing_call
             
-            # Create call
+            # Create call with timeout
             call = NativeCall(call_id, sdp_info, self.services)
             
-            # Start call (this will create transport, pipeline, etc.)
-            sdp_response = await call.start()
+            # Start call with timeout (this will create transport, pipeline, etc.)
+            try:
+                sdp_response = await asyncio.wait_for(call.start(), timeout=5.0)
+                logger.info("✅ Call started within timeout", call_id=call_id)
+            except asyncio.TimeoutError:
+                logger.error("❌ Call start timeout", call_id=call_id)
+                await call.stop()
+                raise Exception(f"Call start timeout for {call_id}")
             
             # Store SDP response for OpenSIPS
             call._sdp_response = sdp_response
@@ -298,6 +335,9 @@ class NativeCallManager:
             
         except Exception as e:
             logger.error("❌ Failed to create native call", call_id=call_id, error=str(e), exc_info=True)
+            # Cleanup on failure
+            if call_id in self.calls:
+                del self.calls[call_id]
             raise
     
     async def terminate_call(self, call_id: str):

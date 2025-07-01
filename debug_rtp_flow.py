@@ -1,123 +1,208 @@
 #!/usr/bin/env python3
 """
-RTP Flow Debug Script
-RTP paketlerinin pipeline'a ulaşıp ulaşmadığını test eder
+RTP Flow Debug Tool
+Wireshark ile birlikte kullanılmak üzere RTP akış sorunlarını debug etmek için
 """
 
-import asyncio
 import socket
 import struct
 import time
-import sys
+import threading
+from typing import Dict, Any
+import logging
 
-def generate_dummy_rtp_packet():
-    """Generate a dummy RTP packet with PCMU payload"""
-    
-    # RTP Header (12 bytes)
-    version = 2        # Version (2 bits)
-    padding = 0        # Padding (1 bit)
-    extension = 0      # Extension (1 bit)
-    cc = 0            # CSRC count (4 bits)
-    marker = 0        # Marker (1 bit)
-    pt = 0            # Payload type (7 bits) - PCMU
-    sequence = 12345  # Sequence number (16 bits)
-    timestamp = int(time.time() * 8000) & 0xFFFFFFFF  # Timestamp (32 bits)
-    ssrc = 0x12345678  # SSRC (32 bits)
-    
-    # Pack RTP header
-    rtp_header = struct.pack('!BBHII',
-        (version << 6) | (padding << 5) | (extension << 4) | cc,
-        (marker << 7) | pt,
-        sequence,
-        timestamp,
-        ssrc
-    )
-    
-    # Generate PCMU payload (160 bytes for 20ms at 8kHz)
-    pcmu_payload = bytes([0xFF, 0x7F] * 80)  # Alternating pattern
-    
-    return rtp_header + pcmu_payload
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-async def send_test_rtp_packets(target_ip: str, target_port: int, duration: int = 10):
-    """Send test RTP packets to the specified address"""
-    try:
-        print(f"🎤 Sending test RTP packets to {target_ip}:{target_port} for {duration} seconds...")
+class RTPFlowDebugger:
+    """RTP akış sorunlarını debug etmek için araç"""
+    
+    def __init__(self):
+        self.rtp_ports = []
+        self.active_flows = {}
         
-        # Create UDP socket
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    def test_port_binding(self, ip: str, port_range: tuple):
+        """Port binding testleri"""
+        logger.info(f"🔧 Testing port binding on {ip}:{port_range[0]}-{port_range[1]}")
         
-        packet_count = 0
-        start_time = time.time()
+        successful_ports = []
+        failed_ports = []
         
-        while time.time() - start_time < duration:
+        for port in range(port_range[0], port_range[1] + 1):
             try:
-                # Generate and send RTP packet
-                rtp_packet = generate_dummy_rtp_packet()
-                sock.sendto(rtp_packet, (target_ip, target_port))
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind((ip, port))
                 
-                packet_count += 1
-                
-                print(f"📦 Sent RTP packet #{packet_count}, size: {len(rtp_packet)} bytes")
-                
-                # 20ms intervals (50 packets per second)
-                await asyncio.sleep(0.02)
+                actual_port = sock.getsockname()[1]
+                successful_ports.append(actual_port)
+                logger.info(f"✅ Port {port} -> {actual_port} bound successfully")
+                sock.close()
                 
             except Exception as e:
-                print(f"❌ Error sending RTP packets: {e}")
-                break
+                failed_ports.append((port, str(e)))
+                logger.error(f"❌ Port {port} binding failed: {e}")
         
-        sock.close()
-        print(f"✅ Sent {packet_count} RTP packets total")
+        return successful_ports, failed_ports
+    
+    def test_rtp_connectivity(self, local_ip: str, local_port: int, remote_ip: str, remote_port: int):
+        """RTP bağlantı testi"""
+        logger.info(f"🎵 Testing RTP connectivity: {local_ip}:{local_port} -> {remote_ip}:{remote_port}")
         
-    except Exception as e:
-        print(f"❌ Failed to create socket or send packets: {e}")
+        try:
+            # UDP socket oluştur
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.bind((local_ip, local_port))
+            sock.settimeout(5.0)
+            
+            # Test RTP paketi gönder
+            test_rtp = self._create_test_rtp_packet()
+            logger.info(f"📤 Sending test RTP packet to {remote_ip}:{remote_port}")
+            sock.sendto(test_rtp, (remote_ip, remote_port))
+            
+            # Cevap bekleme
+            try:
+                data, addr = sock.recvfrom(1024)
+                logger.info(f"📥 Received response from {addr}: {len(data)} bytes")
+                return True
+            except socket.timeout:
+                logger.warning(f"⏰ No response received within timeout")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ RTP connectivity test failed: {e}")
+            return False
+        finally:
+            sock.close()
+    
+    def _create_test_rtp_packet(self) -> bytes:
+        """Test RTP paketi oluştur"""
+        # RTP Header: V=2, P=0, X=0, CC=0, M=0, PT=0, SEQ=1, TS=160, SSRC=12345
+        rtp_header = struct.pack('!BBHII', 
+                               0x80,  # V=2, P=0, X=0, CC=0
+                               0x00,  # M=0, PT=0 (PCMU)
+                               1,     # Sequence number
+                               160,   # Timestamp
+                               12345) # SSRC
+        
+        # Test payload (silence)
+        payload = b'\xFF' * 160  # 160 bytes of PCMU silence
+        
+        return rtp_header + payload
+    
+    def capture_instructions(self):
+        """Wireshark capture talimatları"""
+        instructions = """
+        🔍 WIRESHARK CAPTURE TALİMATLARI:
+        
+        1. Wireshark'ı Yönetici olarak çalıştırın
+        
+        2. Capture Interface'i seçin:
+           - Windows: "Adapter for loopback traffic capture" (loopback)
+           - Docker: "Docker NAT" veya "vEthernet (DockerNAT)"
+           
+        3. Capture Filter kullanın:
+           - SIP traffic için: "port 5060 or port 8089"
+           - RTP traffic için: "udp and portrange 35000-35020"
+           - Tüm traffic için: "host 192.168.88.1 or host 192.168.88.120"
+        
+        4. Aradığınız paketler:
+           ✅ SIP INVITE (192.168.88.1 -> OpenSIPS)
+           ✅ SIP 200 OK (OAVC -> 192.168.88.1) 
+           ✅ SIP ACK (192.168.88.1 -> OAVC)
+           ❌ RTP packets (192.168.88.1 <-> 192.168.88.120:35008)
+        
+        5. RTP Flow analizi:
+           - Statistics -> Flow Graph
+           - Telephony -> RTP -> RTP Streams
+           - Telephony -> VoIP Calls
+        
+        6. Kontrol edilecek noktalar:
+           - RTP paketleri gönderiliyor mu?
+           - Hedef IP doğru mu? (192.168.88.120)
+           - Hedef port doğru mu? (35008)
+           - Source IP client'dan geliyor mu? (192.168.88.1)
+        """
+        
+        print(instructions)
+        return instructions
 
-async def test_socket_connectivity(target_ip: str, target_port: int):
-    """Test basic UDP connectivity to target"""
-    try:
-        print(f"🔌 Testing UDP connectivity to {target_ip}:{target_port}")
-        
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(2.0)
-        
-        # Send a test message
-        test_msg = b"PING"
-        sock.sendto(test_msg, (target_ip, target_port))
-        print(f"✅ Test UDP packet sent successfully")
-        
-        sock.close()
-        
-    except Exception as e:
-        print(f"❌ UDP connectivity test failed: {e}")
-
-async def main():
-    """Main RTP debug function"""
-    # FROM LOG: RTP port 35009 was selected
-    TARGET_IP = "192.168.88.120"    # RTP IP from SDP
-    TARGET_PORT = 35009             # Actual RTP port from logs
+def main():
+    """Ana debug fonksiyonu"""
+    debugger = RTPFlowDebugger()
     
-    print("🚀 RTP Flow Debug Tool")
-    print("=" * 50)
-    print(f"Target: {TARGET_IP}:{TARGET_PORT}")
+    print("🚀 RTP Flow Debug Tool Started")
     print("=" * 50)
     
-    # Test basic connectivity first
-    await test_socket_connectivity(TARGET_IP, TARGET_PORT)
+    # Wireshark talimatlarını göster
+    debugger.capture_instructions()
     
-    # Send test RTP packets
-    await send_test_rtp_packets(TARGET_IP, TARGET_PORT, duration=10)
+    print("\n🔧 DOCKER PORT BINDING TEST")
+    print("=" * 30)
+    
+    # Port binding testleri
+    bind_ips = ["0.0.0.0", "127.0.0.1"]
+    port_range = (35000, 35020)
+    
+    for ip in bind_ips:
+        print(f"\n📍 Testing IP: {ip}")
+        successful, failed = debugger.test_port_binding(ip, port_range)
+        
+        print(f"✅ Successful ports: {len(successful)}")
+        print(f"❌ Failed ports: {len(failed)}")
+        
+        if failed:
+            print("Failed ports details:")
+            for port, error in failed[:5]:  # İlk 5 hatayı göster
+                print(f"  - Port {port}: {error}")
+    
+    print("\n🎵 RTP CONNECTIVITY TEST")
+    print("=" * 25)
+    
+    # RTP bağlantı testi
+    test_configs = [
+        ("0.0.0.0", 35008, "192.168.88.1", 4056),
+        ("127.0.0.1", 35009, "127.0.0.1", 4057),
+    ]
+    
+    for local_ip, local_port, remote_ip, remote_port in test_configs:
+        print(f"\n📡 Testing: {local_ip}:{local_port} -> {remote_ip}:{remote_port}")
+        result = debugger.test_rtp_connectivity(local_ip, local_port, remote_ip, remote_port)
+        print(f"Result: {'✅ SUCCESS' if result else '❌ FAILED'}")
+    
+    print("\n📊 NETWORK CONFIGURATION SUMMARY")
+    print("=" * 35)
+    
+    print("""
+    🖥️  ANA MAKİNE:
+        - Wi-Fi IP: 192.168.1.120
+        - VMware IP: 192.168.116.1
+    
+    📞 SIP CLIENT:
+        - IP: 192.168.88.1 (muhtemelen softphone)
+        - Port: 64040 (dynamic)
+    
+    🐳 DOCKER CONTAINERS:
+        - OpenSIPS: 172.18.0.4:5060
+        - OAVC: 172.18.0.x:8089
+        - RTP Advertised: 192.168.88.120:35008
+    
+    ⚠️  SORUN TEŞHİSİ:
+        1. Client (192.168.88.1) -> RTP (192.168.88.120:35008) erişemiyor
+        2. Docker container içindeki port host'a mapping yapılmamış olabilir
+        3. IP adresi yanlış advertise ediliyor olabilir
+        4. NAT/Firewall sorunu olabilir
+    """)
+    
+    print("\n🔧 ÖNERİLEN ÇÖZÜMLER:")
+    print("=" * 20)
+    print("""
+    1. Docker port mapping'ini kontrol edin
+    2. SDP'deki IP adresini düzeltin
+    3. Client ve container arasında ping testi yapın
+    4. Windows Firewall'u kontrol edin
+    5. Docker Desktop network ayarlarını kontrol edin
+    """)
 
 if __name__ == "__main__":
-    if len(sys.argv) >= 3:
-        target_ip = sys.argv[1]
-        target_port = int(sys.argv[2])
-        duration = int(sys.argv[3]) if len(sys.argv) > 3 else 10
-        
-        asyncio.run(send_test_rtp_packets(target_ip, target_port, duration))
-    else:
-        asyncio.run(main())
-
-# Test commands:
-# python debug_rtp_flow.py                           # Use defaults from logs
-# python debug_rtp_flow.py 192.168.88.120 35009     # Manual IP/port
-# python debug_rtp_flow.py 172.18.0.6 35009         # Container IP 
+    main() 

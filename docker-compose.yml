@@ -11,11 +11,28 @@ services:
       # SIP Interface ports
       - "${OAVC_SIP_PORT:-8089}:8089/udp"
       - "${OAVC_SIP_PORT:-8089}:8089/tcp"
-      # RTP ports for media (host and container ranges must match)
-      - "${RTP_PORT_MIN:-35000}-${RTP_PORT_MAX:-35020}:${RTP_PORT_MIN:-35000}-${RTP_PORT_MAX:-35020}/udp"
-      # Additional RTP ports 
-      - "${RTP_EXTRA_PORT_1:-35010}:35010/udp"
-      - "${RTP_EXTRA_PORT_2:-35011}:35011/udp"
+      # RTP ports for media - individual port mapping for better compatibility
+      - "35000:35000/udp"
+      - "35001:35001/udp"
+      - "35002:35002/udp"
+      - "35003:35003/udp"
+      - "35004:35004/udp"
+      - "35005:35005/udp"
+      - "35006:35006/udp"
+      - "35007:35007/udp"
+      - "35008:35008/udp"
+      - "35009:35009/udp"
+      - "35010:35010/udp"
+      - "35011:35011/udp"
+      - "35012:35012/udp"
+      - "35013:35013/udp"
+      - "35014:35014/udp"
+      - "35015:35015/udp"
+      - "35016:35016/udp"
+      - "35017:35017/udp"
+      - "35018:35018/udp"
+      - "35019:35019/udp"
+      - "35020:35020/udp"
     volumes:
       - ./logs:/app/logs
       - ./cfg:/app/cfg:ro
