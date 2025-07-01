@@ -68,30 +68,11 @@ def get_section(section: str) -> Optional[SectionProxy]:
         return None
     return _config[section]
 
-def get(section: str, key: str, fallback: any = None) -> any:
+def get_env(key: str, default: str = "") -> str:
     """
-    Get a single configuration value.
+    Get environment variable with fallback to default value.
+    Helper function for configuration.
     """
-    section_proxy = get_section(section)
-    if section_proxy:
-        return section_proxy.get(key, fallback)
-    return fallback
-
-def sections() -> list[str]:
-    """Get all section names."""
-    if not _config:
-        return []
-    return _config.sections()
-
-# The validation logic has been moved to main.py to simplify this module.
-# The original validation logic was complex and had external dependencies.
-async def validate_services_config() -> dict:
-    """
-    Placeholder for service validation. The actual implementation is now in main.py
-    to keep this config module lean and free of async logic and dependencies.
-    """
-    logger.info("Service validation check from config module (placeholder).")
-    # In the new design, the caller should handle validation.
-    return {"status": "validation_moved"}
+    return os.environ.get(key, default)
 
 # vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4

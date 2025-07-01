@@ -14,11 +14,10 @@ scipy==1.15.2
 torch==2.7.0
 torchaudio==2.7.0
 silero-vad==5.1.2
-g711==1.6.5
-wyoming==1.6.0
 
-# Pipecat framework (local installation)
-# pipecat will be installed from local ./pipecat directory
+# ✅ Native Pipecat VAD dependencies
+onnxruntime==1.19.2 
+
 
 # HTTP client
 aiohttp==3.9.1

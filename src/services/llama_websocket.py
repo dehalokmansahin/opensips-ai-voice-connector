@@ -1,166 +1,198 @@
 """
-Custom LLaMA WebSocket LLM Service - Pipecat Native Uyumlu
-Kendi LLaMA model serveriniz ile entegrasyon
-Streaming sentence segmentation ile TTS optimizasyonu
+Llama WebSocket LLM Service - Following Pipecat Implementations Document  
+Simplified implementation aligned with document specifications
 """
 
 import asyncio
 import json
 import websockets
-import re
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional, List, Dict, Any
 import structlog
+
 from pipecat.frames.frames import (
-    Frame,
-    LLMFullResponseStartFrame,
-    LLMFullResponseEndFrame,
-    LLMTextFrame,
-    TranscriptionFrame,
-    SystemFrame,
-    StartFrame,
-    EndFrame,
-    TextFrame,
-    LLMMessagesFrame
+    Frame, TextFrame, EndFrame, ErrorFrame, StartFrame,
+    LLMFullResponseStartFrame, LLMFullResponseEndFrame, LLMTextFrame
 )
 from pipecat.services.llm_service import LLMService
-from loguru import logger
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+from pipecat.processors.aggregators.llm_response import (
+    LLMUserContextAggregator,
+    LLMAssistantContextAggregator,
+)
 
 logger = structlog.get_logger()
 
-class StreamingSentenceSegmenter:
-    """Streaming text'i cümle bazında segmentlere ayırır"""
-    
-    def __init__(self):
-        self.buffer = ""
-        # Türkçe için daha iyi çalışan bir regex
-        self.sentence_endings = re.compile(r'(?<=[\.!?])\s+')
-        
-    def add_chunk(self, chunk: str) -> list[str]:
-        """Chunk ekle ve tamamlanan cümleleri döndür."""
-        self.buffer += chunk
-        sentences = []
-        
-        parts = self.sentence_endings.split(self.buffer)
-        
-        if len(parts) > 1:
-            # Son parça hariç hepsi tamamlanmış cümledir
-            completed_sentences = parts[:-1]
-            self.buffer = parts[-1] # Kalan parça buffer olur
-            
-            for sentence in completed_sentences:
-                sentence = sentence.strip()
-                if sentence:
-                    sentences.append(sentence)
-        
-        return sentences
-    
-    def get_remaining(self) -> str:
-        """Buffer'da kalan metni döndür"""
-        remaining = self.buffer.strip()
-        self.buffer = ""
-        return remaining
-    
-    def reset(self):
-        """Segmenter'ı sıfırla"""
-        self.buffer = ""
+
+class _LlamaContextAggregator:
+    """A helper class that provides user and assistant context processors."""
+
+    def __init__(self, context: OpenAILLMContext):
+        self._context = context
+
+    def user(self) -> FrameProcessor:
+        return LLMUserContextAggregator(self._context)
+
+    def assistant(self) -> FrameProcessor:
+        return LLMAssistantContextAggregator(self._context)
+
 
 class LlamaWebsocketLLMService(LLMService):
     """
-    LLaMA LLM service that uses a WebSocket connection.
+    Llama LLM service following document specifications
+    Generates assistant text with streaming tokens as per implementation guide
     """
-    def __init__(self, url: str, model: str, **kwargs):
+    
+    def __init__(
+        self,
+        url: str,
+        model: str = "llama3.2:3b-instruct-turkish",
+        temperature: float = 0.2,
+        max_tokens: int = 80,
+        **kwargs
+    ):
         super().__init__(**kwargs)
         self._url = url
         self._model = model
-        self._websocket = None
-        self._listener_task = None
+        self._temperature = temperature  
+        self._max_tokens = max_tokens
+        self._websocket: Optional = None
+        self._listener_task: Optional[asyncio.Task] = None
+        self._is_connected = False
         
-        logger.info(f"LLaMA WebSocket LLM service initialized with url: {self._url}")
+        logger.info("LlamaLLMService initialized",
+                   url=url,
+                   model=model,
+                   temperature=temperature,
+                   max_tokens=max_tokens,
+                   pattern="document_compliant")
+
+    def create_context_aggregator(self, context: OpenAILLMContext) -> "_LlamaContextAggregator":
+        """Create a context aggregator to manage conversation history."""
+        return _LlamaContextAggregator(context)
 
     async def start(self, frame: StartFrame):
-        await self.start_listening()
+        """Start the LLM service and WebSocket connection"""
+        await super().start(frame)
+        await self._start_websocket_connection()
 
     async def stop(self, frame: EndFrame):
-        await self.stop_listening()
+        """Stop the LLM service and WebSocket connection"""
+        await self._stop_websocket_connection()
+        await super().stop(frame)
 
-    async def _process_frame(self, frame, direction):
-        await super()._process_frame(frame, direction)
+    async def cancel(self, frame: EndFrame):
+        """Cancel the LLM service and WebSocket connection"""
+        await self._stop_websocket_connection()
+        await super().cancel(frame)
 
-        if isinstance(frame, LLMMessagesFrame):
-            messages = frame.messages
-            
-            if not self._websocket:
-                logger.error("WebSocket not connected.")
-                return
+    async def run_llm(self, context: OpenAILLMContext) -> AsyncGenerator[Frame, None]:
+        """
+        Main LLM method - processes context and generates response
+        This is called by the LLMService base class when processing conversations
+        """
+        if not self._websocket or not self._is_connected:
+            logger.warning("No active Llama WebSocket connection for LLM processing")
+            return
 
-            try:
-                payload = {
-                    "model": self._model,
-                    "messages": messages,
-                    "stream": True
-                }
-                await self._websocket.send(json.dumps(payload))
-                logger.debug(f"Sent messages to LLaMA model: {messages}")
-            except Exception as e:
-                logger.error(f"Error sending messages to LLaMA: {e}")
-        elif isinstance(frame, EndFrame):
-            await self.push_frame(frame)
-
-    async def _listener(self):
-        """Listens for messages from the WebSocket and pushes them as frames."""
-        while True:
-            try:
-                message = await self._websocket.recv()
-                data = json.loads(message)
-                
-                if data.get("done"):
-                    logger.info("LLaMA streaming complete.")
-                    # Potentially push an LLMResponseEndFrame here if needed
-                
-                content = data.get("message", {}).get("content", "")
-                if content:
-                    await self.push_frame(TextFrame(text=content))
-
-            except websockets.exceptions.ConnectionClosed:
-                logger.warning("LLaMA WebSocket connection closed.")
-                break
-            except Exception as e:
-                logger.error(f"Error in LLaMA listener: {e}")
-                break
-
-    async def start_listening(self):
-        if not self._websocket:
-            try:
-                self._websocket = await websockets.connect(self._url)
-                logger.info("Connected to LLaMA WebSocket.")
-                await self._start_listener_immediately()
-            except Exception as e:
-                logger.error(f"Failed to connect to LLaMA WebSocket: {e}")
-
-    async def _start_listener_immediately(self):
-        """Start listener immediately with asyncio fallback"""
         try:
-            self._listener_task = self.create_task(self._listener())
-            logger.info("Successfully started LLaMA listener task")
-        except Exception as e:
-            if "TaskManager is still not initialized" in str(e):
-                logger.warning("TaskManager still not ready, using asyncio fallback")
-                # Direct asyncio fallback
-                self._listener_task = asyncio.create_task(self._listener())
-            else:
-                logger.error(f"Unexpected error starting LLaMA listener: {e}")
-                raise
+            messages = context.messages
 
-    async def stop_listening(self):
+            # Send request to Llama
+            request = {
+                "model": self._model,
+                "messages": messages,
+                "temperature": self._temperature,
+                "max_tokens": self._max_tokens,
+                "stream": True,
+            }
+
+            # Signal start of response
+            yield LLMFullResponseStartFrame()
+            
+            await self._websocket.send(json.dumps(request))
+            
+            logger.debug("Sent context to Llama LLM", message_count=len(messages))
+            
+        except Exception as e:
+            logger.error("Error sending text to Llama", error=str(e))
+            yield ErrorFrame(error=f"Llama request error: {e}")
+
+    async def _start_websocket_connection(self):
+        """Start WebSocket connection following document pattern"""
+        if not self._listener_task:
+            self._listener_task = asyncio.create_task(self._websocket_listener())
+            logger.info("Llama WebSocket listener started", pattern="document_compliant")
+
+    async def _websocket_listener(self):
+        """WebSocket listener following document specifications"""
+        try:
+            async with websockets.connect(self._url) as websocket:
+                self._websocket = websocket
+                self._is_connected = True
+                
+                logger.info("Llama WebSocket connected", url=self._url)
+
+                # Listen for LLM responses (document pattern)
+                async for message in self._websocket:
+                    if not self._is_connected:
+                        break
+                        
+                    try:
+                        data = json.loads(message)
+                        
+                        # Handle streaming response tokens
+                        if data.get("response"):
+                            token = data["response"]
+                            
+                            # Emit streaming token frame
+                            await self.push_frame(LLMTextFrame(token))
+                        
+                        # Handle completion
+                        elif data.get("done", False):
+                            await self.push_frame(LLMFullResponseEndFrame())
+                            
+                    except json.JSONDecodeError as e:
+                        logger.error("Invalid JSON from Llama", error=str(e))
+                    except Exception as e:
+                        logger.error("Error processing Llama message", error=str(e))
+                        await self.push_frame(ErrorFrame(error=f"Llama processing error: {e}"))
+
+        except websockets.exceptions.ConnectionClosed:
+            logger.info("Llama WebSocket connection closed")
+        except Exception as e:
+            logger.error("Llama WebSocket connection failed", error=str(e))
+            await self.push_frame(ErrorFrame(error=f"Llama connection failed: {e}"))
+        finally:
+            self._websocket = None
+            self._is_connected = False
+
+    def _create_prompt(self, text: str) -> str:
+        """Create prompt for Llama following document pattern"""
+        # This function is no longer used with stateful context.
+        # Kept for potential legacy use or simple tests.
+        system_prompt = "Sen Türk bankacılık sistemi için yardımcı bir asistansın. Kısa ve net cevaplar ver."
+        
+        return f"{system_prompt}\\n\\nKullanıcı: {text}\\nAsistan:"
+
+    async def _stop_websocket_connection(self):
+        """Stop WebSocket connection following document pattern"""
+        self._is_connected = False
+        
         if self._listener_task:
-            await self.cancel_task(self._listener_task)
+            self._listener_task.cancel()
+            try:
+                await self._listener_task
+            except asyncio.CancelledError:
+                pass
             self._listener_task = None
 
-        if self._websocket:
-            await self._websocket.close()
-            self._websocket = None
-            logger.info("Disconnected from LLaMA WebSocket.")
-            
-    async def run_llm(self, frame_iterator: AsyncGenerator[Frame, None]) -> AsyncGenerator[Frame, None]:
-        # This processor style service does not use run_llm
-        pass 
+    # This legacy method is replaced by the new run_llm
+    # async def run_llm(self, messages: List[Dict[str, Any]]) -> AsyncGenerator[Frame, None]:
+    #     """
+    #     Legacy compatibility method - not used in processor-based model
+    #     Following document pattern for service compatibility
+    #     """
+    #     # Empty generator as per document guidance
+    #     return
+    #     yield  # Unreachable, just for generator syntax 

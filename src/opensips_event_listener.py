@@ -6,28 +6,59 @@ Event and MI datagram.md dokümanına göre OpenSIPS olaylarını dinler
 
 import asyncio
 import socket
-import json
 import structlog
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Callable, Awaitable, Tuple
 from datetime import datetime
 
 logger = structlog.get_logger()
 
+def _parse_sdp(sdp_str: str) -> Tuple[Optional[str], Optional[int]]:
+    """Parse SDP to extract connection IP and media port."""
+    connection_ip = None
+    media_port = None
+    for line in sdp_str.splitlines():
+        line = line.strip()
+        if line.startswith('c='):
+            parts = line.split()
+            if len(parts) >= 3:
+                connection_ip = parts[2]
+        if line.startswith('m=audio'):
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    media_port = int(parts[1])
+                except ValueError:
+                    continue
+    return connection_ip, media_port
+
 class OpenSIPSEventListener:
     """OpenSIPS Event Datagram dinleyicisi"""
     
-    def __init__(self, host: str = "0.0.0.0", port: int = 8090):
+    def __init__(
+        self, 
+        host: str = "0.0.0.0", 
+        port: int = 8090,
+        on_call_start: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        on_call_end: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
+    ):
         """
         Initialize event listener
         
         Args:
             host: Listen host
             port: Listen port (config'te event_port = 8090)
+            on_call_start: Callback for call start events
+            on_call_end: Callback for call end events
         """
         self.host = host
         self.port = port
-        self.socket = None
+        self.transport = None
+        self.protocol = None
         self.running = False
+        
+        # Callback handlers
+        self.on_call_start = on_call_start
+        self.on_call_end = on_call_end
         
         # Event handlers
         self.event_handlers = {
@@ -37,39 +68,43 @@ class OpenSIPSEventListener:
             "E_CALL_TERMINATED": self.handle_call_terminated,
         }
         
-        logger.info("OpenSIPS Event Listener initialized", 
-                   host=host, port=port)
+        logger.info("OpenSIPS Event Listener initialized", host=host, port=port)
+        logger.debug("OpenSIPSEventListener: event handlers registered", handlers=list(self.event_handlers.keys()))
     
     async def start(self):
-        """Event listener'ı başlat"""
+        """Event listener'ı başlat - using working pattern from old code"""
         try:
-            # UDP socket oluştur
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.socket.bind((self.host, self.port))
-            self.socket.setblocking(False)
+            loop = asyncio.get_running_loop()
+
+            class EventProtocol(asyncio.DatagramProtocol):
+                def __init__(self, handler_func):
+                    self.handler_func = handler_func
+                    super().__init__()
+                    
+                def connection_made(self, transport):
+                    self.transport = transport
+                    logger.debug("OpenSIPS Event Protocol: connection established")
+                    
+                def datagram_received(self, data, addr):
+                    """Handle incoming event datagram"""
+                    try:
+                        logger.debug("OpenSIPS Event Protocol: datagram received", 
+                                    from_addr=addr, size=len(data))
+                        # Create async task to handle the event
+                        asyncio.create_task(self.handler_func(data, addr))
+                    except Exception as e:
+                        logger.error("Error in event datagram_received", error=str(e))
+            
+            self.transport, self.protocol = await loop.create_datagram_endpoint(
+                lambda: EventProtocol(self.process_event),
+                local_addr=(self.host, self.port),
+            )
             
             self.running = True
             
-            logger.info("✅ OpenSIPS Event Listener started", 
-                       host=self.host, port=self.port)
-            
-            # Event listening loop
-            while self.running:
-                try:
-                    # Non-blocking receive with timeout
-                    await asyncio.sleep(0.01)  # Small delay to prevent busy waiting
-                    
-                    try:
-                        data, addr = self.socket.recvfrom(4096)  # 4KB buffer
-                        await self.process_event(data, addr)
-                    except socket.error:
-                        # No data available, continue
-                        continue
-                        
-                except Exception as e:
-                    logger.error("Error in event listening loop", error=str(e))
-                    await asyncio.sleep(1)  # Back off on error
+            logger.info("✅ OpenSIPS Event Listener started", host=self.host, port=self.port)
+            logger.debug("OpenSIPSEventListener: UDP transport connected", 
+                        local_addr=self.transport.get_extra_info('sockname'))
                     
         except Exception as e:
             logger.error("Failed to start OpenSIPS Event Listener", error=str(e))
@@ -79,9 +114,10 @@ class OpenSIPSEventListener:
         """Event listener'ı durdur"""
         try:
             self.running = False
-            if self.socket:
-                self.socket.close()
-                self.socket = None
+            if self.transport:
+                self.transport.close()
+                self.transport = None
+                self.protocol = None
             
             logger.info("OpenSIPS Event Listener stopped")
             
@@ -100,9 +136,7 @@ class OpenSIPSEventListener:
             # Event data'yı decode et
             event_str = data.decode('utf-8').strip()
             
-            logger.debug("Received event", 
-                        data=event_str[:100], 
-                        sender=f"{addr[0]}:{addr[1]}")
+            logger.debug("Received event", data=event_str[:100], sender=f"{addr[0]}:{addr[1]}")
             
             # Event parsing - OpenSIPS event format
             # Format genellikle: "EVENT_NAME:param1:param2:..."
@@ -110,7 +144,7 @@ class OpenSIPSEventListener:
             if len(parts) >= 1:
                 event_name = parts[0]
                 event_data = parts[1] if len(parts) > 1 else ""
-                
+                logger.debug("OpenSIPSEventListener: parsed event", event_name=event_name, event_data=event_data)
                 await self.handle_event(event_name, event_data, addr)
             else:
                 logger.warning("Invalid event format", data=event_str)
@@ -130,9 +164,8 @@ class OpenSIPSEventListener:
             addr: Sender address
         """
         try:
-            # Handler'ı bul
             handler = self.event_handlers.get(event_name)
-            
+            logger.debug("OpenSIPSEventListener: dispatching event", event_name=event_name, handler=handler.__name__ if handler else None)
             if handler:
                 await handler(event_data, addr)
             else:
@@ -166,6 +199,17 @@ class OpenSIPSEventListener:
                                to_uri=to_uri,
                                timestamp=datetime.now().isoformat())
                     
+                    # Trigger callback
+                    if self.on_call_start:
+                        call_info = {
+                            'call_id': call_id,
+                            'from_uri': from_uri,
+                            'to_uri': to_uri,
+                            'client_ip': addr[0],
+                            'client_port': addr[1]
+                        }
+                        await self.on_call_start(call_info)
+                
                 elif sub_event == "CALL_ESTABLISHED":
                     status = parts[2] if len(parts) > 2 else "200"
                     
@@ -188,6 +232,25 @@ class OpenSIPSEventListener:
     async def handle_call_setup(self, event_data: str, addr: tuple):
         """Call setup event handler"""
         logger.info("📞 Call setup event", event_data=event_data)
+        # Parse call_id and SDP from event_data
+        parts = event_data.split(':', 1)
+        call_id = parts[0]
+        sdp = parts[1] if len(parts) > 1 else ""
+        # Extract connection IP and port from SDP
+        client_ip, client_port = _parse_sdp(sdp)
+        logger.debug("OpenSIPSEventListener: parsed SDP in call setup", call_id=call_id, client_ip=client_ip, client_port=client_port, sdp=sdp)
+        if not client_ip or not client_port:
+            logger.error("Failed to parse SDP", sdp=sdp)
+            return
+        # Trigger on_call_start callback with client info
+        if self.on_call_start:
+            call_info = {
+                'call_id': call_id,
+                'client_ip': client_ip,
+                'client_port': client_port,
+                'sdp': sdp
+            }
+            await self.on_call_start(call_info)
     
     async def handle_call_answered(self, event_data: str, addr: tuple):
         """Call answered event handler"""  
@@ -196,123 +259,17 @@ class OpenSIPSEventListener:
     async def handle_call_terminated(self, event_data: str, addr: tuple):
         """Call terminated event handler"""
         logger.info("📞 Call terminated event", event_data=event_data)
+        
+        # Trigger callback
+        if self.on_call_end:
+            # Extract call_id from event_data if possible
+            parts = event_data.split(':', 1)
+            call_id = parts[0] if parts else "unknown"
+            
+            call_info = {
+                'call_id': call_id,
+                'event_data': event_data
+            }
+            await self.on_call_end(call_info)
 
-class OpenSIPSMIClient:
-    """OpenSIPS MI Datagram Client"""
-    
-    def __init__(self, host: str = "172.20.0.6", port: int = 8087):
-        """
-        Initialize MI client
-        
-        Args:
-            host: OpenSIPS MI host
-            port: OpenSIPS MI port (config'te değiştirildi: 8087)
-        """
-        self.host = host
-        self.port = port
-        
-        logger.info("OpenSIPS MI Client initialized", 
-                   host=host, port=port)
-    
-    async def send_mi_command(self, command: str, timeout: float = 5.0) -> Optional[str]:
-        """
-        MI komutu gönder
-        
-        Args:
-            command: MI komutu (örn: "ps", "uptime", "get_statistics")
-            timeout: Response timeout
-            
-        Returns:
-            Response string veya None
-        """
-        try:
-            # UDP socket oluştur
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.settimeout(timeout)
-            
-            # Command gönder
-            sock.sendto(command.encode('utf-8'), (self.host, self.port))
-            
-            # Response al
-            response, addr = sock.recvfrom(4096)
-            sock.close()
-            
-            response_str = response.decode('utf-8')
-            
-            logger.info("MI command executed", 
-                       command=command,
-                       response_size=len(response_str))
-            
-            return response_str
-            
-        except Exception as e:
-            logger.error("Error sending MI command", 
-                        command=command,
-                        error=str(e))
-            return None
-    
-    async def get_statistics(self) -> Optional[Dict[str, Any]]:
-        """OpenSIPS istatistiklerini al"""
-        try:
-            response = await self.send_mi_command("get_statistics")
-            if response:
-                # Response'u parse et (basit implementation)
-                stats = {}
-                for line in response.split('\n'):
-                    if ':' in line:
-                        key, value = line.split(':', 1)
-                        stats[key.strip()] = value.strip()
-                
-                return stats
-            return None
-            
-        except Exception as e:
-            logger.error("Error getting statistics", error=str(e))
-            return None
-
-async def main():
-    """Test the event listener"""
-    
-    # Event listener'ı başlat
-    event_listener = OpenSIPSEventListener()
-    
-    # MI client'ı test et
-    mi_client = OpenSIPSMIClient()
-    
-    try:
-        logger.info("🚀 Starting OpenSIPS Event Listener...")
-        
-        # Event listener task'ı başlat
-        listener_task = asyncio.create_task(event_listener.start())
-        
-        # Test için MI komutları gönder
-        await asyncio.sleep(2)
-        
-        logger.info("📡 Testing MI commands...")
-        
-        # Test MI commands
-        uptime = await mi_client.send_mi_command("uptime")
-        if uptime:
-            logger.info("OpenSIPS uptime", response=uptime[:100])
-        
-        stats = await mi_client.get_statistics()
-        if stats:
-            logger.info("OpenSIPS statistics", count=len(stats))
-        
-        # Event listener'ı çalıştır
-        await listener_task
-        
-    except KeyboardInterrupt:
-        logger.info("🛑 Shutting down...")
-        await event_listener.stop()
-    except Exception as e:
-        logger.error("Error in main", error=str(e))
-        await event_listener.stop()
-
-if __name__ == "__main__":
-    # Configure structured logging
-    import logging
-    logging.basicConfig(level=logging.INFO)
-    
-    # Run the event listener
-    asyncio.run(main()) 
+# vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4 
