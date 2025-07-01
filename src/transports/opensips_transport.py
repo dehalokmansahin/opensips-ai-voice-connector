@@ -38,6 +38,9 @@ class OpenSIPSTransportParams(TransportParams):
     audio_out_enabled: bool = True
     audio_in_sample_rate: int = 8000   # RTP is 8kHz
     audio_out_sample_rate: int = 8000  # RTP output 8kHz
+    
+    # 🔧 CRITICAL FIX: Enable audio passthrough to pipeline
+    audio_in_passthrough: bool = True  # Must be True for audio to reach STT
 
 
 class OpenSIPSInputTransport(BaseInputTransport):
@@ -57,6 +60,12 @@ class OpenSIPSInputTransport(BaseInputTransport):
         if not self._receiver_task:
             self._receiver_task = asyncio.create_task(self._receive_rtp_packets())
             logger.debug("RTP receiver task started")
+        
+        # 🔧 CRITICAL FIX: Initialize audio queue for push_audio_frame
+        await self.set_transport_ready(frame)
+        logger.info("🎵 Audio task and queue initialized", 
+                   call_id=self._params.call_id,
+                   audio_passthrough=self._params.audio_in_passthrough)
         
         # Trigger on_client_connected event
         await self._transport._trigger_event("on_client_connected", self._transport, None)
@@ -128,9 +137,17 @@ class OpenSIPSInputTransport(BaseInputTransport):
                         frame = await self._params.serializer.deserialize(data)
                         if frame:
                             if isinstance(frame, InputAudioRawFrame):
+                                logger.debug("📤 Pushing audio frame to pipeline", 
+                                           call_id=self._params.call_id,
+                                           audio_size=len(frame.audio),
+                                           sample_rate=frame.sample_rate)
                                 await self.push_audio_frame(frame)  # Audio frames go to audio channel
                             else:
                                 await self.push_frame(frame)        # Other frames go to normal channel
+                        else:
+                            logger.warning("❌ Serializer returned None frame", 
+                                         call_id=self._params.call_id,
+                                         packet_size=len(data))
                     
                 except ConnectionResetError:
                     continue

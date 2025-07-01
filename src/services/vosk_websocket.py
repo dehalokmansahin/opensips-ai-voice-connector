@@ -33,6 +33,16 @@ class VoskWebsocketSTTService(STTService):
     ):
         super().__init__(**kwargs)
         self._url = url
+        
+        # 🔧 CRITICAL FIX: Sample rate validation based on docs/VOSK.md
+        if sample_rate not in [8000, 16000, 22050, 44100, 48000]:
+            logger.warning("Unusual sample rate for Vosk STT",
+                          sample_rate=sample_rate,
+                          recommended_rates=[8000, 16000, 22050, 44100, 48000])
+        
+        if sample_rate < 8000:
+            raise ValueError(f"Sample rate {sample_rate} too low for Vosk STT (minimum: 8000)")
+        
         self._sample_rate = sample_rate
         self._websocket: Optional = None
         self._listener_task: Optional[asyncio.Task] = None
@@ -41,7 +51,8 @@ class VoskWebsocketSTTService(STTService):
         logger.info("VoskSTTService initialized", 
                    url=url, 
                    sample_rate=sample_rate,
-                   pattern="document_compliant")
+                   pattern="document_compliant",
+                   validation_passed=True)
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Process frames following document pattern"""
@@ -73,8 +84,23 @@ class VoskWebsocketSTTService(STTService):
                 logger.info("Vosk WebSocket connected", url=self._url)
                 
                 # Send initial configuration as per document
-                config = {"config": {"sample_rate": self._sample_rate}}
-                await self._websocket.send(json.dumps(config))
+                # 🔧 CRITICAL FIX: Enhanced config validation based on docs/VOSK.md
+                config_message = {
+                    "config": {
+                        "sample_rate": self._sample_rate,
+                        "words": True,  # Enable word-level timestamps if needed
+                        "partial": True  # Enable partial results
+                    }
+                }
+                
+                logger.info("Sending Vosk configuration", 
+                           sample_rate=self._sample_rate,
+                           config=config_message)
+                           
+                await self._websocket.send(json.dumps(config_message))
+                
+                # Wait a moment for configuration acknowledgment
+                await asyncio.sleep(0.1)
 
                 # Listen for transcriptions (document pattern)
                 async for message in self._websocket:
@@ -86,26 +112,36 @@ class VoskWebsocketSTTService(STTService):
                         
                         # Handle final transcription
                         if data.get("text"):
-                            await self.push_frame(
-                                TranscriptionFrame(
-                                    text=data["text"], 
-                                    user_id="", 
-                                    timestamp=""
+                            text = data["text"].strip()
+                            if text:  # Only process non-empty results
+                                logger.info("Vosk final transcription", text=text)
+                                await self.push_frame(
+                                    TranscriptionFrame(
+                                        text=text, 
+                                        user_id="", 
+                                        timestamp=""
+                                    )
                                 )
-                            )
                         
                         # Handle partial transcription
                         elif data.get("partial"):
-                            await self.push_frame(
-                                InterimTranscriptionFrame(
-                                    text=data["partial"], 
-                                    user_id="", 
-                                    timestamp=""
+                            partial_text = data["partial"].strip()
+                            if partial_text:  # Only process non-empty partials
+                                logger.debug("Vosk partial transcription", partial=partial_text)
+                                await self.push_frame(
+                                    InterimTranscriptionFrame(
+                                        text=partial_text, 
+                                        user_id="", 
+                                        timestamp=""
+                                    )
                                 )
-                            )
+                        
+                        # Handle configuration acknowledgment
+                        elif "status" in data:
+                            logger.info("Vosk configuration status", status=data)
                             
                     except json.JSONDecodeError as e:
-                        logger.error("Invalid JSON from Vosk", error=str(e))
+                        logger.error("Invalid JSON from Vosk", error=str(e), message=message[:100])
                     except Exception as e:
                         logger.error("Error processing Vosk message", error=str(e))
                         await self.push_frame(ErrorFrame(error=f"Vosk processing error: {e}"))
@@ -120,14 +156,46 @@ class VoskWebsocketSTTService(STTService):
             self._is_connected = False
 
     async def _send_audio(self, audio: bytes):
-        """Send audio data to Vosk following document pattern"""
-        if self._websocket and self._is_connected:
-            try:
-                await self._websocket.send(audio)
-            except Exception as e:
-                logger.error("Error sending audio to Vosk", error=str(e))
-        else:
+        """Send audio data to Vosk following document pattern with format validation"""
+        if not self._websocket or not self._is_connected:
             logger.warning("No active Vosk WebSocket connection for audio")
+            return
+            
+        try:
+            # 🔧 CRITICAL FIX: Audio format validation based on docs/VOSK.md
+            
+            # Ensure audio data is in bytes format
+            if not isinstance(audio, bytes):
+                logger.error("Audio data must be bytes format for Vosk", 
+                           actual_type=type(audio).__name__)
+                return
+            
+            # Validate audio data size (should be reasonable for 16kHz PCM)
+            if len(audio) == 0:
+                logger.warning("Empty audio data, skipping")
+                return
+                
+            # Log audio data info for debugging
+            if len(audio) % 2 != 0:
+                logger.warning("Audio data length is not even - potential 16-bit PCM issue",
+                             audio_length=len(audio))
+            
+            # Calculate expected frame info for debugging
+            samples_16bit = len(audio) // 2  # 16-bit PCM = 2 bytes per sample
+            duration_ms = (samples_16bit / self._sample_rate) * 1000
+            
+            logger.debug("Sending audio to Vosk",
+                        audio_bytes=len(audio),
+                        samples_16bit=samples_16bit,
+                        duration_ms=f"{duration_ms:.1f}",
+                        expected_sample_rate=self._sample_rate)
+            
+            # Send audio data to Vosk WebSocket
+            await self._websocket.send(audio)
+            
+        except Exception as e:
+            logger.error("Error sending audio to Vosk", error=str(e))
+            # Don't re-raise to avoid breaking the pipeline
 
     async def _stop_websocket_connection(self):
         """Stop WebSocket connection following document pattern"""

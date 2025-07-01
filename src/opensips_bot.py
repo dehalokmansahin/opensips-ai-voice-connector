@@ -109,8 +109,8 @@ async def run_opensips_bot(
         task = PipelineTask(
             pipeline,
             params=PipelineParams(
-                audio_in_sample_rate=8000,   # RTP input is 8kHz
-                audio_out_sample_rate=8000,  # RTP output is 8kHz  
+                audio_in_sample_rate=16000,  # 🔧 Pipeline processes at 16kHz (STT/TTS standard)
+                audio_out_sample_rate=16000, # 🔧 Internal processing at 16kHz
                 enable_metrics=False,        # Disable metrics to avoid StartFrame race condition
                 enable_usage_metrics=False,  # Disable usage metrics initially
                 allow_interruptions=True

@@ -518,9 +518,12 @@ class SIPBackendListener:
                 sip_data=invite_data['sip_data']
             )
             
-            logger.info("Sent 200 OK with SDP", 
+            logger.info("✅ Sent 200 OK with SDP to client", 
                        call_id=invite_data['call_id'],
-                       media_port=sdp_info.get('media_port'))
+                       client_addr=invite_data['addr'],
+                       media_ip=sdp_info.get('media_ip'),
+                       media_port=sdp_info.get('media_port'),
+                       sdp_body=sdp_body)
             
         except Exception as e:
             logger.error("Error sending 200 OK", error=str(e), exc_info=True)
@@ -552,6 +555,53 @@ class SIPBackendListener:
         media_ip = sdp_info.get('media_ip', '0.0.0.0')
         media_port = sdp_info.get('media_port', 35000)
         
+        # 🚨 CRITICAL FIX: Use host-accessible IP for RTP, not container internal IP
+        if media_ip == '0.0.0.0':
+            # For Docker environment, we need host IP that client can reach
+            import socket
+            import os
+            
+            # Try to get host IP that client can reach
+            host_ip = None
+            
+            # Method 1: Check if we have an environment variable for external IP
+            host_ip = (os.environ.get('RTP_HOST_IP') or 
+                      os.environ.get('EXTERNAL_RTP_IP') or 
+                      os.environ.get('HOST_IP'))
+            
+            if not host_ip:
+                # Method 2: Try to get default gateway IP (Docker host from container perspective)
+                try:
+                    # Read default route to find Docker host IP
+                    with open('/proc/net/route', 'r') as f:
+                        lines = f.readlines()
+                        for line in lines[1:]:  # Skip header
+                            fields = line.strip().split('\t')
+                            if fields[1] == '00000000':  # Default route
+                                gateway_hex = fields[2]
+                                # Convert hex to IP
+                                gateway_ip = '.'.join([
+                                    str(int(gateway_hex[6:8], 16)),
+                                    str(int(gateway_hex[4:6], 16)), 
+                                    str(int(gateway_hex[2:4], 16)),
+                                    str(int(gateway_hex[0:2], 16))
+                                ])
+                                host_ip = gateway_ip
+                                logger.info("🔧 Found Docker host IP from routing table", host_ip=host_ip)
+                                break
+                except Exception as e:
+                    logger.warning("Failed to read routing table", error=str(e))
+            
+            # Method 3: Fallback to common Docker host IP
+            if not host_ip:
+                host_ip = "172.18.0.1"  # Common Docker bridge host IP
+                logger.warning("🔧 Using fallback Docker host IP", fallback_ip=host_ip)
+            
+            media_ip = host_ip
+            logger.info("🎯 Using host-accessible IP for RTP media", 
+                       old_ip="0.0.0.0", new_ip=media_ip,
+                       explanation="Client needs to reach this IP for RTP")
+        
         sdp_lines = [
             "v=0",
             f"o=- {random.randint(1000000, 9999999)} {random.randint(1000000, 9999999)} IN IP4 {media_ip}",
@@ -562,6 +612,11 @@ class SIPBackendListener:
             "a=rtpmap:0 PCMU/8000",
             "a=sendrecv"
         ]
+        
+        logger.info("📋 Generated SDP response", 
+                   media_ip=media_ip, 
+                   media_port=media_port,
+                   sdp_preview=f"c=IN IP4 {media_ip}\\nm=audio {media_port}")
         
         return '\r\n'.join(sdp_lines)
 
