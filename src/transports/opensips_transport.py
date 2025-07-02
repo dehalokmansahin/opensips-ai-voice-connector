@@ -341,6 +341,9 @@ class OpenSIPSOutputTransport(BaseOutputTransport):
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         logger.debug("RTP sender socket created")
         
+        # Register default audio destination so frames with destination=None are accepted
+        await self.set_transport_ready(frame)
+        
         await self.push_frame(frame)
     
     async def send_frame(self, frame: Frame):

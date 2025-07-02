@@ -52,7 +52,6 @@ from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.frames.frames import TextFrame
-from pipecat.processors.aggregators.sentence import SentenceAggregator
 
 # Import our services
 from services.vosk_websocket import VoskWebsocketSTTService
@@ -63,11 +62,15 @@ from services.piper_websocket import PiperWebsocketTTSService
 from transports.opensips_transport import create_opensips_transport
 
 # Pipecat observers for higher-level insights (no low-level RTP spam)
-from pipecat.observers.loggers.transcription_log_observer import TranscriptionLogObserver
-from pipecat.observers.loggers.llm_log_observer import LLMLogObserver
-from pipecat.observers.loggers.user_bot_latency_log_observer import (
+from pipecat.observers.loggers import (
+    LLMLogObserver,
+    TranscriptionLogObserver,
     UserBotLatencyLogObserver,
+    TTSLogObserver,          # ← new
 )
+
+# Custom aggregator to flush on LLM end
+from pipeline.aggregators.sentence_flush import SentenceFlushAggregator
 
 logger = structlog.get_logger()
 
@@ -175,7 +178,8 @@ async def run_opensips_bot(
         tts = PiperWebsocketTTSService(
             url=tts_config.get('url', 'ws://piper-tts-server:8000/tts'),
             voice=tts_config.get('voice', 'tr_TR-dfki-medium'),
-            sample_rate=int(tts_config.get('sample_rate', '22050'))
+            sample_rate=int(tts_config.get('sample_rate', '22050')),
+            aggregate_sentences=False  # Sentence aggregation handled upstream
         )
         
         # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Create conversation context like examples
@@ -195,8 +199,8 @@ async def run_opensips_bot(
             stt,                            # Speech-To-Text (Vosk)
             context_aggregator.user(),      # User context
             llm,                            # LLM (Llama) – streams tokens
-            SentenceAggregator(),           # 👉 NEW: buffer until end-of-sentence
-            tts,                            # Text-To-Speech (Piper) – receives full sentence
+            SentenceFlushAggregator(),      # Buffer until sentence or LLM end
+            tts,                            # Text-To-Speech (Piper) – receives sentence text
             transport.output(),             # RTP output to OpenSIPS
             context_aggregator.assistant()  # Assistant context
         ])
@@ -219,7 +223,7 @@ async def run_opensips_bot(
         task.add_observer(TranscriptionLogObserver())
         task.add_observer(LLMLogObserver())
         task.add_observer(UserBotLatencyLogObserver())
-        
+        task.add_observer(TTSLogObserver())
         # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Event handlers like examples
         @transport.event_handler("on_client_connected")
         async def on_client_connected(transport, client):
