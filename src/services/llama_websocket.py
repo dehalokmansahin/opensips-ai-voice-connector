@@ -1,6 +1,6 @@
 """
 Llama WebSocket LLM Service - Following Pipecat Implementations Document  
-Simplified implementation aligned with document specifications
+OpenAI ChatCompletion format compatible with updated server
 """
 
 import asyncio
@@ -39,8 +39,8 @@ class _LlamaContextAggregator:
 
 class LlamaWebsocketLLMService(LLMService):
     """
-    Llama LLM service following document specifications
-    Generates assistant text with streaming tokens as per implementation guide
+    Llama LLM service using OpenAI ChatCompletion format
+    Compatible with updated server supporting both OpenAI and legacy formats
     """
     
     def __init__(
@@ -49,6 +49,7 @@ class LlamaWebsocketLLMService(LLMService):
         model: str = "llama3.2:3b-instruct-turkish",
         temperature: float = 0.2,
         max_tokens: int = 80,
+        use_rag: bool = True,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -56,6 +57,7 @@ class LlamaWebsocketLLMService(LLMService):
         self._model = model
         self._temperature = temperature  
         self._max_tokens = max_tokens
+        self._use_rag = use_rag
         self._websocket: Optional = None
         self._listener_task: Optional[asyncio.Task] = None
         self._is_connected = False
@@ -65,7 +67,8 @@ class LlamaWebsocketLLMService(LLMService):
                    model=model,
                    temperature=temperature,
                    max_tokens=max_tokens,
-                   pattern="document_compliant")
+                   use_rag=use_rag,
+                   pattern="openai_compatible")
 
     def create_context_aggregator(self, context: OpenAILLMContext) -> "_LlamaContextAggregator":
         """Create a context aggregator to manage conversation history."""
@@ -88,8 +91,8 @@ class LlamaWebsocketLLMService(LLMService):
 
     async def run_llm(self, context: OpenAILLMContext) -> AsyncGenerator[Frame, None]:
         """
-        Main LLM method - processes context and generates response
-        This is called by the LLMService base class when processing conversations
+        Main LLM method - sends OpenAI ChatCompletion format directly to server
+        Server supports both OpenAI and legacy formats, so we use the standard
         """
         if not self._websocket or not self._is_connected:
             logger.warning("No active Llama WebSocket connection for LLM processing")
@@ -98,13 +101,13 @@ class LlamaWebsocketLLMService(LLMService):
         try:
             messages = context.messages
 
-            # Send request to Llama
+            # Build OpenAI ChatCompletion format request
             request = {
-                "model": self._model,
-                "messages": messages,
+                "messages": messages,  # Send OpenAI format directly
                 "temperature": self._temperature,
                 "max_tokens": self._max_tokens,
                 "stream": True,
+                "use_rag": self._use_rag,
             }
 
             # Signal start of response
@@ -112,28 +115,30 @@ class LlamaWebsocketLLMService(LLMService):
             
             await self._websocket.send(json.dumps(request))
             
-            logger.debug("Sent context to Llama LLM", message_count=len(messages))
+            logger.debug("Sent OpenAI format context to Llama LLM", 
+                        message_count=len(messages),
+                        format="openai_chatcompletion")
             
         except Exception as e:
-            logger.error("Error sending text to Llama", error=str(e))
+            logger.error("Error sending OpenAI context to Llama", error=str(e))
             yield ErrorFrame(error=f"Llama request error: {e}")
 
     async def _start_websocket_connection(self):
         """Start WebSocket connection following document pattern"""
         if not self._listener_task:
             self._listener_task = asyncio.create_task(self._websocket_listener())
-            logger.info("Llama WebSocket listener started", pattern="document_compliant")
+            logger.info("Llama WebSocket listener started", pattern="openai_compatible")
 
     async def _websocket_listener(self):
-        """WebSocket listener following document specifications"""
+        """WebSocket listener for OpenAI compatible responses"""
         try:
             async with websockets.connect(self._url) as websocket:
                 self._websocket = websocket
                 self._is_connected = True
                 
-                logger.info("Llama WebSocket connected", url=self._url)
+                logger.info("Llama WebSocket connected", url=self._url, format="openai_compatible")
 
-                # Listen for LLM responses (document pattern)
+                # Listen for LLM responses
                 async for message in self._websocket:
                     if not self._is_connected:
                         break
@@ -141,9 +146,15 @@ class LlamaWebsocketLLMService(LLMService):
                     try:
                         data = json.loads(message)
                         
+                        # Handle RAG context info (optional)
+                        if "rag_context" in data:
+                            logger.debug("Received RAG context info", 
+                                       context_length=data.get("context_length", 0))
+                            continue
+                        
                         # Handle streaming response tokens
-                        if data.get("response"):
-                            token = data["response"]
+                        if "chunk" in data:
+                            token = data["chunk"]
                             
                             # Emit streaming token frame
                             await self.push_frame(LLMTextFrame(token))
@@ -151,6 +162,12 @@ class LlamaWebsocketLLMService(LLMService):
                         # Handle completion
                         elif data.get("done", False):
                             await self.push_frame(LLMFullResponseEndFrame())
+                        
+                        # Handle errors from server
+                        elif "error" in data:
+                            error_msg = data["error"]
+                            logger.error("Server error", error=error_msg)
+                            await self.push_frame(ErrorFrame(error=f"Server error: {error_msg}"))
                             
                     except json.JSONDecodeError as e:
                         logger.error("Invalid JSON from Llama", error=str(e))
@@ -167,16 +184,8 @@ class LlamaWebsocketLLMService(LLMService):
             self._websocket = None
             self._is_connected = False
 
-    def _create_prompt(self, text: str) -> str:
-        """Create prompt for Llama following document pattern"""
-        # This function is no longer used with stateful context.
-        # Kept for potential legacy use or simple tests.
-        system_prompt = "Sen Türk bankacılık sistemi için yardımcı bir asistansın. Kısa ve net cevaplar ver."
-        
-        return f"{system_prompt}\\n\\nKullanıcı: {text}\\nAsistan:"
-
     async def _stop_websocket_connection(self):
-        """Stop WebSocket connection following document pattern"""
+        """Stop WebSocket connection"""
         self._is_connected = False
         
         if self._listener_task:
@@ -186,13 +195,3 @@ class LlamaWebsocketLLMService(LLMService):
             except asyncio.CancelledError:
                 pass
             self._listener_task = None
-
-    # This legacy method is replaced by the new run_llm
-    # async def run_llm(self, messages: List[Dict[str, Any]]) -> AsyncGenerator[Frame, None]:
-    #     """
-    #     Legacy compatibility method - not used in processor-based model
-    #     Following document pattern for service compatibility
-    #     """
-    #     # Empty generator as per document guidance
-    #     return
-    #     yield  # Unreachable, just for generator syntax 

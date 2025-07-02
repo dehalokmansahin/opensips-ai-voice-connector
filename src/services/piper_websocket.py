@@ -132,9 +132,10 @@ class PiperWebsocketTTSService(TTSService):
                             try:
                                 data = json.loads(message)
                                 
-                                if data.get("status") == "started":
+                                status = data.get("status") or data.get("type")
+                                if status in ("started", "start"):
                                     await self.push_frame(TTSStartedFrame())
-                                elif data.get("status") == "completed":
+                                elif status in ("completed", "end"):
                                     await self.push_frame(TTSStoppedFrame())
                                 elif data.get("error"):
                                     await self.push_frame(ErrorFrame(error=f"Piper TTS error: {data['error']}"))

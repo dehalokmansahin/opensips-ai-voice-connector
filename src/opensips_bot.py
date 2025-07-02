@@ -32,7 +32,7 @@ _root_logger.add(
 # 2) Everything-else sink at INFO (excluding Pipecat to avoid duplicates)
 _root_logger.add(
     sys.stderr,
-    level="INFO",
+    level="DEBUG",
     filter=lambda record: not _is_pipecat(record),
 )
 
