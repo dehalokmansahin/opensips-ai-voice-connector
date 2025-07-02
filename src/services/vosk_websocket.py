@@ -32,6 +32,8 @@ class VoskWebsocketSTTService(STTService):
         self,
         url: str,
         sample_rate: int = 16000,
+        chunk_ms: int = 300,
+        silence_timeout_ms: int = 1000,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -51,6 +53,15 @@ class VoskWebsocketSTTService(STTService):
         self._listener_task: Optional[asyncio.Task] = None
         self._is_connected = False
         
+        # Buffering settings
+        self._chunk_ms = chunk_ms
+        self._chunk_bytes = int(self._sample_rate * 2 * (self._chunk_ms / 1000.0))  # 16-bit PCM
+        self._audio_buffer = bytearray()
+        
+        # Silence detection
+        self._silence_timeout_ms = silence_timeout_ms
+        self._silence_task: Optional[asyncio.Task] = None
+        
         logger.info("VoskSTTService initialized", 
                    url=url, 
                    sample_rate=sample_rate,
@@ -64,8 +75,19 @@ class VoskWebsocketSTTService(STTService):
         if isinstance(frame, StartFrame):
             await self._start_websocket_connection()
         elif isinstance(frame, AudioRawFrame):
-            await self._send_audio(frame.audio)
+            # Buffer audio until we reach chunk size
+            self._audio_buffer.extend(frame.audio)
+            if len(self._audio_buffer) >= self._chunk_bytes:
+                await self._send_audio(bytes(self._audio_buffer))
+                self._audio_buffer.clear()
+            # Audio received, cancel silence timer if running
+            if self._silence_task and not self._silence_task.done():
+                self._silence_task.cancel()
         elif isinstance(frame, EndFrame):
+            # Flush remaining buffered audio before closing
+            if self._audio_buffer:
+                await self._send_audio(bytes(self._audio_buffer))
+                self._audio_buffer.clear()
             await self._stop_websocket_connection()
             await self.push_frame(frame)
         else:
@@ -73,13 +95,27 @@ class VoskWebsocketSTTService(STTService):
             if isinstance(frame, UserStartedSpeakingFrame):
                 logger.info("🎤 USER STARTED SPEAKING detected by VAD!", 
                            emulated=getattr(frame, 'emulated', False))
+                # Cancel silence timer when user starts speaking again
+                if self._silence_task and not self._silence_task.done():
+                    self._silence_task.cancel()
             elif isinstance(frame, UserStoppedSpeakingFrame):
                 logger.info("🔇 USER STOPPED SPEAKING detected by VAD!", 
                            emulated=getattr(frame, 'emulated', False))
+                # Start silence timer – if no further audio within timeout, flush / send EOF
+                if self._silence_timeout_ms > 0:
+                    if self._silence_task and not self._silence_task.done():
+                        self._silence_task.cancel()
+                    self._silence_task = asyncio.create_task(self._on_silence_timeout())
             elif isinstance(frame, VADUserStartedSpeakingFrame):
-                logger.info("🎯 VAD raw started speaking frame")
+                logger.debug("🎯 VAD raw started speaking frame")
+                if self._silence_task and not self._silence_task.done():
+                    self._silence_task.cancel()
             elif isinstance(frame, VADUserStoppedSpeakingFrame):
-                logger.info("🎯 VAD raw stopped speaking frame")
+                logger.debug("🎯 VAD raw stopped speaking frame")
+                if self._silence_timeout_ms > 0:
+                    if self._silence_task and not self._silence_task.done():
+                        self._silence_task.cancel()
+                    self._silence_task = asyncio.create_task(self._on_silence_timeout())
             
             await self.push_frame(frame, direction)
 
@@ -124,7 +160,7 @@ class VoskWebsocketSTTService(STTService):
                         break
                         
                     # 🔧 DEBUG: Log ALL raw messages from Vosk for debugging
-                    logger.info("🎯 RAW Vosk response received", 
+                    logger.debug("🎯 RAW Vosk response received", 
                                message=message[:200] if len(message) > 200 else message,
                                message_length=len(message))
                         
@@ -132,7 +168,7 @@ class VoskWebsocketSTTService(STTService):
                         data = json.loads(message)
                         
                         # 🔧 DEBUG: Log parsed JSON structure
-                        logger.info("🎯 Parsed Vosk JSON", 
+                        logger.debug("🎯 Parsed Vosk JSON", 
                                    keys=list(data.keys()),
                                    data_structure=data)
                         
@@ -155,7 +191,7 @@ class VoskWebsocketSTTService(STTService):
                         elif data.get("partial"):
                             partial_text = data["partial"].strip()
                             if partial_text:  # Only process non-empty partials
-                                logger.info("🔄 Vosk partial transcription", partial=partial_text)
+                                logger.debug("🔄 Vosk partial transcription", partial=partial_text)
                                 await self.push_frame(
                                     InterimTranscriptionFrame(
                                         text=partial_text, 
@@ -172,7 +208,8 @@ class VoskWebsocketSTTService(STTService):
                         
                         # Handle any other response types for debugging    
                         else:
-                            logger.info("🤔 Unknown Vosk response format", 
+                            #TODO: handle this
+                            logger.debug("🤔 Unknown Vosk response format", 
                                        data=data,
                                        available_keys=list(data.keys()))
                             
@@ -222,7 +259,7 @@ class VoskWebsocketSTTService(STTService):
             audio_rms = np.sqrt(np.mean(audio_array.astype(np.float32) ** 2))
             audio_max = np.max(np.abs(audio_array))
             
-            logger.info("🎵 Sending audio to Vosk", 
+            logger.debug("🎵 Sending audio to Vosk", 
                        audio_size=len(audio),
                        samples=len(audio_array),
                        rms=f"{audio_rms:.2f}",
@@ -328,3 +365,16 @@ class VoskWebsocketSTTService(STTService):
         """Şu anki zamanı string olarak döndür"""
         import time
         return str(int(time.time() * 1000)) 
+
+    async def _on_silence_timeout(self):
+        """Wait for configured silence timeout then send EOF to Vosk to trigger final transcription."""
+        try:
+            await asyncio.sleep(self._silence_timeout_ms / 1000.0)
+            if self._audio_buffer:
+                await self._send_audio(bytes(self._audio_buffer))
+                self._audio_buffer.clear()
+            if self._websocket and self._is_connected:
+                logger.info("🔕 Silence timeout reached – sending EOF to Vosk")
+                await self._websocket.send('{"eof": 1}')
+        except asyncio.CancelledError:
+            pass 

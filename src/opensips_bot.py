@@ -10,6 +10,41 @@ import asyncio
 from typing import Dict, Any
 import structlog
 
+# Configure global logging once – reduce verbosity to INFO
+from loguru import logger as _root_logger
+
+_root_logger.remove()  # Remove default sink
+
+# Helper filter to detect Pipecat files by path fragment
+def _is_pipecat(record):
+    try:
+        return "/pipecat/" in record["file"].path.replace("\\", "/")
+    except Exception:
+        return False
+
+# 1) Pipecat-only sink at DEBUG
+_root_logger.add(
+    sys.stderr,
+    level="DEBUG",
+    filter=_is_pipecat,
+)
+
+# 2) Everything-else sink at INFO (excluding Pipecat to avoid duplicates)
+_root_logger.add(
+    sys.stderr,
+    level="INFO",
+    filter=lambda record: not _is_pipecat(record),
+)
+
+# Std-lib logging + structlog bridge at INFO for non-Pipecat modules
+import logging
+
+logging.basicConfig(level=logging.INFO, force=True)
+
+import structlog
+
+structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.pipeline.pipeline import Pipeline
@@ -25,6 +60,13 @@ from services.piper_websocket import PiperWebsocketTTSService
 
 # Import our transport
 from transports.opensips_transport import create_opensips_transport
+
+# Pipecat observers for higher-level insights (no low-level RTP spam)
+from pipecat.observers.loggers.transcription_log_observer import TranscriptionLogObserver
+from pipecat.observers.loggers.llm_log_observer import LLMLogObserver
+from pipecat.observers.loggers.user_bot_latency_log_observer import (
+    UserBotLatencyLogObserver,
+)
 
 logger = structlog.get_logger()
 
@@ -170,6 +212,11 @@ async def run_opensips_bot(
                 allow_interruptions=True
             )
         )
+        
+        # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Attach observers for concise logging
+        task.add_observer(TranscriptionLogObserver())
+        task.add_observer(LLMLogObserver())
+        task.add_observer(UserBotLatencyLogObserver())
         
         # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Event handlers like examples
         @transport.event_handler("on_client_connected")

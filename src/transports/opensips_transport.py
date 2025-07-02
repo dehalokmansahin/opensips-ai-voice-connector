@@ -157,14 +157,6 @@ class OpenSIPSInputTransport(BaseInputTransport):
                     self._executor, self.vad_analyzer.analyze_audio, audio_frame.audio
                 )
                 
-                # 🔧 DEBUG: Log VAD result
-                logger.info("🎯 VAD Analysis Result", 
-                           call_id=self._params.call_id,
-                           vad_state=state.value if hasattr(state, 'value') else str(state),
-                           vad_state_name=state.name if hasattr(state, 'name') else str(state),
-                           confidence_threshold=self.vad_analyzer.params.confidence,
-                           min_volume_threshold=self.vad_analyzer.params.min_volume,
-                           audio_rms=f"{audio_rms:.2f}")
                 
             except Exception as e:
                 logger.error("❌ VAD Analysis Failed", 
