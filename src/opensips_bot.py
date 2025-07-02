@@ -63,14 +63,14 @@ async def run_opensips_bot(
         
         vad_analyzer = SileroVADAnalyzer(
             params=VADParams(
-                confidence=0.4,     # Lower than default 0.7 - more sensitive
-                start_secs=0.1,     # 100ms to start - faster than default 0.2
-                stop_secs=0.3,      # 300ms to stop - faster than default 0.8
-                min_volume=0.3      # Lower volume threshold than default 0.6
+                confidence=0.15,    # Very sensitive
+                start_secs=0.1,     # 100ms
+                stop_secs=0.25,
+                min_volume=0.0      # Disable volume gating
             )
         )
         logger.info("🔧 VAD created with optimized params for Turkish speech",
-                   confidence=0.4, start_secs=0.1, stop_secs=0.3, min_volume=0.3)
+                   confidence=0.15, start_secs=0.1, stop_secs=0.25, min_volume=0.0)
         
         # 🔧 DEBUG: VAD Configuration Applied
         logger.info("🎤 VAD Configuration Applied", 
@@ -163,7 +163,7 @@ async def run_opensips_bot(
             pipeline,
             params=PipelineParams(
                 # 🔧 RTP comes in at 8kHz, but pipeline processes at 16kHz
-                audio_in_sample_rate=rtp_sample_rate,     # 8kHz RTP input
+                audio_in_sample_rate=pipeline_sample_rate,     # 🔥 16 kHz
                 audio_out_sample_rate=rtp_sample_rate,    # 8kHz RTP output 
                 enable_metrics=False,                     # Disable metrics initially
                 enable_usage_metrics=False,               # Disable usage metrics initially

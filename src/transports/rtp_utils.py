@@ -6,88 +6,109 @@ Eski rtp.py dosyasından alınan RTP encode/decode fonksiyonları
 from typing import Dict, Any
 
 
-def decode_rtp_packet(packet_bytes: str) -> Dict[str, Any]:
+def decode_rtp_packet(packet: bytes) -> Dict[str, Any]:
     """
-    Decodes a RTP packet from hex string
-    
+    Decodes a raw RTP packet from bytes.
+
+    Handles variable-length RTP headers (CSRC list, header extension)
+    and optional padding as per RFC 3550.
+
     Args:
-        packet_bytes: Hex string representation of RTP packet
-        
+        packet: Raw RTP packet as bytes.
+
     Returns:
-        Dictionary containing RTP packet fields
+        A dictionary containing the parsed RTP packet fields,
+        with the payload as bytes.
+
+    Raises:
+        ValueError: If the packet is malformed or too short.
     """
+    if len(packet) < 12:
+        raise ValueError("RTP packet is too short (less than 12 bytes)")
+
     packet_vars = {}
-    
-    # First byte: V(2) + P(1) + X(1) + CC(4)
-    byte1 = packet_bytes[0:2]
-    byte1 = int(byte1, 16)
-    byte1 = format(byte1, 'b').zfill(8)
-    
-    packet_vars['version'] = int(byte1[0:2], 2)
-    packet_vars['padding'] = int(byte1[2:3])
-    packet_vars['extension'] = int(byte1[3:4])
-    packet_vars['csi_count'] = int(byte1[4:8], 2)
 
-    # Second byte: M(1) + PT(7)
-    byte2 = packet_bytes[2:4]
-    byte2 = int(byte2, 16)
-    byte2 = format(byte2, 'b').zfill(8)
-    
-    packet_vars['marker'] = int(byte2[0:1])
-    packet_vars['payload_type'] = int(byte2[1:8], 2)
+    # First byte: Version, Padding, Extension, CSRC Count
+    v_p_x_cc = packet[0]
+    packet_vars['version'] = v_p_x_cc >> 6
+    packet_vars['padding'] = (v_p_x_cc >> 5) & 1
+    packet_vars['extension'] = (v_p_x_cc >> 4) & 1
+    packet_vars['csi_count'] = v_p_x_cc & 0x0F
 
-    # Sequence number (16 bits)
-    packet_vars['sequence_number'] = int(str(packet_bytes[4:8]), 16)
+    # Second byte: Marker, Payload Type
+    m_pt = packet[1]
+    packet_vars['marker'] = m_pt >> 7
+    packet_vars['payload_type'] = m_pt & 0x7F
+
+    # Sequence Number (16 bits)
+    packet_vars['sequence_number'] = int.from_bytes(packet[2:4], 'big')
 
     # Timestamp (32 bits)
-    packet_vars['timestamp'] = int(str(packet_bytes[8:16]), 16)
+    packet_vars['timestamp'] = int.from_bytes(packet[4:8], 'big')
 
     # SSRC (32 bits)
-    packet_vars['ssrc'] = int(str(packet_bytes[16:24]), 16)
+    packet_vars['ssrc'] = int.from_bytes(packet[8:12], 'big')
 
-    # Payload (remaining bytes)
-    packet_vars['payload'] = str(packet_bytes[24:])
-    
+    # Calculate header length
+    header_len = 12 + (packet_vars['csi_count'] * 4)
+
+    # Handle header extension
+    if packet_vars['extension']:
+        if len(packet) < header_len + 4:
+            raise ValueError("RTP packet too short for extension header")
+        ext_header_field = packet[header_len:header_len+4]
+        ext_len_words = int.from_bytes(ext_header_field[2:4], 'big')
+        ext_len_bytes = (ext_len_words * 4)
+        header_len += (4 + ext_len_bytes)
+
+    if len(packet) < header_len:
+        raise ValueError("RTP packet header length is larger than packet size")
+
+    payload = packet[header_len:]
+
+    # Handle padding
+    if packet_vars['padding'] and payload:
+        pad_len = payload[-1]
+        if pad_len <= len(payload):
+            payload = payload[:-pad_len]
+        else:
+            raise ValueError("RTP packet padding length is invalid")
+
+    packet_vars['payload'] = payload
+
     return packet_vars
 
 
-def generate_rtp_packet(packet_vars: Dict[str, Any]) -> str:
+def generate_rtp_packet(packet_vars: Dict[str, Any]) -> bytes:
     """
-    Generates/Encodes a RTP packet to hex string
+    Generates/Encodes an RTP packet to bytes.
     
     Args:
-        packet_vars: Dictionary containing RTP packet fields
+        packet_vars: Dictionary containing RTP packet fields.
+        The payload should be provided as bytes.
         
     Returns:
-        Hex string representation of RTP packet
+        The raw RTP packet as bytes.
     """
     # First byte: V(2) + P(1) + X(1) + CC(4)
-    version = str(format(packet_vars['version'], 'b').zfill(2))
-    padding = str(packet_vars['padding'])
-    extension = str(packet_vars['extension'])
-    csi_count = str(format(packet_vars['csi_count'], 'b').zfill(4))
-    
-    byte1_body = int((version + padding + extension + csi_count), 2)
-    byte1 = format(byte1_body, 'x').zfill(2)
+    byte1 = (
+        (packet_vars['version'] << 6) |
+        (packet_vars['padding'] << 5) |
+        (packet_vars['extension'] << 4) |
+        packet_vars['csi_count']
+    )
 
     # Second byte: M(1) + PT(7)
-    marker = str(packet_vars['marker'])
-    payload_type = str(format(packet_vars['payload_type'], 'b').zfill(7))
-    byte2 = format(int((marker + payload_type), 2), 'x').zfill(2)
+    byte2 = (packet_vars['marker'] << 7) | packet_vars['payload_type']
 
-    # Sequence number (16 bits)
-    sequence_number = format(packet_vars['sequence_number'], 'x').zfill(4)
-
-    # Timestamp (32 bits)  
-    timestamp = format(packet_vars['timestamp'], 'x').zfill(8)
-
-    # SSRC (32 bits)
-    ssrc = str(format(packet_vars['ssrc'], 'x').zfill(8))
+    header = bytearray()
+    header.append(byte1)
+    header.append(byte2)
+    header.extend(packet_vars['sequence_number'].to_bytes(2, 'big'))
+    header.extend(packet_vars['timestamp'].to_bytes(4, 'big'))
+    header.extend(packet_vars['ssrc'].to_bytes(4, 'big'))
 
     # Payload
-    payload = packet_vars['payload']
+    payload = packet_vars.get('payload', b'')
 
-    # Combine all parts
-    packet = byte1 + byte2 + sequence_number + timestamp + ssrc + payload
-
-    return packet 
+    return bytes(header) + payload 

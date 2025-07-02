@@ -8,6 +8,7 @@ import json
 import websockets
 from typing import AsyncGenerator, Optional
 import structlog
+import numpy as np
 
 from pipecat.frames.frames import (
     Frame, AudioRawFrame, EndFrame, ErrorFrame, 
@@ -102,11 +103,7 @@ class VoskWebsocketSTTService(STTService):
                 config_message = {
                     "config": {
                         "sample_rate": 16000,
-                        "words": True,  # Enable word-level timestamps if needed
-                        "partial": True,  # Enable partial results
-                        "silence_cut_off": 0.1,  # 🔧 More sensitive silence detection
-                        "min_alternatives": 0,   # 🔧 Show even low-confidence results
-                        "max_alternatives": 3    # 🔧 Max alternatives for better accuracy
+                        "num_channels": 1
                     }
                 }
                 
@@ -218,24 +215,24 @@ class VoskWebsocketSTTService(STTService):
                 
             # Log audio data info for debugging
             if len(audio) % 2 != 0:
-                logger.warning("Audio data length is not even - potential 16-bit PCM issue",
-                             audio_length=len(audio))
+                logger.warning("Audio data length is not even - potential 16-bit PCM issue",audio_length=len(audio))
             
-            # Calculate expected frame info for debugging
-            samples_16bit = len(audio) // 2  # 16-bit PCM = 2 bytes per sample
-            duration_ms = (samples_16bit / self._sample_rate) * 1000
+            # Debug audio data characteristics
+            audio_array = np.frombuffer(audio, dtype=np.int16)
+            audio_rms = np.sqrt(np.mean(audio_array.astype(np.float32) ** 2))
+            audio_max = np.max(np.abs(audio_array))
             
-            # 🔧 SIMPLE DEBUG: Log audio data without manual silence detection
-            # VAD should handle silence detection, not STT service
-            logger.debug("Sending audio to Vosk",
-                        audio_bytes=len(audio),
-                        duration_ms=f"{duration_ms:.1f}",
-                        expected_sample_rate=self._sample_rate,
-                        samples_16bit=samples_16bit,
-                        note="VAD processes this first, then STT gets it")
-                
+            logger.info("🎵 Sending audio to Vosk", 
+                       audio_size=len(audio),
+                       samples=len(audio_array),
+                       rms=f"{audio_rms:.2f}",
+                       max_amplitude=audio_max,
+                       sample_rate=self._sample_rate,
+                       audio_hex=audio[:20].hex())
+           
             # Send audio to Vosk WebSocket
             await self._websocket.send(audio)
+            logger.debug("✅ Audio sent to Vosk successfully", size=len(audio))
             
         except Exception as e:
             logger.error("Error sending audio to Vosk", error=str(e))

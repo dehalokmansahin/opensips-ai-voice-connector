@@ -8,6 +8,7 @@ import struct
 from typing import Optional, Dict, Any
 import asyncio
 import structlog
+import numpy as np
 
 # Pipecat imports
 from pipecat.frames.frames import (
@@ -18,6 +19,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.serializers.base_serializer import FrameSerializer, FrameSerializerType
 from pipecat.audio.utils import create_default_resampler, pcm_to_ulaw, ulaw_to_pcm
+from transports.rtp_utils import decode_rtp_packet
 
 logger = structlog.get_logger()
 
@@ -62,13 +64,9 @@ class OpenSIPSFrameSerializer(FrameSerializer):
         return FrameSerializerType.BINARY
     
     async def setup(self, frame: StartFrame):
-        """Setup serializer with pipeline configuration"""
-        self.pipeline_sample_rate = frame.audio_in_sample_rate
-        
-        logger.info("OpenSIPS serializer setup completed",
-                   call_id=self.call_id,
-                   pipeline_sample_rate=self.pipeline_sample_rate,
-                   rtp_sample_rate=self.rtp_sample_rate)
+        # pipeline_sample_rate yerine sabit 16000 kullan
+        self.pipeline_sample_rate = 16000
+        logger.info("Serializer setup: pipeline_sample_rate set to 16kHz")
     
     async def serialize(self, frame: Frame) -> str | bytes | None:
         """
@@ -115,13 +113,44 @@ class OpenSIPSFrameSerializer(FrameSerializer):
             return None
         
         try:
+            # Decode the full RTP packet to extract the payload
+            logger.debug("🔍 Decoding RTP packet", call_id=self.call_id, 
+                        packet_size=len(data), packet_hex=data[:20].hex())
+            rtp_info = decode_rtp_packet(data)
+            ulaw_payload = rtp_info.get("payload")
+            
+            logger.debug("🔍 RTP packet decoded", call_id=self.call_id,
+                        header_info={k: v for k, v in rtp_info.items() if k != 'payload'},
+                        payload_size=len(ulaw_payload) if ulaw_payload else 0,
+                        payload_hex=ulaw_payload[:20].hex() if ulaw_payload else "empty")
+
+            if not ulaw_payload:
+                logger.warning("Empty or malformed RTP payload", call_id=self.call_id)
+                return None
+            
             # Convert RTP's 8kHz μ-law to PCM at pipeline input rate
+            logger.debug("🔄 Converting μ-law to PCM", call_id=self.call_id,
+                        ulaw_size=len(ulaw_payload), 
+                        input_rate=self.rtp_sample_rate,
+                        output_rate=self.pipeline_sample_rate)
             pcm_audio = await ulaw_to_pcm(
-                data, 
-                self.rtp_sample_rate, 
-                self.pipeline_sample_rate, 
+                ulaw_payload,
+                self.rtp_sample_rate,
+                self.pipeline_sample_rate,
                 self.resampler
             )
+            
+            # Debug PCM data quality
+            pcm_array = np.frombuffer(pcm_audio, dtype=np.int16)
+            pcm_rms = np.sqrt(np.mean(pcm_array.astype(np.float32) ** 2))
+            pcm_max = np.max(np.abs(pcm_array))
+            
+            logger.debug("🎵 PCM audio converted", call_id=self.call_id,
+                        pcm_size=len(pcm_audio), 
+                        pcm_samples=len(pcm_array),
+                        pcm_rms=f"{pcm_rms:.2f}",
+                        pcm_max=pcm_max,
+                        pcm_hex=pcm_audio[:20].hex())
             
             # Create input audio frame for pipeline
             audio_frame = InputAudioRawFrame(

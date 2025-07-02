@@ -8,6 +8,8 @@ import asyncio
 import socket
 from typing import Optional, Dict, Any, Callable
 import structlog
+import random
+from transports.rtp_utils import generate_rtp_packet
 
 from pipecat.frames.frames import (
     Frame, InputAudioRawFrame, OutputAudioRawFrame, StartFrame, EndFrame,
@@ -136,16 +138,33 @@ class OpenSIPSInputTransport(BaseInputTransport):
                            sample_rate=audio_frame.sample_rate,
                            vad_sample_rate=getattr(self.vad_analyzer, 'sample_rate', 'not_set'))
                 
+                # Debug audio data before VAD
+                import numpy as np
+                audio_array = np.frombuffer(audio_frame.audio, dtype=np.int16)
+                audio_rms = np.sqrt(np.mean(audio_array.astype(np.float32) ** 2))
+                audio_max = np.max(np.abs(audio_array))
+                audio_min = np.min(audio_array)
+                
+                logger.debug("�� Audio data for VAD", 
+                           call_id=self._params.call_id,
+                           samples=len(audio_array),
+                           rms=f"{audio_rms:.2f}",
+                           max_amplitude=audio_max,
+                           min_amplitude=audio_min,
+                           audio_hex=audio_frame.audio[:20].hex())
+                
                 state = await self.get_event_loop().run_in_executor(
                     self._executor, self.vad_analyzer.analyze_audio, audio_frame.audio
                 )
                 
                 # 🔧 DEBUG: Log VAD result
-                logger.debug("🎯 VAD Analysis Result", 
+                logger.info("🎯 VAD Analysis Result", 
                            call_id=self._params.call_id,
                            vad_state=state.value if hasattr(state, 'value') else str(state),
+                           vad_state_name=state.name if hasattr(state, 'name') else str(state),
                            confidence_threshold=self.vad_analyzer.params.confidence,
-                           min_volume_threshold=self.vad_analyzer.params.min_volume)
+                           min_volume_threshold=self.vad_analyzer.params.min_volume,
+                           audio_rms=f"{audio_rms:.2f}")
                 
             except Exception as e:
                 logger.error("❌ VAD Analysis Failed", 
@@ -317,6 +336,10 @@ class OpenSIPSOutputTransport(BaseOutputTransport):
         self._transport = transport
         self._params = params
         self._socket: Optional[socket.socket] = None
+        # RTP header state for outgoing packets
+        self._sequence_number = random.randint(0, 0xFFFF)
+        self._timestamp = random.randint(0, 0xFFFFFFFF)
+        self._ssrc = random.randint(0, 0xFFFFFFFF)
         
     async def start(self, frame: StartFrame):
         """Start output transport"""
@@ -332,24 +355,37 @@ class OpenSIPSOutputTransport(BaseOutputTransport):
         """Send frame using serializer - following Twilio/Telnyx pattern"""
         try:
             if isinstance(frame, OutputAudioRawFrame) and self._params.serializer:
-                # Serialize frame to RTP packet
-                rtp_packet = await self._params.serializer.serialize(frame)
-                
-                if rtp_packet and self._socket:
-                    # Send to client if we have client info
-                    client_ip = self._params.serializer.media_ip
-                    client_port = self._params.serializer.media_port
-                    
-                    if client_ip and client_port:
-                        await asyncio.get_running_loop().sock_sendto(
-                            self._socket, rtp_packet, (client_ip, client_port)
-                        )
-                        
-                        logger.debug("RTP packet sent", 
-                                   size=len(rtp_packet),
-                                   to_addr=f"{client_ip}:{client_port}")
-                    else:
-                        logger.debug("No client info for RTP sending")
+                # Get raw μ-law payload (no header)
+                pcmu_data = await self._params.serializer.serialize(frame)
+                client_ip = self._params.serializer.media_ip
+                client_port = self._params.serializer.media_port
+                if pcmu_data and self._socket and client_ip and client_port:
+                    loop = asyncio.get_running_loop()
+                    # Chunk size: 20ms = 160 bytes at 8kHz μ-law
+                    chunk_size = 160
+                    for i in range(0, len(pcmu_data), chunk_size):
+                        chunk = pcmu_data[i : i + chunk_size]
+                        if len(chunk) < chunk_size:
+                            chunk = chunk + b"\xff" * (chunk_size - len(chunk))
+                        # Build RTP header + payload
+                        packet_vars = {
+                            'version': 2,
+                            'padding': 0,
+                            'extension': 0,
+                            'csi_count': 0,
+                            'marker': 0,
+                            'payload_type': 0,  # PCMU
+                            'sequence_number': self._sequence_number,
+                            'timestamp': self._timestamp,
+                            'ssrc': self._ssrc,
+                            'payload': chunk
+                        }
+                        packet_bytes = generate_rtp_packet(packet_vars)
+                        await loop.sock_sendto(self._socket, packet_bytes, (client_ip, client_port))
+                        logger.debug("RTP packet sent", size=len(packet_bytes), to_addr=f"{client_ip}:{client_port}")
+                        # Update sequence and timestamp
+                        self._sequence_number = (self._sequence_number + 1) & 0xFFFF
+                        self._timestamp = (self._timestamp + chunk_size) & 0xFFFFFFFF
             
             # Continue processing in pipeline
             await super().send_frame(frame)
