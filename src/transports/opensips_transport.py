@@ -488,8 +488,10 @@ def create_opensips_transport(
         vad_analyzer=vad_analyzer,   # 🔧 From Twilio example
         
         # OpenSIPS specific - keep minimal config
-        audio_in_sample_rate=8000,   # RTP is 8kHz input
-        audio_out_sample_rate=8000,  # RTP is 8kHz output  
+        # 🔧 CRITICAL FIX: Use pipeline sample rate (16kHz) for VAD compatibility
+        # RTP comes in at 8kHz but serializer upsamples to 16kHz before VAD
+        audio_in_sample_rate=16000,  # Pipeline processes at 16kHz (after serializer upsampling)
+        audio_out_sample_rate=8000,  # RTP output is 8kHz  
         audio_in_passthrough=True,   # Must be True for audio to reach pipeline
         **kwargs
     )

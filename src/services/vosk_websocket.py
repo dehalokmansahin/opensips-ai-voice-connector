@@ -231,7 +231,8 @@ class VoskWebsocketSTTService(STTService):
                         audio_bytes=len(audio),
                         duration_ms=f"{duration_ms:.1f}",
                         expected_sample_rate=self._sample_rate,
-                        samples_16bit=samples_16bit)
+                        samples_16bit=samples_16bit,
+                        note="VAD processes this first, then STT gets it")
                 
             # Send audio to Vosk WebSocket
             await self._websocket.send(audio)

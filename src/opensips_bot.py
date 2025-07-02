@@ -57,10 +57,20 @@ async def run_opensips_bot(
         # But optimized for Turkish speech and configured for 8kHz RTP input
         vad_config = config.get('vad', {}) if config else {}
         
-        # 🔧 TWILIO EXACT PATTERN: Use exact same VAD configuration as Twilio example
-        # No sample_rate, no custom params - exactly like Twilio bot.py line 70
-        vad_analyzer = SileroVADAnalyzer()
-        logger.info("🔧 VAD created with Twilio exact pattern - no custom params")
+        # 🔧 TEST: Use more sensitive VAD params for better Turkish speech detection
+        # Default Twilio params might be too conservative
+        from pipecat.audio.vad.vad_analyzer import VADParams
+        
+        vad_analyzer = SileroVADAnalyzer(
+            params=VADParams(
+                confidence=0.4,     # Lower than default 0.7 - more sensitive
+                start_secs=0.1,     # 100ms to start - faster than default 0.2
+                stop_secs=0.3,      # 300ms to stop - faster than default 0.8
+                min_volume=0.3      # Lower volume threshold than default 0.6
+            )
+        )
+        logger.info("🔧 VAD created with optimized params for Turkish speech",
+                   confidence=0.4, start_secs=0.1, stop_secs=0.3, min_volume=0.3)
         
         # 🔧 DEBUG: VAD Configuration Applied
         logger.info("🎤 VAD Configuration Applied", 
