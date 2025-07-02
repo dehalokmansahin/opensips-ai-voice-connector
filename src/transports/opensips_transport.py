@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-OpenSIPS Transport - Following Twilio/Telnyx Pattern
-Simplified implementation using serializer and event handlers
+OpenSIPS Transport - Following Twilio/Telnyx Pattern with VAD Observer
+Simplified implementation using serializer, event handlers and VAD observer
 """
 
 import asyncio
@@ -11,17 +11,73 @@ import structlog
 
 from pipecat.frames.frames import (
     Frame, InputAudioRawFrame, OutputAudioRawFrame, StartFrame, EndFrame,
-    CancelFrame
+    CancelFrame, UserStartedSpeakingFrame, UserStoppedSpeakingFrame,
+    VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame
 )
 from pipecat.transports.base_input import BaseInputTransport
 from pipecat.transports.base_output import BaseOutputTransport  
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.vad.vad_analyzer import VADState
+from pipecat.processors.frame_processor import FrameDirection
 
 # Import our new serializer
 from serializers.opensips import OpenSIPSFrameSerializer
 
 logger = structlog.get_logger()
+
+
+class VADObserver:
+    """
+    VAD Observer - Following Twilio/Telnyx Pattern
+    Observes VAD events and logs state transitions for debugging
+    """
+    
+    def __init__(self, call_id: str):
+        self._call_id = call_id
+        self._vad_state = VADState.QUIET
+        self._speech_start_time = None
+        self._speech_frames_count = 0
+        
+    async def on_vad_event(self, frame: Frame) -> None:
+        """Handle VAD events - following Twilio/Telnyx logging pattern"""
+        
+        if isinstance(frame, VADUserStartedSpeakingFrame):
+            self._vad_state = VADState.SPEAKING
+            self._speech_start_time = asyncio.get_event_loop().time()
+            self._speech_frames_count = 0
+            logger.info("🎤 VAD DETECTED: User started speaking",
+                       call_id=self._call_id,
+                       state_transition="QUIET → SPEAKING",
+                       pattern="twilio_telnyx_compliant")
+                       
+        elif isinstance(frame, VADUserStoppedSpeakingFrame):
+            self._vad_state = VADState.QUIET
+            if self._speech_start_time:
+                duration = asyncio.get_event_loop().time() - self._speech_start_time
+                logger.info("🔇 VAD DETECTED: User stopped speaking",
+                           call_id=self._call_id,
+                           state_transition="SPEAKING → QUIET",
+                           speech_duration_secs=round(duration, 2),
+                           speech_frames_processed=self._speech_frames_count,
+                           pattern="twilio_telnyx_compliant")
+            self._speech_start_time = None
+            
+        elif isinstance(frame, UserStartedSpeakingFrame):
+            logger.info("👤 USER SPEECH EVENT: Started speaking",
+                       call_id=self._call_id,
+                       vad_state=self._vad_state.value if hasattr(self._vad_state, 'value') else str(self._vad_state),
+                       pattern="twilio_telnyx_compliant")
+                       
+        elif isinstance(frame, UserStoppedSpeakingFrame):
+            logger.info("👤 USER SPEECH EVENT: Stopped speaking",
+                       call_id=self._call_id,
+                       vad_state=self._vad_state.value if hasattr(self._vad_state, 'value') else str(self._vad_state),
+                       pattern="twilio_telnyx_compliant")
+        
+        # Track speech frames during speaking
+        if self._vad_state == VADState.SPEAKING and isinstance(frame, InputAudioRawFrame):
+            self._speech_frames_count += 1
 
 
 class OpenSIPSTransportParams(TransportParams):
@@ -33,18 +89,23 @@ class OpenSIPSTransportParams(TransportParams):
     call_id: Optional[str] = None
     serializer: Optional[OpenSIPSFrameSerializer] = None
     
-    # Default audio configuration for RTP
+    # 🔧 TWILIO PATTERN: Add fields like FastAPIWebsocketParams
+    add_wav_header: bool = False  # Like Twilio example
+    
+    # 🔧 CRITICAL FIX: Inherit ALL base TransportParams fields including vad_analyzer
+    # Override only the specific audio settings we need for RTP
     audio_in_enabled: bool = True
     audio_out_enabled: bool = True
-    audio_in_sample_rate: int = 8000   # RTP is 8kHz
-    audio_out_sample_rate: int = 8000  # RTP output 8kHz
-    
-    # 🔧 CRITICAL FIX: Enable audio passthrough to pipeline
+    audio_in_sample_rate: int = 8000   # RTP is 8kHz input
+    audio_out_sample_rate: int = 8000  # RTP is 8kHz output
     audio_in_passthrough: bool = True  # Must be True for audio to reach STT
+    
+    # 🔧 Note: vad_analyzer field is inherited from TransportParams
+    # This was the critical missing piece for VAD to work!
 
 
 class OpenSIPSInputTransport(BaseInputTransport):
-    """OpenSIPS Input Transport with UDP/RTP handling"""
+    """OpenSIPS Input Transport with UDP/RTP handling and VAD Observer"""
     
     def __init__(self, transport: "OpenSIPSTransport", params: OpenSIPSTransportParams):
         super().__init__(params)
@@ -53,9 +114,62 @@ class OpenSIPSInputTransport(BaseInputTransport):
         self._receiver_task: Optional[asyncio.Task] = None
         self._socket: Optional[socket.socket] = None
         
+        # 🔧 VAD Observer - Following Twilio/Telnyx Pattern
+        self._vad_observer = VADObserver(params.call_id or "unknown_call")
+    
+    @property
+    def vad_analyzer(self) -> Optional[SileroVADAnalyzer]:
+        """🔧 CRITICAL FIX: VAD analyzer property for BaseInputTransport compatibility"""
+        return self._params.vad_analyzer
+    
+    async def _vad_analyze(self, audio_frame: InputAudioRawFrame) -> VADState:
+        """🔧 OVERRIDE: Add debug logging to VAD analysis"""
+        from pipecat.audio.vad.vad_analyzer import VADState
+        
+        state = VADState.QUIET
+        if self.vad_analyzer:
+            try:
+                # 🔧 DEBUG: Log before VAD analysis
+                logger.debug("🔍 VAD Analysis Starting", 
+                           call_id=self._params.call_id,
+                           audio_length=len(audio_frame.audio),
+                           sample_rate=audio_frame.sample_rate,
+                           vad_sample_rate=getattr(self.vad_analyzer, 'sample_rate', 'not_set'))
+                
+                state = await self.get_event_loop().run_in_executor(
+                    self._executor, self.vad_analyzer.analyze_audio, audio_frame.audio
+                )
+                
+                # 🔧 DEBUG: Log VAD result
+                logger.debug("🎯 VAD Analysis Result", 
+                           call_id=self._params.call_id,
+                           vad_state=state.value if hasattr(state, 'value') else str(state),
+                           confidence_threshold=self.vad_analyzer.params.confidence,
+                           min_volume_threshold=self.vad_analyzer.params.min_volume)
+                
+            except Exception as e:
+                logger.error("❌ VAD Analysis Failed", 
+                           call_id=self._params.call_id,
+                           error=str(e))
+                           
+        else:
+            logger.warning("⚠️ No VAD analyzer available", call_id=self._params.call_id)
+            
+        return state
+        
     async def start(self, frame: StartFrame):
-        """Start RTP receiver following Twilio/Telnyx pattern"""
+        """Start RTP receiver following Twilio/Telnyx pattern with VAD observer"""
+        
+        # 🔧 CRITICAL FIX: Call parent start FIRST (like Twilio/Telnyx examples)
+        # This ensures VAD analyzer is properly configured before we use it
         await super().start(frame)
+        
+        logger.info("🎤 VAD Configuration verified after start()",
+                   call_id=self._params.call_id,
+                   vad_available=self.vad_analyzer is not None,
+                   vad_sample_rate=getattr(self.vad_analyzer, 'sample_rate', 'not_set') if self.vad_analyzer else None,
+                   confidence=self.vad_analyzer.params.confidence if self.vad_analyzer else None,
+                   pattern="twilio_telnyx_compliant")
         
         if not self._receiver_task:
             self._receiver_task = asyncio.create_task(self._receive_rtp_packets())
@@ -65,12 +179,29 @@ class OpenSIPSInputTransport(BaseInputTransport):
         await self.set_transport_ready(frame)
         logger.info("🎵 Audio task and queue initialized", 
                    call_id=self._params.call_id,
-                   audio_passthrough=self._params.audio_in_passthrough)
+                   audio_passthrough=self._params.audio_in_passthrough,
+                   audio_task_created=self._audio_task is not None,
+                   audio_queue_created=hasattr(self, '_audio_in_queue'))
         
         # Trigger on_client_connected event
         await self._transport._trigger_event("on_client_connected", self._transport, None)
         
         await self.push_frame(frame)
+    
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        """Process frames with VAD observer - following Twilio/Telnyx pattern"""
+        
+        # 🔧 VAD OBSERVER: Handle VAD events before processing
+        if isinstance(frame, (VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame,
+                             UserStartedSpeakingFrame, UserStoppedSpeakingFrame)):
+            await self._vad_observer.on_vad_event(frame)
+        
+        # 🔧 Also observe audio frames for speech tracking
+        elif isinstance(frame, InputAudioRawFrame) and self._vad_observer:
+            await self._vad_observer.on_vad_event(frame)
+        
+        # Continue with normal processing
+        await super().process_frame(frame, direction)
     
     async def stop(self, frame: EndFrame):
         """Stop RTP receiver"""
@@ -137,11 +268,23 @@ class OpenSIPSInputTransport(BaseInputTransport):
                         frame = await self._params.serializer.deserialize(data)
                         if frame:
                             if isinstance(frame, InputAudioRawFrame):
-                                logger.debug("📤 Pushing audio frame to pipeline", 
+                                logger.debug("📤 Pushing audio frame to VAD pipeline", 
                                            call_id=self._params.call_id,
                                            audio_size=len(frame.audio),
-                                           sample_rate=frame.sample_rate)
+                                           sample_rate=frame.sample_rate,
+                                           audio_task_running=self._audio_task is not None,
+                                           vad_analyzer_available=self.vad_analyzer is not None)
+                                
+                                # 🔧 DEBUG: Check audio queue before pushing
+                                queue_size_before = self._audio_in_queue.qsize() if hasattr(self, '_audio_in_queue') else "no_queue"
                                 await self.push_audio_frame(frame)  # Audio frames go to audio channel
+                                queue_size_after = self._audio_in_queue.qsize() if hasattr(self, '_audio_in_queue') else "no_queue"
+                                
+                                logger.debug("🎯 Audio frame pushed to VAD queue", 
+                                           call_id=self._params.call_id,
+                                           queue_before=queue_size_before,
+                                           queue_after=queue_size_after,
+                                           note="Frame should now be processed by BaseInputTransport._audio_task_handler()")
                             else:
                                 await self.push_frame(frame)        # Other frames go to normal channel
                         else:
@@ -219,8 +362,8 @@ class OpenSIPSOutputTransport(BaseOutputTransport):
 
 class OpenSIPSTransport(BaseTransport):
     """
-    OpenSIPS Transport - Following Twilio/Telnyx Pattern
-    Using serializer and event handlers
+    OpenSIPS Transport - Following Twilio/Telnyx Pattern with VAD Observer
+    Using serializer, event handlers and VAD state monitoring
     """
     
     def __init__(self, params: OpenSIPSTransportParams):
@@ -235,7 +378,9 @@ class OpenSIPSTransport(BaseTransport):
         logger.info("OpenSIPS Transport initialized", 
                    call_id=params.call_id,
                    bind_ip=params.bind_ip,
-                   bind_port=params.bind_port)
+                   bind_port=params.bind_port,
+                   vad_observer_enabled=True,
+                   pattern="twilio_telnyx_compliant")
     
     def input(self) -> OpenSIPSInputTransport:
         """Return input transport"""
@@ -313,30 +458,50 @@ def create_opensips_transport(
     **kwargs
 ) -> OpenSIPSTransport:
     """
-    Create OpenSIPS transport following Twilio/Telnyx pattern
+    Create OpenSIPS transport following Twilio/Telnyx pattern with VAD Observer
+    
+    This function follows the exact same pattern as Twilio/Telnyx examples:
+    - VAD analyzer is passed to transport params (like in examples)
+    - Serializer is created and passed to transport params
+    - Transport handles VAD processing internally via BaseInputTransport
+    - VAD Observer monitors and logs VAD state transitions
     """
-    # Create serializer
+    # Create serializer (equivalent to TwilioFrameSerializer/TelnyxFrameSerializer)
     serializer = OpenSIPSFrameSerializer(
         call_id=call_id or "default_call",
         media_ip=bind_ip,
         media_port=bind_port
     )
     
-    # Create transport params
+    # 🔧 TWILIO EXACT PATTERN: Copy exact FastAPIWebsocketParams configuration
+    # From Twilio bot.py lines 65-71
     params = OpenSIPSTransportParams(
         bind_ip=bind_ip,
         bind_port=bind_port,
         call_id=call_id,
-        vad_analyzer=vad_analyzer,
         serializer=serializer,
+        
+        # 🔧 TWILIO EXACT PATTERN: Same params as FastAPIWebsocketParams
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+        add_wav_header=False,        # 🔧 From Twilio example
+        vad_analyzer=vad_analyzer,   # 🔧 From Twilio example
+        
+        # OpenSIPS specific - keep minimal config
+        audio_in_sample_rate=8000,   # RTP is 8kHz input
+        audio_out_sample_rate=8000,  # RTP is 8kHz output  
+        audio_in_passthrough=True,   # Must be True for audio to reach pipeline
         **kwargs
     )
     
     transport = OpenSIPSTransport(params)
     
-    logger.info("OpenSIPS transport created with serializer", 
+    logger.info("OpenSIPS transport created with VAD observer", 
                call_id=call_id,
                bind_ip=bind_ip,
-               bind_port=bind_port)
+               bind_port=bind_port,
+               vad_configured=vad_analyzer is not None,
+               vad_observer_enabled=True,
+               pattern="twilio_telnyx_compliant")
     
     return transport 

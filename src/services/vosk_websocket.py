@@ -11,7 +11,9 @@ import structlog
 
 from pipecat.frames.frames import (
     Frame, AudioRawFrame, EndFrame, ErrorFrame, 
-    InterimTranscriptionFrame, StartFrame, TranscriptionFrame
+    InterimTranscriptionFrame, StartFrame, TranscriptionFrame,
+    UserStartedSpeakingFrame, UserStoppedSpeakingFrame,
+    VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame
 )
 from pipecat.services.stt_service import STTService
 from pipecat.processors.frame_processor import FrameDirection
@@ -66,6 +68,18 @@ class VoskWebsocketSTTService(STTService):
             await self._stop_websocket_connection()
             await self.push_frame(frame)
         else:
+            # 🔧 DEBUG: Log VAD-related frames to track speech detection
+            if isinstance(frame, UserStartedSpeakingFrame):
+                logger.info("🎤 USER STARTED SPEAKING detected by VAD!", 
+                           emulated=getattr(frame, 'emulated', False))
+            elif isinstance(frame, UserStoppedSpeakingFrame):
+                logger.info("🔇 USER STOPPED SPEAKING detected by VAD!", 
+                           emulated=getattr(frame, 'emulated', False))
+            elif isinstance(frame, VADUserStartedSpeakingFrame):
+                logger.info("🎯 VAD raw started speaking frame")
+            elif isinstance(frame, VADUserStoppedSpeakingFrame):
+                logger.info("🎯 VAD raw stopped speaking frame")
+            
             await self.push_frame(frame, direction)
 
     async def _start_websocket_connection(self):
@@ -87,15 +101,20 @@ class VoskWebsocketSTTService(STTService):
                 # 🔧 CRITICAL FIX: Enhanced config validation based on docs/VOSK.md
                 config_message = {
                     "config": {
-                        "sample_rate": self._sample_rate,
+                        "sample_rate": 16000,
                         "words": True,  # Enable word-level timestamps if needed
-                        "partial": True  # Enable partial results
+                        "partial": True,  # Enable partial results
+                        "silence_cut_off": 0.1,  # 🔧 More sensitive silence detection
+                        "min_alternatives": 0,   # 🔧 Show even low-confidence results
+                        "max_alternatives": 3    # 🔧 Max alternatives for better accuracy
                     }
                 }
                 
                 logger.info("Sending Vosk configuration", 
+                           config=config_message,
                            sample_rate=self._sample_rate,
-                           config=config_message)
+                           expected_sample_rate=16000,
+                           note="Vosk STT requires 16kHz for optimal Turkish recognition")
                            
                 await self._websocket.send(json.dumps(config_message))
                 
@@ -107,14 +126,24 @@ class VoskWebsocketSTTService(STTService):
                     if not self._is_connected:
                         break
                         
+                    # 🔧 DEBUG: Log ALL raw messages from Vosk for debugging
+                    logger.info("🎯 RAW Vosk response received", 
+                               message=message[:200] if len(message) > 200 else message,
+                               message_length=len(message))
+                        
                     try:
                         data = json.loads(message)
+                        
+                        # 🔧 DEBUG: Log parsed JSON structure
+                        logger.info("🎯 Parsed Vosk JSON", 
+                                   keys=list(data.keys()),
+                                   data_structure=data)
                         
                         # Handle final transcription
                         if data.get("text"):
                             text = data["text"].strip()
                             if text:  # Only process non-empty results
-                                logger.info("Vosk final transcription", text=text)
+                                logger.info("🎉 Vosk final transcription", text=text)
                                 await self.push_frame(
                                     TranscriptionFrame(
                                         text=text, 
@@ -122,12 +151,14 @@ class VoskWebsocketSTTService(STTService):
                                         timestamp=""
                                     )
                                 )
+                            else:
+                                logger.debug("🔍 Vosk sent empty final text")
                         
                         # Handle partial transcription
                         elif data.get("partial"):
                             partial_text = data["partial"].strip()
                             if partial_text:  # Only process non-empty partials
-                                logger.debug("Vosk partial transcription", partial=partial_text)
+                                logger.info("🔄 Vosk partial transcription", partial=partial_text)
                                 await self.push_frame(
                                     InterimTranscriptionFrame(
                                         text=partial_text, 
@@ -135,15 +166,25 @@ class VoskWebsocketSTTService(STTService):
                                         timestamp=""
                                     )
                                 )
+                            else:
+                                logger.debug("🔍 Vosk sent empty partial text")
                         
                         # Handle configuration acknowledgment
                         elif "status" in data:
-                            logger.info("Vosk configuration status", status=data)
+                            logger.info("⚙️ Vosk configuration status", status=data)
+                        
+                        # Handle any other response types for debugging    
+                        else:
+                            logger.info("🤔 Unknown Vosk response format", 
+                                       data=data,
+                                       available_keys=list(data.keys()))
                             
                     except json.JSONDecodeError as e:
-                        logger.error("Invalid JSON from Vosk", error=str(e), message=message[:100])
+                        logger.error("❌ Invalid JSON from Vosk", 
+                                   error=str(e), 
+                                   raw_message=message[:100])
                     except Exception as e:
-                        logger.error("Error processing Vosk message", error=str(e))
+                        logger.error("❌ Error processing Vosk message", error=str(e))
                         await self.push_frame(ErrorFrame(error=f"Vosk processing error: {e}"))
 
         except websockets.exceptions.ConnectionClosed:
@@ -184,13 +225,15 @@ class VoskWebsocketSTTService(STTService):
             samples_16bit = len(audio) // 2  # 16-bit PCM = 2 bytes per sample
             duration_ms = (samples_16bit / self._sample_rate) * 1000
             
+            # 🔧 SIMPLE DEBUG: Log audio data without manual silence detection
+            # VAD should handle silence detection, not STT service
             logger.debug("Sending audio to Vosk",
                         audio_bytes=len(audio),
-                        samples_16bit=samples_16bit,
                         duration_ms=f"{duration_ms:.1f}",
-                        expected_sample_rate=self._sample_rate)
-            
-            # Send audio data to Vosk WebSocket
+                        expected_sample_rate=self._sample_rate,
+                        samples_16bit=samples_16bit)
+                
+            # Send audio to Vosk WebSocket
             await self._websocket.send(audio)
             
         except Exception as e:
