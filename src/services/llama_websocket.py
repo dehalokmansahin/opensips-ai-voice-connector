@@ -11,11 +11,12 @@ import structlog
 
 from pipecat.frames.frames import (
     Frame, TextFrame, EndFrame, ErrorFrame, StartFrame,
-    LLMFullResponseStartFrame, LLMFullResponseEndFrame, LLMTextFrame
+    LLMFullResponseStartFrame, LLMFullResponseEndFrame, LLMTextFrame,
+    LLMMessagesFrame
 )
 from pipecat.services.llm_service import LLMService
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext, OpenAILLMContextFrame
 from pipecat.processors.aggregators.llm_response import (
     LLMUserContextAggregator,
     LLMAssistantContextAggregator,
@@ -89,39 +90,51 @@ class LlamaWebsocketLLMService(LLMService):
         await self._stop_websocket_connection()
         await super().cancel(frame)
 
-    async def run_llm(self, context: OpenAILLMContext) -> AsyncGenerator[Frame, None]:
-        """
-        Main LLM method - sends OpenAI ChatCompletion format directly to server
-        Server supports both OpenAI and legacy formats, so we use the standard
-        """
-        if not self._websocket or not self._is_connected:
-            logger.warning("No active Llama WebSocket connection for LLM processing")
+    async def _send_request(self, context: OpenAILLMContext):
+        """Send LLM request to the websocket using OpenAI chat format"""
+        messages = context.messages
+
+        request = {
+            "messages": messages,
+            "temperature": self._temperature,
+            "max_tokens": self._max_tokens,
+            "stream": True,
+            "use_rag": self._use_rag,
+        }
+
+        logger.info("📤 Sending LLM request", message_count=len(messages), url=self._url)
+        await self._websocket.send(json.dumps(request))
+        logger.debug("✅ LLM request sent", bytes=len(json.dumps(request)))
+
+    async def _process_context(self, context: OpenAILLMContext):
+        """High-level entry – mirrors OpenAI service behaviour."""
+        # Currently we don't gather token usage; just send the request.
+        await self._send_request(context)
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        """Handle incoming frames and trigger LLM requests when a context arrives."""
+        await super().process_frame(frame, direction)
+
+        context: Optional[OpenAILLMContext] = None
+        if isinstance(frame, OpenAILLMContextFrame):
+            context = frame.context
+        elif isinstance(frame, LLMMessagesFrame):
+            context = OpenAILLMContext.from_messages(frame.messages)
+        else:
+            # Forward any other frame unchanged
+            await self.push_frame(frame, direction)
             return
 
-        try:
-            messages = context.messages
-
-            # Build OpenAI ChatCompletion format request
-            request = {
-                "messages": messages,  # Send OpenAI format directly
-                "temperature": self._temperature,
-                "max_tokens": self._max_tokens,
-                "stream": True,
-                "use_rag": self._use_rag,
-            }
-
-            # Signal start of response
-            yield LLMFullResponseStartFrame()
-            
-            await self._websocket.send(json.dumps(request))
-            
-            logger.debug("Sent OpenAI format context to Llama LLM", 
-                        message_count=len(messages),
-                        format="openai_chatcompletion")
-            
-        except Exception as e:
-            logger.error("Error sending OpenAI context to Llama", error=str(e))
-            yield ErrorFrame(error=f"Llama request error: {e}")
+        if context:
+            # Start of full response
+            await self.push_frame(LLMFullResponseStartFrame())
+            logger.debug("🚀 Triggering LLM processing for context", messages=len(context.messages))
+            try:
+                await self._process_context(context)
+                # EndFrame will be emitted by listener upon 'done'.
+            except Exception as e:
+                logger.error("❌ LLM processing error", error=str(e))
+                await self.push_frame(ErrorFrame(error=f"LLM processing error: {e}"))
 
     async def _start_websocket_connection(self):
         """Start WebSocket connection following document pattern"""
@@ -132,55 +145,80 @@ class LlamaWebsocketLLMService(LLMService):
     async def _websocket_listener(self):
         """WebSocket listener for OpenAI compatible responses"""
         try:
+            logger.info("🔌 Attempting to connect to Llama WebSocket", url=self._url)
             async with websockets.connect(self._url) as websocket:
                 self._websocket = websocket
                 self._is_connected = True
                 
-                logger.info("Llama WebSocket connected", url=self._url, format="openai_compatible")
+                logger.info("✅ Llama WebSocket connected successfully", 
+                           url=self._url, 
+                           format="openai_compatible")
 
                 # Listen for LLM responses
                 async for message in self._websocket:
                     if not self._is_connected:
+                        logger.info("🔌 WebSocket listener stopping (disconnected)")
                         break
+                    
+                    logger.debug("📨 Received message from Llama server", 
+                               message_preview=message[:100] if len(message) > 100 else message)
                         
                     try:
                         data = json.loads(message)
+                        logger.debug("📥 Parsed JSON response", data_keys=list(data.keys()))
                         
                         # Handle RAG context info (optional)
                         if "rag_context" in data:
-                            logger.debug("Received RAG context info", 
+                            logger.info("📖 Received RAG context info", 
                                        context_length=data.get("context_length", 0))
                             continue
                         
                         # Handle streaming response tokens
                         if "chunk" in data:
                             token = data["chunk"]
+                            logger.debug("💬 Received LLM chunk", token=token[:50])
                             
                             # Emit streaming token frame
                             await self.push_frame(LLMTextFrame(token))
                         
                         # Handle completion
                         elif data.get("done", False):
+                            logger.info("✅ LLM response completed")
                             await self.push_frame(LLMFullResponseEndFrame())
                         
                         # Handle errors from server
                         elif "error" in data:
                             error_msg = data["error"]
-                            logger.error("Server error", error=error_msg)
+                            logger.error("❌ Server returned error", error=error_msg)
                             await self.push_frame(ErrorFrame(error=f"Server error: {error_msg}"))
+                        
+                        else:
+                            logger.warning("❓ Unknown message format from server", data=data)
                             
                     except json.JSONDecodeError as e:
-                        logger.error("Invalid JSON from Llama", error=str(e))
+                        logger.error("❌ Invalid JSON from Llama server", 
+                                   error=str(e), 
+                                   raw_message=message[:200])
                     except Exception as e:
-                        logger.error("Error processing Llama message", error=str(e))
+                        logger.error("❌ Error processing Llama message", 
+                                   error=str(e),
+                                   error_type=type(e).__name__)
                         await self.push_frame(ErrorFrame(error=f"Llama processing error: {e}"))
 
         except websockets.exceptions.ConnectionClosed:
-            logger.info("Llama WebSocket connection closed")
+            logger.warning("🔌 Llama WebSocket connection closed")
+        except websockets.exceptions.InvalidURI:
+            logger.error("❌ Invalid WebSocket URI", url=self._url)
+        except websockets.exceptions.InvalidHandshake:
+            logger.error("❌ WebSocket handshake failed", url=self._url)
         except Exception as e:
-            logger.error("Llama WebSocket connection failed", error=str(e))
+            logger.error("❌ Llama WebSocket connection failed", 
+                        error=str(e),
+                        error_type=type(e).__name__,
+                        url=self._url)
             await self.push_frame(ErrorFrame(error=f"Llama connection failed: {e}"))
         finally:
+            logger.info("🔌 WebSocket listener cleanup")
             self._websocket = None
             self._is_connected = False
 

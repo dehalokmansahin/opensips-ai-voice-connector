@@ -52,6 +52,7 @@ from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.frames.frames import TextFrame
+from pipecat.processors.aggregators.sentence import SentenceAggregator
 
 # Import our services
 from services.vosk_websocket import VoskWebsocketSTTService
@@ -190,13 +191,14 @@ async def run_opensips_bot(
         
         # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Create pipeline like examples
         pipeline = Pipeline([
-            transport.input(),              # OpenSIPS input (like websocket input in examples)
-            stt,                           # Speech-To-Text (Vosk)
-            context_aggregator.user(),     # User context
-            llm,                           # LLM (Llama)
-            tts,                           # Text-To-Speech (Piper)
-            transport.output(),            # OpenSIPS output (like websocket output in examples)  
-            context_aggregator.assistant() # Assistant context
+            transport.input(),              # OpenSIPS input
+            stt,                            # Speech-To-Text (Vosk)
+            context_aggregator.user(),      # User context
+            llm,                            # LLM (Llama) – streams tokens
+            SentenceAggregator(),           # 👉 NEW: buffer until end-of-sentence
+            tts,                            # Text-To-Speech (Piper) – receives full sentence
+            transport.output(),             # RTP output to OpenSIPS
+            context_aggregator.assistant()  # Assistant context
         ])
         
         # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Create pipeline task like examples
