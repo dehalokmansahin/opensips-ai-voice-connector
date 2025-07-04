@@ -5,6 +5,7 @@ WORKDIR /app
 
 # Install system dependencies - Enhanced for dynamic config processing
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
     tcpdump \
     libopus-dev \
     libsndfile1 \
@@ -33,9 +34,7 @@ RUN cd /app/pipecat && pip install -e .
 # Copy source code and configuration - Enhanced with templates
 COPY src/ /app/src/
 COPY cfg/ /app/cfg/
-COPY pipecat/ /app/pipecat/
 COPY scripts/ /app/scripts/
-COPY test_audio/ /app/test_audio/
 
 # Create log directories
 RUN mkdir -p /app/logs /app/logs/opensips /app/logs/event-monitor

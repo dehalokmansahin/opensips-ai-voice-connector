@@ -51,7 +51,7 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
-from pipecat.frames.frames import TextFrame
+from pipecat.frames.frames import TextFrame, TTSAudioRawFrame, TTSStoppedFrame, OutputAudioRawFrame
 
 # Import our services
 from services.vosk_websocket import VoskWebsocketSTTService
@@ -94,10 +94,10 @@ async def run_opensips_bot(
                    client_port=client_port,
                    pattern="twilio_telnyx_compliant")
         
-        # 🔧 CRITICAL FIX: Sample rate consistency - RTP is 8kHz but pipeline needs conversion
-        # OpenSIPS/RTP uses 8kHz but Pipecat pipeline processes at 16kHz internally
-        rtp_sample_rate = 8000      # RTP audio from OpenSIPS
-        pipeline_sample_rate = 16000  # Internal pipeline processing rate
+        # 🔧 CRITICAL FIX: Standardize on 16kHz throughout pipeline for consistency
+        # RTP conversion happens in serializer layer (8kHz ↔ 16kHz)
+        pipeline_sample_rate = 16000  # Universal pipeline rate
+        rtp_sample_rate = 8000       # RTP output rate (handled by serializer)
         
         # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Create VAD analyzer like examples
         # But optimized for Turkish speech and configured for 8kHz RTP input
@@ -178,7 +178,7 @@ async def run_opensips_bot(
         tts = PiperWebsocketTTSService(
             url=tts_config.get('url', 'ws://piper-tts-server:8000/tts'),
             voice=tts_config.get('voice', 'tr_TR-dfki-medium'),
-            sample_rate=int(tts_config.get('sample_rate', '22050')),
+            sample_rate=int(tts_config.get('sample_rate', '22050')),  # Piper's native rate; we will resample downstream
             aggregate_sentences=False  # Sentence aggregation handled upstream
         )
         
@@ -193,6 +193,58 @@ async def run_opensips_bot(
         context = OpenAILLMContext(messages)
         context_aggregator = llm.create_context_aggregator(context)
         
+        # 🔧 CRITICAL FIX: Add frame processor to prevent TTS blocking
+        # Import frame processor for explicit flush
+        from pipecat.processors.frame_processor import FrameProcessor
+        
+        class TTSFlushProcessor(FrameProcessor):
+            """Ensure TTS frames are properly flushed to transport without blocking"""
+            
+            async def process_frame(self, frame, direction):
+                # Let FrameProcessor handle Start/End/System frames but
+                # we will take over TTSAudioRawFrame processing to avoid double push
+                if not isinstance(frame, TTSAudioRawFrame):
+                    await super().process_frame(frame, direction)
+
+                # Handle TTS audio frames
+                if isinstance(frame, TTSAudioRawFrame):
+                    # Resample Piper 22.05kHz (or configured) down to 16kHz before transport
+                    from pipecat.audio.utils import create_default_resampler
+                    resampler = create_default_resampler()
+                    try:
+                        resampled_audio = await resampler.resample(
+                            frame.audio,
+                            frame.sample_rate,
+                            pipeline_sample_rate
+                        )
+                        converted = OutputAudioRawFrame(
+                            audio=resampled_audio,
+                            num_channels=frame.num_channels,
+                            sample_rate=pipeline_sample_rate
+                        )
+                    except Exception as e:
+                        logger.error("Resampling error in TTSFlushProcessor", error=str(e))
+                        converted = OutputAudioRawFrame(
+                            audio=frame.audio,
+                            num_channels=frame.num_channels,
+                            sample_rate=frame.sample_rate
+                        )
+
+                    frame_to_send = converted
+                else:
+                    frame_to_send = frame
+                
+                # Log
+                if isinstance(frame_to_send, OutputAudioRawFrame):
+                    logger.info("🎵 TTS audio frame flowing to transport", 
+                                frame_size=len(frame_to_send.audio),
+                                sample_rate=frame_to_send.sample_rate,
+                                call_id=call_id)
+                elif isinstance(frame, TTSStoppedFrame):
+                    logger.info("🏁 TTS generation completed, flushing to transport", call_id=call_id)
+                
+                await self.push_frame(frame_to_send, direction)
+        
         # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Create pipeline like examples
         pipeline = Pipeline([
             transport.input(),              # OpenSIPS input
@@ -201,20 +253,21 @@ async def run_opensips_bot(
             llm,                            # LLM (Llama) – streams tokens
             SentenceFlushAggregator(),      # Buffer until sentence or LLM end
             tts,                            # Text-To-Speech (Piper) – receives sentence text
+            TTSFlushProcessor(),            # 🔥 CRITICAL FIX: Ensure TTS frames reach transport
             transport.output(),             # RTP output to OpenSIPS
             context_aggregator.assistant()  # Assistant context
         ])
         
         # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Create pipeline task like examples
-        # 🔧 CRITICAL FIX: Sample rate configuration for RTP/OpenSIPS
+        # 🔧 CRITICAL FIX: Standardize sample rates for smooth audio flow
         task = PipelineTask(
             pipeline,
             params=PipelineParams(
-                # 🔧 RTP comes in at 8kHz, but pipeline processes at 16kHz
-                audio_in_sample_rate=pipeline_sample_rate,     # 🔥 16 kHz
-                audio_out_sample_rate=rtp_sample_rate,    # 8kHz RTP output 
-                enable_metrics=False,                     # Disable metrics initially
-                enable_usage_metrics=False,               # Disable usage metrics initially
+                # 🔥 CRITICAL: Both input and output at 16kHz (serializer handles RTP conversion)
+                audio_in_sample_rate=pipeline_sample_rate,   # 16kHz input (after serializer conversion)
+                audio_out_sample_rate=pipeline_sample_rate,  # 16kHz output (before serializer conversion)  
+                enable_metrics=False,                        # Disable metrics initially
+                enable_usage_metrics=False,                  # Disable usage metrics initially
                 allow_interruptions=True
             )
         )

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # ==============================================================================
 # OpenSIPS AI Voice Connector - Telnyx-Style Startup Script
 # ==============================================================================
@@ -38,7 +38,7 @@ echo "   - Log Level: ${LOG_LEVEL:-INFO}"
 echo "   - Debug Mode: ${DEBUG_MODE:-false}"
 
 # AI Services
-echo "   - VOSK URL: ${VOSK_WEBSOCKET_URL:-ws://vosk-server:8765}"
+echo "   - VOSK URL: ${VOSK_WEBSOCKET_URL:-ws://vosk-server:2700}"
 echo "   - LLM URL: ${LLAMA_WEBSOCKET_URL:-ws://llm-turkish-server:8765}"
 echo "   - TTS URL: ${PIPER_WEBSOCKET_URL:-ws://piper-tts-server:8000/tts}"
 
@@ -73,10 +73,10 @@ elif [ "$1" = "oavc" ] || [ -z "$1" ]; then
     echo "🤖 Checking AI service connectivity..."
 
     # Check STT service
-    if python -c "import asyncio, websockets; asyncio.run(websockets.connect('${VOSK_WEBSOCKET_URL:-ws://vosk-server:8765}'))" 2>/dev/null; then
-        echo "✅ STT Service (VOSK) reachable at ${VOSK_WEBSOCKET_URL:-ws://vosk-server:8765}"
+    if python -c "import asyncio, websockets; asyncio.run(websockets.connect('${VOSK_WEBSOCKET_URL:-ws://vosk-server:2700}'))" 2>/dev/null; then
+        echo "✅ STT Service (VOSK) reachable at ${VOSK_WEBSOCKET_URL:-ws://vosk-server:2700}"
     else
-        echo "⚠️  STT Service (VOSK) not reachable at ${VOSK_WEBSOCKET_URL:-ws://vosk-server:8765}"
+        echo "⚠️  STT Service (VOSK) not reachable at ${VOSK_WEBSOCKET_URL:-ws://vosk-server:2700}"
     fi
 
     # Check LLM service  

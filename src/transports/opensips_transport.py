@@ -377,7 +377,7 @@ class OpenSIPSOutputTransport(BaseOutputTransport):
                         }
                         packet_bytes = generate_rtp_packet(packet_vars)
                         await loop.sock_sendto(self._socket, packet_bytes, (client_ip, client_port))
-                        logger.debug("RTP packet sent", size=len(packet_bytes), to_addr=f"{client_ip}:{client_port}")
+                        logger.info("📡 RTP packet sent", size=len(packet_bytes), to_addr=f"{client_ip}:{client_port}", call_id=self._params.call_id)
                         # Update sequence and timestamp
                         self._sequence_number = (self._sequence_number + 1) & 0xFFFF
                         self._timestamp = (self._timestamp + chunk_size) & 0xFFFFFFFF
