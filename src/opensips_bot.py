@@ -1,76 +1,60 @@
 #!/usr/bin/env python3
 """
-OpenSIPS Bot - Following Twilio/Telnyx Pattern with VAD Observer
-Simplified bot implementation with inline pipeline setup and VAD monitoring
+OpenSIPS Bot - Clean modular implementation
+Uses unified configuration and modular pipeline builder
 """
 
-import os
 import sys
 import asyncio
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import structlog
 
-# Configure global logging once – reduce verbosity to INFO
+# Configure logging
 from loguru import logger as _root_logger
 
-_root_logger.remove()  # Remove default sink
+_root_logger.remove()
 
-# Helper filter to detect Pipecat files by path fragment
 def _is_pipecat(record):
     try:
         return "/pipecat/" in record["file"].path.replace("\\", "/")
     except Exception:
         return False
 
-# 1) Pipecat-only sink at DEBUG
-_root_logger.add(
-    sys.stderr,
-    level="DEBUG",
-    filter=_is_pipecat,
-)
+_root_logger.add(sys.stderr, level="DEBUG", filter=_is_pipecat)
+_root_logger.add(sys.stderr, level="DEBUG", filter=lambda record: not _is_pipecat(record))
 
-# 2) Everything-else sink at INFO (excluding Pipecat to avoid duplicates)
-_root_logger.add(
-    sys.stderr,
-    level="DEBUG",
-    filter=lambda record: not _is_pipecat(record),
-)
-
-# Std-lib logging + structlog bridge at INFO for non-Pipecat modules
 import logging
-
 logging.basicConfig(level=logging.INFO, force=True)
 
 import structlog
-
 structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
 
-from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.pipeline.pipeline import Pipeline
+# Core imports
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
-from pipecat.frames.frames import TextFrame, TTSAudioRawFrame, TTSStoppedFrame, OutputAudioRawFrame
-
-# Import our services
-from services.vosk_websocket import VoskWebsocketSTTService
-from services.llama_websocket import LlamaWebsocketLLMService  
-from services.piper_websocket import PiperWebsocketTTSService
-
-# Import our transport
-from transports.opensips_transport import create_opensips_transport
-
-# Pipecat observers for higher-level insights (no low-level RTP spam)
-from pipecat.observers.loggers import (
-    LLMLogObserver,
-    TranscriptionLogObserver,
-    UserBotLatencyLogObserver,
-    TTSLogObserver,          # ← new
+from pipecat.observers.loggers.llm_log_observer import LLMLogObserver
+from pipecat.observers.loggers.transcription_log_observer import TranscriptionLogObserver
+from pipecat.observers.loggers.user_bot_latency_log_observer import UserBotLatencyLogObserver
+from pipecat.observers.loggers.debug_log_observer import DebugLogObserver
+from pipecat.frames.frames import (
+    TTSAudioRawFrame,
+    TTSStartedFrame,
+    TTSStoppedFrame,
+    TTSTextFrame,
+    BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
+    UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame,
 )
 
-# Custom aggregator to flush on LLM end
-from pipeline.aggregators.sentence_flush import SentenceFlushAggregator
+# Our modular components
+from bot.config_manager import get_config, ConfigManager
+from bot.transport_factory import create_transport
+from bot.pipeline_builder import build_pipeline
+from services.vosk_websocket import VoskWebsocketSTTService
+from services.llama_websocket import LlamaWebsocketLLMService
+from services.piper_websocket import PiperWebsocketTTSService
 
 logger = structlog.get_logger()
 
@@ -79,110 +63,73 @@ async def run_opensips_bot(
     call_id: str,
     client_ip: str,
     client_port: int,
-    bind_ip: str = "0.0.0.0", 
+    bind_ip: str = "0.0.0.0",
     bind_port: int = 0,
-    config: Dict[str, Any] = None
+    config: Optional[Dict[str, Any]] = None,
+    config_file: Optional[str] = None
 ):
     """
-    Run OpenSIPS bot following Twilio/Telnyx pattern with VAD Observer
-    Single function handles everything - simple and clean
+    Run OpenSIPS bot with unified configuration system
     """
     try:
-        logger.info("Starting OpenSIPS bot with VAD observer", 
+        logger.info("Starting OpenSIPS bot", 
                    call_id=call_id,
                    client_ip=client_ip,
-                   client_port=client_port,
-                   pattern="twilio_telnyx_compliant")
+                   client_port=client_port)
         
-        # 🔧 CRITICAL FIX: Standardize on 16kHz throughout pipeline for consistency
-        # RTP conversion happens in serializer layer (8kHz ↔ 16kHz)
-        pipeline_sample_rate = 16000  # Universal pipeline rate
-        rtp_sample_rate = 8000       # RTP output rate (handled by serializer)
-        
-        # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Create VAD analyzer like examples
-        # But optimized for Turkish speech and configured for 8kHz RTP input
-        vad_config = config.get('vad', {}) if config else {}
-        
-        # 🔧 TEST: Use more sensitive VAD params for better Turkish speech detection
-        # Default Twilio params might be too conservative
-        from pipecat.audio.vad.vad_analyzer import VADParams
-        
-        vad_analyzer = SileroVADAnalyzer(
-            params=VADParams(
-                confidence=0.15,    # Very sensitive
-                start_secs=0.1,     # 100ms
-                stop_secs=0.25,
-                min_volume=0.0      # Disable volume gating
-            )
-        )
-        logger.info("🔧 VAD created with optimized params for Turkish speech",
-                   confidence=0.15, start_secs=0.1, stop_secs=0.25, min_volume=0.0)
-        
-        # 🔧 DEBUG: VAD Configuration Applied
-        logger.info("🎤 VAD Configuration Applied", 
-                   confidence_threshold=vad_analyzer.params.confidence,
-                   start_delay_secs=vad_analyzer.params.start_secs,
-                   stop_delay_secs=vad_analyzer.params.stop_secs,
-                   min_volume_threshold=vad_analyzer.params.min_volume,
-                   vad_sample_rate=rtp_sample_rate,
-                   pipeline_sample_rate=pipeline_sample_rate,
-                   note="VAD processes 8kHz RTP, pipeline upsamples to 16kHz")
-        
-        # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Create transport like examples
-        # Create transport with serializer and VAD analyzer in params
-        transport = create_opensips_transport(
-            bind_ip=bind_ip,
-            bind_port=bind_port,
-            call_id=call_id,
-            vad_analyzer=vad_analyzer  # VAD analyzer passed to transport params
-        )
-        
-        # 🔧 DEBUG: Verify VAD analyzer is properly configured (following examples)
-        if hasattr(transport._params, 'vad_analyzer') and transport._params.vad_analyzer:
-            logger.info("✅ VAD analyzer properly configured in transport", 
-                       call_id=call_id,
-                       vad_class=type(transport._params.vad_analyzer).__name__,
-                       vad_sample_rate=getattr(transport._params.vad_analyzer, 'sample_rate', 'not_set'),
-                       confidence=transport._params.vad_analyzer.params.confidence,
-                       vad_observer_enabled=True,
-                       note="Following Twilio/Telnyx pattern with VAD observer - VAD should work!")
+        # Load unified configuration
+        if config_file:
+            # Use specific config file
+            config_manager = ConfigManager(config_file)
+            unified_config = config_manager.load()
         else:
-            logger.error("❌ VAD analyzer NOT configured in transport!", 
-                        call_id=call_id,
-                        note="Pattern not followed correctly - VAD will not work")
+            # Use default config with optional overrides
+            unified_config = get_config()
         
-        # Update transport with client RTP info
+        # Override network settings from parameters
+        unified_config.network.bind_ip = bind_ip
+        unified_config.network.bind_port = bind_port
+        
+        # Override service URLs from legacy config if provided
+        if config:
+            if "stt" in config and "url" in config["stt"]:
+                unified_config.stt.url = config["stt"]["url"]
+            if "llm" in config and "url" in config["llm"]:
+                unified_config.llm.url = config["llm"]["url"]
+            if "tts" in config and "url" in config["tts"]:
+                unified_config.tts.url = config["tts"]["url"]
+        
+        logger.info("Configuration loaded", 
+                   stt_url=unified_config.stt.url,
+                   llm_url=unified_config.llm.url,
+                   tts_url=unified_config.tts.url,
+                   vad_confidence=unified_config.voice.vad_confidence)
+        
+        # Create transport
+        transport = create_transport(unified_config, call_id)
         transport.update_client_info(client_ip, client_port)
         
-        # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Create AI services like examples
-        stt_config = config.get('stt', {}) if config else {}
+        # Create AI services with unified config
         stt = VoskWebsocketSTTService(
-            url=stt_config.get('url', 'ws://vosk-server:2700'),
-            sample_rate=pipeline_sample_rate  # 🔧 CRITICAL FIX: Always 16kHz for STT (not from config)
+            url=unified_config.stt.url,
+            sample_rate=unified_config.voice.sample_rate
         )
         
-        logger.info("🎤 STT Service Configuration", 
-                   url=stt_config.get('url', 'ws://vosk-server:2700'),
-                   sample_rate=pipeline_sample_rate,
-                   note="Vosk STT always uses 16kHz regardless of RTP input rate")
-        
-        llm_config = config.get('llm', {}) if config else {}
         llm = LlamaWebsocketLLMService(
-            url=llm_config.get('url', 'ws://llm-turkish-server:8765'),
-            model=llm_config.get('model', 'llama3.2:3b-instruct-turkish'),
-            temperature=float(llm_config.get('temperature', '0.2')),
-            max_tokens=int(llm_config.get('max_tokens', '80'))
+            url=unified_config.llm.url,
+            model=unified_config.llm.model or "llama3.2:3b-instruct-turkish",
+            temperature=unified_config.llm.temperature or 0.2,
+            max_tokens=unified_config.llm.max_tokens or 80
         )
         
-        tts_config = config.get('tts', {}) if config else {}
         tts = PiperWebsocketTTSService(
-            url=tts_config.get('url', 'ws://piper-tts-server:8000/tts'),
-            voice=tts_config.get('voice', 'tr_TR-dfki-medium'),
-            sample_rate=int(tts_config.get('sample_rate', '22050')),  # Piper's native rate; we will resample downstream
-            aggregate_sentences=False  # Sentence aggregation handled upstream
+            url=unified_config.tts.url,
+            voice=unified_config.tts.voice or "tr_TR-dfki-medium",
+            sample_rate=unified_config.tts.sample_rate or 22050,
+            aggregate_sentences=False
         )
         
-        # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Create conversation context like examples
+        # Create context
         messages = [
             {
                 "role": "system",
@@ -193,136 +140,75 @@ async def run_opensips_bot(
         context = OpenAILLMContext(messages)
         context_aggregator = llm.create_context_aggregator(context)
         
-        # 🔧 CRITICAL FIX: Add frame processor to prevent TTS blocking
-        # Import frame processor for explicit flush
-        from pipecat.processors.frame_processor import FrameProcessor
+        # Create observers
+        observers = [
+            LLMLogObserver(),
+            TranscriptionLogObserver(),
+            UserBotLatencyLogObserver(),
+            DebugLogObserver(
+                frame_types=(
+                    TTSAudioRawFrame,
+                    TTSStartedFrame,
+                    TTSStoppedFrame,
+                )
+            ),
+        ]
         
-        class TTSFlushProcessor(FrameProcessor):
-            """Ensure TTS frames are properly flushed to transport without blocking"""
-            
-            async def process_frame(self, frame, direction):
-                # Let FrameProcessor handle Start/End/System frames but
-                # we will take over TTSAudioRawFrame processing to avoid double push
-                if not isinstance(frame, TTSAudioRawFrame):
-                    await super().process_frame(frame, direction)
-
-                # Handle TTS audio frames
-                if isinstance(frame, TTSAudioRawFrame):
-                    # Resample Piper 22.05kHz (or configured) down to 16kHz before transport
-                    from pipecat.audio.utils import create_default_resampler
-                    resampler = create_default_resampler()
-                    try:
-                        resampled_audio = await resampler.resample(
-                            frame.audio,
-                            frame.sample_rate,
-                            pipeline_sample_rate
-                        )
-                        converted = OutputAudioRawFrame(
-                            audio=resampled_audio,
-                            num_channels=frame.num_channels,
-                            sample_rate=pipeline_sample_rate
-                        )
-                    except Exception as e:
-                        logger.error("Resampling error in TTSFlushProcessor", error=str(e))
-                        converted = OutputAudioRawFrame(
-                            audio=frame.audio,
-                            num_channels=frame.num_channels,
-                            sample_rate=frame.sample_rate
-                        )
-
-                    frame_to_send = converted
-                else:
-                    frame_to_send = frame
-                
-                # Log
-                if isinstance(frame_to_send, OutputAudioRawFrame):
-                    logger.info("🎵 TTS audio frame flowing to transport", 
-                                frame_size=len(frame_to_send.audio),
-                                sample_rate=frame_to_send.sample_rate,
-                                call_id=call_id)
-                elif isinstance(frame, TTSStoppedFrame):
-                    logger.info("🏁 TTS generation completed, flushing to transport", call_id=call_id)
-                
-                await self.push_frame(frame_to_send, direction)
-        
-        # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Create pipeline like examples
-        pipeline = Pipeline([
-            transport.input(),              # OpenSIPS input
-            stt,                            # Speech-To-Text (Vosk)
-            context_aggregator.user(),      # User context
-            llm,                            # LLM (Llama) – streams tokens
-            SentenceFlushAggregator(),      # Buffer until sentence or LLM end
-            tts,                            # Text-To-Speech (Piper) – receives sentence text
-            TTSFlushProcessor(),            # 🔥 CRITICAL FIX: Ensure TTS frames reach transport
-            transport.output(),             # RTP output to OpenSIPS
-            context_aggregator.assistant()  # Assistant context
-        ])
-        
-        # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Create pipeline task like examples
-        # 🔧 CRITICAL FIX: Standardize sample rates for smooth audio flow
-        task = PipelineTask(
-            pipeline,
-            params=PipelineParams(
-                # 🔥 CRITICAL: Both input and output at 16kHz (serializer handles RTP conversion)
-                audio_in_sample_rate=pipeline_sample_rate,   # 16kHz input (after serializer conversion)
-                audio_out_sample_rate=pipeline_sample_rate,  # 16kHz output (before serializer conversion)  
-                enable_metrics=False,                        # Disable metrics initially
-                enable_usage_metrics=False,                  # Disable usage metrics initially
-                allow_interruptions=True
-            )
+        # Build pipeline
+        pipeline = build_pipeline(
+            transport=transport,
+            stt=stt,
+            llm=llm,
+            tts=tts,
+            context_aggregator=context_aggregator
         )
         
-        # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Attach observers for concise logging
-        task.add_observer(TranscriptionLogObserver())
-        task.add_observer(LLMLogObserver())
-        task.add_observer(UserBotLatencyLogObserver())
-        task.add_observer(TTSLogObserver())
-        # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Event handlers like examples
+        # Event handlers
         @transport.event_handler("on_client_connected")
         async def on_client_connected(transport, client):
-            logger.info("Client connected with VAD observer", call_id=call_id)
-            # Give pipeline a moment to fully initialize before pushing frames
-            await asyncio.sleep(0.1)
-            
-            # Start conversation with a welcome message using proper frame
-            welcome_text = "Merhaba! Size nasıl yardımcı olabilirim?"
-            await task.queue_frames([TextFrame(welcome_text)])
+            logger.info("Client connected", call_id=call_id, client=client)
         
-        @transport.event_handler("on_client_disconnected") 
+        @transport.event_handler("on_client_disconnected")
         async def on_client_disconnected(transport, client):
-            logger.info("Client disconnected", call_id=call_id)
-            await task.cancel()
+            logger.info("Client disconnected", call_id=call_id, client=client)
         
-        # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Create and run pipeline like examples
-        runner = PipelineRunner(handle_sigint=False, force_gc=True)
+        # Run pipeline
+        task = PipelineTask(
+            pipeline, 
+            params=PipelineParams(
+                allow_interruptions=unified_config.voice.enable_interruption
+            ),
+            observers=observers
+        )
         
-        logger.info("Pipeline starting with VAD observer", 
-                   call_id=call_id, 
-                   pattern="twilio_telnyx_compliant",
-                   rtp_sample_rate=f"{rtp_sample_rate}Hz",
-                   pipeline_sample_rate=f"{pipeline_sample_rate}Hz",
-                   vad_observer_enabled=True)
+        runner = PipelineRunner()
         await runner.run(task)
         
+        logger.info("Bot session completed", call_id=call_id)
+        
     except Exception as e:
-        logger.error("Error in OpenSIPS bot", call_id=call_id, error=str(e))
+        logger.error("Bot session failed", call_id=call_id, error=str(e))
         raise
 
 
 def get_bot_sdp_info(
     call_id: str,
     bind_ip: str = "0.0.0.0",
-    bind_port: int = 0
+    bind_port: int = 0,
+    config_file: Optional[str] = None
 ) -> Dict[str, Any]:
-    """
-    Get SDP info for bot without starting it
-    Used for SIP 200 OK responses
-    """
-    # Create temporary transport to get SDP info
-    transport = create_opensips_transport(
-        bind_ip=bind_ip,
-        bind_port=bind_port,
-        call_id=call_id
-    )
+    """Get SDP info for bot transport using unified config."""
     
+    # Load unified configuration
+    if config_file:
+        config_manager = ConfigManager(config_file)
+        unified_config = config_manager.load()
+    else:
+        unified_config = get_config()
+    
+    # Override network settings
+    unified_config.network.bind_ip = bind_ip
+    unified_config.network.bind_port = bind_port
+    
+    transport = create_transport(unified_config, call_id)
     return transport.get_sdp_info() 

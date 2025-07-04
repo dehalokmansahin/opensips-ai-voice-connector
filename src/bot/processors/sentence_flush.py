@@ -6,7 +6,7 @@ is received. This allows sentence-by-sentence delivery to downstream TTS even
 when the LLM response does not terminate with punctuation.
 
 Usage:
-    from pipeline.aggregators.sentence_flush import SentenceFlushAggregator
+    from bot.processors.sentence_flush import SentenceFlushAggregator
     ... pipeline components ...
 """
 

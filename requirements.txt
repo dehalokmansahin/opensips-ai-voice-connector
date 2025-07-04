@@ -25,6 +25,7 @@ aiohttp==3.9.1
 # Configuration validation
 validators==0.34.0
 pydantic==2.10.4
+docstring_parser==0.16
 
 # Logging
 structlog==24.1.0

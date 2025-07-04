@@ -172,6 +172,13 @@ class VoskWebsocketSTTService(STTService):
                                    keys=list(data.keys()),
                                    data_structure=data)
                         
+                        # -- EARLY EXIT ----------------------------------
+                        # Vosk bazen boş `{"partial": ""}` paketleri gönderir. Bu
+                        # paketler eylem gerektirmez, log spam'ine yol açmaması
+                        # için sessizce atlıyoruz.
+                        if data.get("partial", "") == "" and set(data.keys()) == {"partial"}:
+                            continue
+
                         # Handle final transcription
                         if data.get("text"):
                             text = data["text"].strip()
@@ -208,10 +215,32 @@ class VoskWebsocketSTTService(STTService):
                         
                         # Handle any other response types for debugging    
                         else:
-                            #TODO: handle this
-                            logger.debug("🤔 Unknown Vosk response format", 
-                                       data=data,
-                                       available_keys=list(data.keys()))
+                            # Handle unknown response formats gracefully
+                            logger.warning("🤔 Unknown Vosk response format", 
+                                         data=data,
+                                         available_keys=list(data.keys()),
+                                         note="This may indicate a new Vosk response type or configuration issue")
+                            
+                            # Check for common alternative response patterns
+                            if "error" in data:
+                                error_msg = data.get("error", "Unknown error")
+                                logger.error("❌ Vosk reported error", error=error_msg)
+                                await self.push_frame(ErrorFrame(error=f"Vosk error: {error_msg}"))
+                            elif "result" in data:
+                                # Some Vosk versions might use "result" instead of "text"
+                                result_text = data.get("result", "").strip()
+                                if result_text:
+                                    logger.info("✅ Vosk alternative result format", text=result_text)
+                                    await self.push_frame(
+                                        TranscriptionFrame(
+                                            text=result_text, 
+                                            user_id="", 
+                                            timestamp=""
+                                        )
+                                    )
+                            else:
+                                # Log for debugging but don't break the pipeline
+                                logger.debug("🔍 Vosk response ignored - no actionable content", data=data)
                             
                     except json.JSONDecodeError as e:
                         logger.error("❌ Invalid JSON from Vosk", 

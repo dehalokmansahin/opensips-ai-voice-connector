@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-OpenSIPS Transport - Following Twilio/Telnyx Pattern with VAD Observer
-Simplified implementation using serializer, event handlers and VAD observer
+OpenSIPS Transport - Clean RTP Transport with VAD Integration
+Handles RTP audio streaming with voice activity detection for OpenSIPS integration
 """
 
 import asyncio
@@ -23,17 +23,13 @@ from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADState
 from pipecat.processors.frame_processor import FrameDirection
 
-# Import our new serializer
 from serializers.opensips import OpenSIPSFrameSerializer
 
 logger = structlog.get_logger()
 
 
 class VADObserver:
-    """
-    VAD Observer - Following Twilio/Telnyx Pattern
-    Observes VAD events and logs state transitions for debugging
-    """
+    """VAD Event Observer for monitoring voice activity detection."""
     
     def __init__(self, call_id: str):
         self._call_id = call_id
@@ -42,40 +38,36 @@ class VADObserver:
         self._speech_frames_count = 0
         
     async def on_vad_event(self, frame: Frame) -> None:
-        """Handle VAD events - following Twilio/Telnyx logging pattern"""
+        """Handle VAD events with structured logging."""
         
         if isinstance(frame, VADUserStartedSpeakingFrame):
             self._vad_state = VADState.SPEAKING
             self._speech_start_time = asyncio.get_event_loop().time()
             self._speech_frames_count = 0
-            logger.info("🎤 VAD DETECTED: User started speaking",
+            logger.info("🎤 VAD: User started speaking",
                        call_id=self._call_id,
-                       state_transition="QUIET → SPEAKING",
-                       pattern="twilio_telnyx_compliant")
+                       state_transition="QUIET → SPEAKING")
                        
         elif isinstance(frame, VADUserStoppedSpeakingFrame):
             self._vad_state = VADState.QUIET
             if self._speech_start_time:
                 duration = asyncio.get_event_loop().time() - self._speech_start_time
-                logger.info("🔇 VAD DETECTED: User stopped speaking",
+                logger.info("🔇 VAD: User stopped speaking",
                            call_id=self._call_id,
                            state_transition="SPEAKING → QUIET",
                            speech_duration_secs=round(duration, 2),
-                           speech_frames_processed=self._speech_frames_count,
-                           pattern="twilio_telnyx_compliant")
+                           speech_frames_processed=self._speech_frames_count)
             self._speech_start_time = None
             
         elif isinstance(frame, UserStartedSpeakingFrame):
-            logger.info("👤 USER SPEECH EVENT: Started speaking",
+            logger.info("👤 User speech started",
                        call_id=self._call_id,
-                       vad_state=self._vad_state.value if hasattr(self._vad_state, 'value') else str(self._vad_state),
-                       pattern="twilio_telnyx_compliant")
+                       vad_state=self._vad_state.value if hasattr(self._vad_state, 'value') else str(self._vad_state))
                        
         elif isinstance(frame, UserStoppedSpeakingFrame):
-            logger.info("👤 USER SPEECH EVENT: Stopped speaking",
+            logger.info("👤 User speech stopped",
                        call_id=self._call_id,
-                       vad_state=self._vad_state.value if hasattr(self._vad_state, 'value') else str(self._vad_state),
-                       pattern="twilio_telnyx_compliant")
+                       vad_state=self._vad_state.value if hasattr(self._vad_state, 'value') else str(self._vad_state))
         
         # Track speech frames during speaking
         if self._vad_state == VADState.SPEAKING and isinstance(frame, InputAudioRawFrame):
@@ -83,7 +75,7 @@ class VADObserver:
 
 
 class OpenSIPSTransportParams(TransportParams):
-    """OpenSIPS Transport Parameters - Following Pydantic BaseModel pattern"""
+    """OpenSIPS Transport Parameters with RTP-specific settings."""
     
     # OpenSIPS specific fields
     bind_ip: str = "0.0.0.0"
@@ -91,23 +83,17 @@ class OpenSIPSTransportParams(TransportParams):
     call_id: Optional[str] = None
     serializer: Optional[OpenSIPSFrameSerializer] = None
     
-    # 🔧 TWILIO PATTERN: Add fields like FastAPIWebsocketParams
-    add_wav_header: bool = False  # Like Twilio example
-    
-    # 🔧 CRITICAL FIX: Inherit ALL base TransportParams fields including vad_analyzer
-    # Override only the specific audio settings we need for RTP
+    # Audio settings optimized for RTP
+    add_wav_header: bool = False
     audio_in_enabled: bool = True
     audio_out_enabled: bool = True
-    audio_in_sample_rate: int = 8000   # RTP is 8kHz input
-    audio_out_sample_rate: int = 8000  # RTP is 8kHz output
-    audio_in_passthrough: bool = True  # Must be True for audio to reach STT
-    
-    # 🔧 Note: vad_analyzer field is inherited from TransportParams
-    # This was the critical missing piece for VAD to work!
+    audio_in_sample_rate: int = 8000   # RTP input rate
+    audio_out_sample_rate: int = 8000  # RTP output rate
+    audio_in_passthrough: bool = True  # Required for audio processing
 
 
 class OpenSIPSInputTransport(BaseInputTransport):
-    """OpenSIPS Input Transport with UDP/RTP handling and VAD Observer"""
+    """OpenSIPS Input Transport with RTP handling and VAD integration."""
     
     def __init__(self, transport: "OpenSIPSTransport", params: OpenSIPSTransportParams):
         super().__init__(params)
@@ -115,88 +101,61 @@ class OpenSIPSInputTransport(BaseInputTransport):
         self._params = params
         self._receiver_task: Optional[asyncio.Task] = None
         self._socket: Optional[socket.socket] = None
-        
-        # 🔧 VAD Observer - Following Twilio/Telnyx Pattern
         self._vad_observer = VADObserver(params.call_id or "unknown_call")
     
     @property
     def vad_analyzer(self) -> Optional[SileroVADAnalyzer]:
-        """🔧 CRITICAL FIX: VAD analyzer property for BaseInputTransport compatibility"""
+        """VAD analyzer property for BaseInputTransport compatibility."""
         return self._params.vad_analyzer
     
     async def _vad_analyze(self, audio_frame: InputAudioRawFrame) -> VADState:
-        """🔧 OVERRIDE: Add debug logging to VAD analysis"""
+        """Analyze audio frame for voice activity with error handling."""
         from pipecat.audio.vad.vad_analyzer import VADState
         
         state = VADState.QUIET
         if self.vad_analyzer:
             try:
-                # 🔧 DEBUG: Log before VAD analysis
-                logger.debug("🔍 VAD Analysis Starting", 
+                logger.debug("🔍 VAD analysis", 
                            call_id=self._params.call_id,
                            audio_length=len(audio_frame.audio),
-                           sample_rate=audio_frame.sample_rate,
-                           vad_sample_rate=getattr(self.vad_analyzer, 'sample_rate', 'not_set'))
-                
-                # Debug audio data before VAD
-                import numpy as np
-                audio_array = np.frombuffer(audio_frame.audio, dtype=np.int16)
-                audio_rms = np.sqrt(np.mean(audio_array.astype(np.float32) ** 2))
-                audio_max = np.max(np.abs(audio_array))
-                audio_min = np.min(audio_array)
-                
-                logger.debug("�� Audio data for VAD", 
-                           call_id=self._params.call_id,
-                           samples=len(audio_array),
-                           rms=f"{audio_rms:.2f}",
-                           max_amplitude=audio_max,
-                           min_amplitude=audio_min,
-                           audio_hex=audio_frame.audio[:20].hex())
+                           sample_rate=audio_frame.sample_rate)
                 
                 state = await self.get_event_loop().run_in_executor(
                     self._executor, self.vad_analyzer.analyze_audio, audio_frame.audio
                 )
                 
-                
             except Exception as e:
-                logger.error("❌ VAD Analysis Failed", 
+                logger.error("❌ VAD analysis failed", 
                            call_id=self._params.call_id,
                            error=str(e))
-                           
         else:
             logger.warning("⚠️ No VAD analyzer available", call_id=self._params.call_id)
             
         return state
         
     async def start(self, frame: StartFrame):
-        """Start RTP receiver following Twilio/Telnyx pattern with VAD observer"""
+        """Start RTP receiver with VAD configuration."""
         
-        # 🔧 CRITICAL FIX: Call parent start FIRST (like Twilio/Telnyx examples)
-        # This ensures VAD analyzer is properly configured before we use it
+        # Initialize parent transport first
         await super().start(frame)
         
-        logger.info("🎤 VAD Configuration verified after start()",
+        logger.info("🎤 VAD configuration initialized",
                    call_id=self._params.call_id,
                    vad_available=self.vad_analyzer is not None,
-                   vad_sample_rate=getattr(self.vad_analyzer, 'sample_rate', 'not_set') if self.vad_analyzer else None,
-                   confidence=self.vad_analyzer.params.confidence if self.vad_analyzer else None,
-                   pattern="twilio_telnyx_compliant")
+                   confidence=self.vad_analyzer.params.confidence if self.vad_analyzer else None)
         
         if not self._receiver_task:
             self._receiver_task = asyncio.create_task(self._receive_rtp_packets())
             logger.debug("RTP receiver task started")
         
-        # 🔧 CRITICAL FIX: Initialize audio queue for push_audio_frame
+        # Initialize audio processing
         await self.set_transport_ready(frame)
-        logger.info("🎵 Audio task and queue initialized", 
+        logger.info("🎵 Audio processing initialized", 
                    call_id=self._params.call_id,
-                   audio_passthrough=self._params.audio_in_passthrough,
-                   audio_task_created=self._audio_task is not None,
-                   audio_queue_created=hasattr(self, '_audio_in_queue'))
+                   audio_passthrough=self._params.audio_in_passthrough)
         
-        # Trigger on_client_connected event
+        # Trigger connection event
         await self._transport._trigger_event("on_client_connected", self._transport, None)
-        
         await self.push_frame(frame)
     
     async def process_frame(self, frame: Frame, direction: FrameDirection):
@@ -341,54 +300,84 @@ class OpenSIPSOutputTransport(BaseOutputTransport):
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         logger.debug("RTP sender socket created")
         
+        # Packet pacing variables (20 ms per 160-byte PCMU chunk)
+        self._send_interval = 0.02  # seconds
+        self._next_send_time = 0.0
+        
         # Register default audio destination so frames with destination=None are accepted
         await self.set_transport_ready(frame)
         
         await self.push_frame(frame)
     
-    async def send_frame(self, frame: Frame):
-        """Send frame using serializer - following Twilio/Telnyx pattern"""
+    async def write_audio_frame(self, frame: OutputAudioRawFrame):
+        """Encode PCM (16 kHz) to μ-law (8 kHz) and send as 20 ms RTP packets.
+
+        This is the method expected by ``BaseOutputTransport.MediaSender``. It
+        replaces the previous (incorrect) ``send_frame`` override so that audio
+        actually reaches the subscriber over the network, mirroring Pipecat's
+        FastAPI/Twilio reference implementation.
+        """
         try:
-            if isinstance(frame, OutputAudioRawFrame) and self._params.serializer:
-                # Get raw μ-law payload (no header)
-                pcmu_data = await self._params.serializer.serialize(frame)
-                client_ip = self._params.serializer.media_ip
-                client_port = self._params.serializer.media_port
-                if pcmu_data and self._socket and client_ip and client_port:
-                    loop = asyncio.get_running_loop()
-                    # Chunk size: 20ms = 160 bytes at 8kHz μ-law
-                    chunk_size = 160
-                    for i in range(0, len(pcmu_data), chunk_size):
-                        chunk = pcmu_data[i : i + chunk_size]
-                        if len(chunk) < chunk_size:
-                            chunk = chunk + b"\xff" * (chunk_size - len(chunk))
-                        # Build RTP header + payload
-                        packet_vars = {
-                            'version': 2,
-                            'padding': 0,
-                            'extension': 0,
-                            'csi_count': 0,
-                            'marker': 0,
-                            'payload_type': 0,  # PCMU
-                            'sequence_number': self._sequence_number,
-                            'timestamp': self._timestamp,
-                            'ssrc': self._ssrc,
-                            'payload': chunk
-                        }
-                        packet_bytes = generate_rtp_packet(packet_vars)
-                        await loop.sock_sendto(self._socket, packet_bytes, (client_ip, client_port))
-                        logger.info("📡 RTP packet sent", size=len(packet_bytes), to_addr=f"{client_ip}:{client_port}", call_id=self._params.call_id)
-                        # Update sequence and timestamp
-                        self._sequence_number = (self._sequence_number + 1) & 0xFFFF
-                        self._timestamp = (self._timestamp + chunk_size) & 0xFFFFFFFF
-            
-            # Continue processing in pipeline
-            await super().send_frame(frame)
-            
-        except Exception as e:
+            if not self._params.serializer:
+                return
+
+            pcmu_data: bytes | None = await self._params.serializer.serialize(frame)
+            client_ip: str | None = self._params.serializer.media_ip
+            client_port: int | None = self._params.serializer.media_port
+
+            if not (pcmu_data and self._socket and client_ip and client_port):
+                # Destination not yet known or nothing to send.
+                return
+
+            loop = asyncio.get_running_loop()
+            chunk_size = 160  # 20 ms of 8 kHz PCMU
+
+            for i in range(0, len(pcmu_data), chunk_size):
+                chunk = pcmu_data[i : i + chunk_size]
+                if len(chunk) < chunk_size:
+                    chunk += b"\xff" * (chunk_size - len(chunk))
+
+                packet_vars = {
+                    "version": 2,
+                    "padding": 0,
+                    "extension": 0,
+                    "csi_count": 0,
+                    "marker": 1 if self._sequence_number == 0 else 0,  # Marker on first packet
+                    "payload_type": 0,  # PCMU
+                    "sequence_number": self._sequence_number,
+                    "timestamp": self._timestamp,
+                    "ssrc": self._ssrc,
+                    "payload": chunk,
+                }
+
+                packet_bytes = generate_rtp_packet(packet_vars)
+                await loop.sock_sendto(self._socket, packet_bytes, (client_ip, client_port))
+
+                logger.debug(
+                    "📡 RTP packet sent",
+                    size=len(packet_bytes),
+                    to_addr=f"{client_ip}:{client_port}",
+                    seq=self._sequence_number,
+                    call_id=self._params.call_id,
+                )
+
+                # Update RTP sequence and timestamp for next packet
+                self._sequence_number = (self._sequence_number + 1) & 0xFFFF
+                self._timestamp = (self._timestamp + chunk_size) & 0xFFFFFFFF
+
+                # Pace packets in real-time so the subscriber's jitter buffer isn't starved
+                current_time = asyncio.get_running_loop().time()
+                if self._next_send_time == 0:
+                    # First packet → send immediately, schedule next
+                    self._next_send_time = current_time + self._send_interval
+                else:
+                    sleep_for = self._next_send_time - current_time
+                    if sleep_for > 0:
+                        await asyncio.sleep(sleep_for)
+                    self._next_send_time += self._send_interval
+
+        except Exception as e:  # pragma: no cover – network errors are non-fatal
             logger.error("Error sending RTP packet", error=str(e))
-            # Continue processing even if send fails
-            await super().send_frame(frame)
 
 
 class OpenSIPSTransport(BaseTransport):
