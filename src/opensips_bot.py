@@ -32,6 +32,7 @@ structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.
 # Core imports
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.audio.interruptions.min_words_interruption_strategy import MinWordsInterruptionStrategy
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.observers.loggers.llm_log_observer import LLMLogObserver
 from pipecat.observers.loggers.transcription_log_observer import TranscriptionLogObserver
@@ -126,7 +127,7 @@ async def run_opensips_bot(
             url=unified_config.tts.url,
             voice=unified_config.tts.voice or "tr_TR-dfki-medium",
             sample_rate=unified_config.tts.sample_rate or 22050,
-            aggregate_sentences=False
+            aggregate_sentences=True  # Tam cümle bekler
         )
         
         # Create context
@@ -176,7 +177,8 @@ async def run_opensips_bot(
         task = PipelineTask(
             pipeline, 
             params=PipelineParams(
-                allow_interruptions=unified_config.voice.enable_interruption
+                allow_interruptions=unified_config.voice.enable_interruption,
+                interruption_strategies=[MinWordsInterruptionStrategy(min_words=2)],
             ),
             observers=observers
         )

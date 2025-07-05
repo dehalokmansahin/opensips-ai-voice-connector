@@ -28,52 +28,6 @@ from serializers.opensips import OpenSIPSFrameSerializer
 logger = structlog.get_logger()
 
 
-class VADObserver:
-    """VAD Event Observer for monitoring voice activity detection."""
-    
-    def __init__(self, call_id: str):
-        self._call_id = call_id
-        self._vad_state = VADState.QUIET
-        self._speech_start_time = None
-        self._speech_frames_count = 0
-        
-    async def on_vad_event(self, frame: Frame) -> None:
-        """Handle VAD events with structured logging."""
-        
-        if isinstance(frame, VADUserStartedSpeakingFrame):
-            self._vad_state = VADState.SPEAKING
-            self._speech_start_time = asyncio.get_event_loop().time()
-            self._speech_frames_count = 0
-            logger.info("🎤 VAD: User started speaking",
-                       call_id=self._call_id,
-                       state_transition="QUIET → SPEAKING")
-                       
-        elif isinstance(frame, VADUserStoppedSpeakingFrame):
-            self._vad_state = VADState.QUIET
-            if self._speech_start_time:
-                duration = asyncio.get_event_loop().time() - self._speech_start_time
-                logger.info("🔇 VAD: User stopped speaking",
-                           call_id=self._call_id,
-                           state_transition="SPEAKING → QUIET",
-                           speech_duration_secs=round(duration, 2),
-                           speech_frames_processed=self._speech_frames_count)
-            self._speech_start_time = None
-            
-        elif isinstance(frame, UserStartedSpeakingFrame):
-            logger.info("👤 User speech started",
-                       call_id=self._call_id,
-                       vad_state=self._vad_state.value if hasattr(self._vad_state, 'value') else str(self._vad_state))
-                       
-        elif isinstance(frame, UserStoppedSpeakingFrame):
-            logger.info("👤 User speech stopped",
-                       call_id=self._call_id,
-                       vad_state=self._vad_state.value if hasattr(self._vad_state, 'value') else str(self._vad_state))
-        
-        # Track speech frames during speaking
-        if self._vad_state == VADState.SPEAKING and isinstance(frame, InputAudioRawFrame):
-            self._speech_frames_count += 1
-
-
 class OpenSIPSTransportParams(TransportParams):
     """OpenSIPS Transport Parameters with RTP-specific settings."""
     
@@ -101,7 +55,7 @@ class OpenSIPSInputTransport(BaseInputTransport):
         self._params = params
         self._receiver_task: Optional[asyncio.Task] = None
         self._socket: Optional[socket.socket] = None
-        self._vad_observer = VADObserver(params.call_id or "unknown_call")
+        # VAD logging is now handled via Pipecat observers; remove custom observer.
     
     @property
     def vad_analyzer(self) -> Optional[SileroVADAnalyzer]:
@@ -158,20 +112,7 @@ class OpenSIPSInputTransport(BaseInputTransport):
         await self._transport._trigger_event("on_client_connected", self._transport, None)
         await self.push_frame(frame)
     
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        """Process frames with VAD observer - following Twilio/Telnyx pattern"""
-        
-        # 🔧 VAD OBSERVER: Handle VAD events before processing
-        if isinstance(frame, (VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame,
-                             UserStartedSpeakingFrame, UserStoppedSpeakingFrame)):
-            await self._vad_observer.on_vad_event(frame)
-        
-        # 🔧 Also observe audio frames for speech tracking
-        elif isinstance(frame, InputAudioRawFrame) and self._vad_observer:
-            await self._vad_observer.on_vad_event(frame)
-        
-        # Continue with normal processing
-        await super().process_frame(frame, direction)
+    # The default BaseInputTransport.process_frame already handles VAD frames; no override needed.
     
     async def stop(self, frame: EndFrame):
         """Stop RTP receiver"""

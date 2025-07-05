@@ -13,17 +13,7 @@ echo "============================================="
 # 📁 DIRECTORY SETUP
 # ==============================================================================
 
-echo "📁 Creating directories..."
-mkdir -p /app/logs
-mkdir -p /app/logs/opensips
-mkdir -p /app/logs/event-monitor
-mkdir -p /var/log/opensips
 
-# Set permissions
-chmod 755 /app/logs
-chmod 755 /app/logs/opensips
-chmod 755 /app/logs/event-monitor
-chmod 755 /var/log/opensips
 
 echo "✅ Directories created"
 
