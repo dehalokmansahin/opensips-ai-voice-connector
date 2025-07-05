@@ -1,0 +1,1 @@
+# OpenSIPS AI Voice Connector – bot package 

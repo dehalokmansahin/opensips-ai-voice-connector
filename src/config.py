@@ -20,90 +20,59 @@
 #
 
 """
-Parses the configuration file
+Parses the configuration file.
+This is a simplified, functional approach to configuration management.
 """
 
-import os
 import configparser
+import os
+import structlog
+from configparser import SectionProxy
+from typing import Optional
 
+logger = structlog.get_logger()
 
-_Config = configparser.ConfigParser()
+_config: Optional[configparser.ConfigParser] = None
 
+class ConfigValidationError(Exception):
+    """Custom exception for configuration validation errors."""
+    pass
 
-class ConfigSection(dict):
-    """ class that handles a config section """
+def initialize(config_file: str):
+    """
+    Initializes the config parser with a configuration file.
+    This must be called once at application startup.
+    """
+    global _config
+    if _config:
+        logger.warning("Configuration has already been initialized.")
+        return
 
-    def __init__(self, section, custom=None):
-        super().__init__(section)
-        self.update(custom)
+    _config = configparser.ConfigParser()
+    if not os.path.exists(config_file):
+        raise ConfigValidationError(f"Configuration file not found: {config_file}")
+    
+    try:
+        _config.read(config_file)
+        logger.info("Configuration file loaded successfully", file=config_file)
+    except configparser.Error as e:
+        raise ConfigValidationError(f"Error parsing configuration file {config_file}: {e}")
 
-    def getenv(self, env, fallback=None):
-        """ returns the configuration from environment """
-        if not env:
-            return fallback
-        if isinstance(env, list):
-            # check to see whether we have any of the keys
-            for e in env:
-                if e in os.environ:
-                    return os.getenv(e)
-            # no key found - check if env is a list
-            return fallback
-        return os.getenv(env, fallback)
+def get_section(section: str) -> Optional[SectionProxy]:
+    """
+    Get a whole configuration section.
+    Returns a SectionProxy object, which is dict-like.
+    Returns None if the config is not initialized or the section does not exist.
+    """
+    if not _config or not _config.has_section(section):
+        return None
+    return _config[section]
 
-    def get(self, option, env=None, fallback=None):
-        """ returns the configuration for the required option """
-        if isinstance(option, list):
-            # check to see whether we have any of the keys
-            for o in option:
-                if o in self.keys():
-                    return super().get(o)
-            # no key found - check if env is a list
-            return self.getenv(env, fallback)
-        return super().get(option, self.getenv(env, fallback))
-
-    def getboolean(self, option, env=None, fallback=None):
-        """ returns a boolean value from the configuration """
-        val = self.get(option, env, None)
-        if not val:
-            return fallback
-        if val.isnumeric():
-            return int(val) != 0
-        if val.lower() in ["yes", "true", "on"]:
-            return True
-        if val.lower() in ["no", "false", "off"]:
-            return False
-        return fallback
-
-
-class Config():
-    """ class that handles the config """
-
-    @staticmethod
-    def init(config_file):
-        """ Initializes the config with a configuration file """
-        config_file = config_file or os.getenv('CONFIG_FILE')
-        if config_file:
-            _Config.read(config_file)
-
-    @staticmethod
-    def get(section, init_data=None):
-        """ Retrieves a specific section from the config file """
-        if section not in _Config:
-            _Config.add_section(section)
-        if not init_data:
-            init_data = {}
-        return ConfigSection(_Config[section], init_data)
-
-    @staticmethod
-    def engine(option, env=None, fallback=None):
-        """ Special handling for the engine section """
-        section = Config.get("engine")
-        return section.get(option, env, fallback)
-
-    @staticmethod
-    def sections():
-        """ Retrieves the sections from the config file """
-        return _Config.sections()
-
+def get_env(key: str, default: str = "") -> str:
+    """
+    Get environment variable with fallback to default value.
+    Helper function for configuration.
+    """
+    return os.environ.get(key, default)
 
 # vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4
