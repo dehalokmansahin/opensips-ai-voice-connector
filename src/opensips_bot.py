@@ -250,8 +250,8 @@ async def run_opensips_bot(
             await asyncio.sleep(0.1)
 
             # Start conversation with a welcome message using proper frame
-            welcome_text = "Merhaba! Size nasıl yardımcı olabilirim?"
-            await task.queue_frames([TextFrame(welcome_text)])
+            welcome_text = "Merhaba size nasıl yardımcı olabilirim"
+            await tts.say(welcome_text)
         
         @transport.event_handler("on_client_disconnected") 
         async def on_client_disconnected(transport, client):
