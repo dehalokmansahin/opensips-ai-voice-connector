@@ -71,8 +71,7 @@ from pipecat.observers.loggers.llm_log_observer import LLMLogObserver
 from pipecat.observers.loggers.transcription_log_observer import TranscriptionLogObserver
 from pipecat.observers.loggers.user_bot_latency_log_observer import UserBotLatencyLogObserver
 
-# Custom aggregator to flush on LLM end
-from pipeline.aggregators.sentence_flush import SentenceFlushAggregator
+from pipecat.processors.aggregators.sentence import SentenceAggregator
 
 logger = structlog.get_logger()
 
@@ -185,10 +184,14 @@ async def run_opensips_bot(
         )
         
         # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Create conversation context like examples
+        # System prompt should set assistant persona but not contain words to be spoken directly.
         messages = [
             {
                 "role": "system",
-                "content": "Merhaba! Size nasıl yardımcı olabilirim? Bankacılık işlemleriniz için buradayım. Kısa ve anlaşılır cevaplar veririm."
+                "content": (
+                    "Sen bir banka müşteri hizmetleri sanal asistanısın. Kullanıcıya para transferi, fatura ödeme, yatırım işlemleri gibi "
+                    "bankacılık konularında yardımcı olursun. Cevapların kısa, net ve anlaşılır olmalıdır."
+                ),
             }
         ]
         
@@ -201,7 +204,7 @@ async def run_opensips_bot(
             stt,                            # Speech-To-Text (Vosk)
             context_aggregator.user(),      # User context
             llm,                            # LLM (Llama) – streams tokens
-            SentenceFlushAggregator(),      # Buffer until sentence or LLM end
+            SentenceAggregator(),      # Buffer until sentence or LLM end
             tts,                            # Text-To-Speech (Piper) – receives sentence text
             transport.output(),             # RTP output to OpenSIPS
             context_aggregator.assistant()  # Assistant context
@@ -231,12 +234,21 @@ async def run_opensips_bot(
         )
         task.add_observer(debug_observer)
         # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Event handlers like examples
+        # Send greeting only once even if transport fires the event multiple times
+        greeting_sent = False
+
         @transport.event_handler("on_client_connected")
         async def on_client_connected(transport, client):
+            nonlocal greeting_sent
+            if greeting_sent:
+                return  # Prevent duplicate greetings
+
+            greeting_sent = True
             logger.info("Client connected with VAD observer", call_id=call_id)
+
             # Give pipeline a moment to fully initialize before pushing frames
             await asyncio.sleep(0.1)
-            
+
             # Start conversation with a welcome message using proper frame
             welcome_text = "Merhaba! Size nasıl yardımcı olabilirim?"
             await task.queue_frames([TextFrame(welcome_text)])

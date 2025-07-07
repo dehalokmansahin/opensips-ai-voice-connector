@@ -82,9 +82,6 @@ class PiperWebsocketTTSService(TTSService):
                 "format": "pcm16"  # Document specifies PCM output
             }
             
-            # Signal TTS start
-            yield TTSStartedFrame()
-            
             # Send synthesis request
             await self._websocket.send(json.dumps(request))
             logger.debug("Sent text to Piper TTS", text_length=len(text))
