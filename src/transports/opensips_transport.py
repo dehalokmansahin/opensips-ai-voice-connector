@@ -182,6 +182,29 @@ class OpenSIPSInputTransport(BaseInputTransport):
                    confidence=self.vad_analyzer.params.confidence if self.vad_analyzer else None,
                    pattern="twilio_telnyx_compliant")
         
+        # Ensure UDP socket is created *before* other pipeline stages (e.g. output
+        # transport) attempt to reuse it. Creating it here synchronously avoids
+        # a race-condition where OpenSIPSOutputTransport starts first and finds
+        # `None`, resulting in the fallback socket and one-way audio.
+
+        if self._socket is None:
+            import socket as _socket_mod
+
+            self._socket = _socket_mod.socket(_socket_mod.AF_INET, _socket_mod.SOCK_DGRAM)
+            self._socket.setsockopt(_socket_mod.SOL_SOCKET, _socket_mod.SO_REUSEADDR, 1)
+            self._socket.bind((self._params.bind_ip, self._params.bind_port))
+            self._socket.setblocking(False)
+
+            # Update params with the dynamically-assigned port (bind_port may be 0)
+            actual_addr = self._socket.getsockname()
+            self._params.bind_port = actual_addr[1]
+
+            logger.info(
+                "RTP receiver bound (eager)",
+                bind_address=f"{self._params.bind_ip}:{self._params.bind_port}"
+            )
+
+        # Now start async receiving loop which will reuse the existing socket.
         if not self._receiver_task:
             self._receiver_task = asyncio.create_task(self._receive_rtp_packets())
             logger.debug("RTP receiver task started")
@@ -248,19 +271,24 @@ class OpenSIPSInputTransport(BaseInputTransport):
     async def _receive_rtp_packets(self):
         """RTP packet receiver - simplified following Twilio pattern"""
         try:
-            # Create and bind socket
-            self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self._socket.bind((self._params.bind_ip, self._params.bind_port))
-            self._socket.setblocking(False)
-            
-            # Get actual bound address
-            actual_addr = self._socket.getsockname()
-            self._params.bind_port = actual_addr[1]  # Update with actual port
-            
-            logger.info("RTP receiver bound", 
-                       bind_address=f"{self._params.bind_ip}:{self._params.bind_port}")
-            
+
+            # Socket may already be created eagerly in `start()`. Only create it
+            # here if that step was skipped for some reason (e.g. unit tests).
+            if self._socket is None:
+                self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                self._socket.bind((self._params.bind_ip, self._params.bind_port))
+                self._socket.setblocking(False)
+
+                # Get actual bound address
+                actual_addr = self._socket.getsockname()
+                self._params.bind_port = actual_addr[1]  # Update with actual port
+
+                logger.info(
+                    "RTP receiver bound (lazy)",
+                    bind_address=f"{self._params.bind_ip}:{self._params.bind_port}"
+                )
+
             loop = asyncio.get_running_loop()
             packet_count = 0
             
@@ -337,9 +365,16 @@ class OpenSIPSOutputTransport(BaseOutputTransport):
         """Start output transport"""
         await super().start(frame)
         
-        # Create UDP socket for sending
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        logger.debug("RTP sender socket created")
+        # Re-use the same UDP socket that the input transport bound to.
+        # Böylece RTP sesi, SDP’de ilan edilen porttan (bind_port) gönderilir;
+        # NAT / SBC tarafında paketler beklenen porttan geldiği için ses ulaşır.
+        self._socket = self._transport._input_transport._socket
+        if self._socket is None:
+            # Fallback – shouldn’t normally happen, but keep previous behaviour.
+            self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            logger.warning("Input socket unavailable – created separate RTP sender socket (may cause audio one-way)")
+        else:
+            logger.debug("RTP sender reusing input socket (port staying the same)")
         
         # Register default audio destination so frames with destination=None are accepted
         await self.set_transport_ready(frame)
@@ -377,18 +412,39 @@ class OpenSIPSOutputTransport(BaseOutputTransport):
                         }
                         packet_bytes = generate_rtp_packet(packet_vars)
                         await loop.sock_sendto(self._socket, packet_bytes, (client_ip, client_port))
-                        logger.debug("RTP packet sent", size=len(packet_bytes), to_addr=f"{client_ip}:{client_port}")
+                        logger.debug(
+                            "RTP packet sent",
+                            size=len(packet_bytes),
+                            seq=self._sequence_number,
+                            ts=self._timestamp,
+                            to_addr=f"{client_ip}:{client_port}"
+                        )
                         # Update sequence and timestamp
                         self._sequence_number = (self._sequence_number + 1) & 0xFFFF
                         self._timestamp = (self._timestamp + chunk_size) & 0xFFFFFFFF
+
+                        # Pace the transmission so that packets are sent in real-time
+                        # 160 samples @ 8 kHz = 20 ms of audio.
+                        await asyncio.sleep(0.02)
             
-            # Continue processing in pipeline
-            await super().send_frame(frame)
-            
+            # No parent send_frame implementation exists in BaseOutputTransport.
+            # Additional pipeline propagation is handled by MediaSender upstream.
+
         except Exception as e:
             logger.error("Error sending RTP packet", error=str(e))
-            # Continue processing even if send fails
-            await super().send_frame(frame)
+            # We intentionally do not call a parent implementation as none exists.
+
+    async def write_audio_frame(self, frame: OutputAudioRawFrame):
+        """Encode and send raw PCM audio to the client as μ-law RTP.
+
+        This method is called by BaseOutputTransport's media sender. We simply
+        delegate to ``send_frame`` which already implements the μ-law
+        conversion, RTP header creation and UDP transmission logic. By adding
+        this override we ensure that TTSAudioRawFrame / OutputAudioRawFrame
+        chunks generated by the TTS service are actually transmitted to the
+        customer.
+        """
+        await self.send_frame(frame)
 
 
 class OpenSIPSTransport(BaseTransport):

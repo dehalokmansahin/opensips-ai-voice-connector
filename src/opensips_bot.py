@@ -52,6 +52,11 @@ from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.frames.frames import TextFrame
+from pipecat.observers.loggers.debug_log_observer import DebugLogObserver
+from pipecat.frames.frames import TTSStartedFrame, TTSStoppedFrame
+
+# Custom rate-limited wrapper to avoid log floods
+from rate_limited_observer import RateLimitedObserver
 
 # Import our services
 from services.vosk_websocket import VoskWebsocketSTTService
@@ -62,12 +67,9 @@ from services.piper_websocket import PiperWebsocketTTSService
 from transports.opensips_transport import create_opensips_transport
 
 # Pipecat observers for higher-level insights (no low-level RTP spam)
-from pipecat.observers.loggers import (
-    LLMLogObserver,
-    TranscriptionLogObserver,
-    UserBotLatencyLogObserver,
-    TTSLogObserver,          # ← new
-)
+from pipecat.observers.loggers.llm_log_observer import LLMLogObserver
+from pipecat.observers.loggers.transcription_log_observer import TranscriptionLogObserver
+from pipecat.observers.loggers.user_bot_latency_log_observer import UserBotLatencyLogObserver
 
 # Custom aggregator to flush on LLM end
 from pipeline.aggregators.sentence_flush import SentenceFlushAggregator
@@ -223,7 +225,11 @@ async def run_opensips_bot(
         task.add_observer(TranscriptionLogObserver())
         task.add_observer(LLMLogObserver())
         task.add_observer(UserBotLatencyLogObserver())
-        task.add_observer(TTSLogObserver())
+        # Attach rate-limited debug observer to monitor TTS start/stop (no audio frames)
+        debug_observer = DebugLogObserver(
+            frame_types=(TTSStartedFrame, TTSStoppedFrame),
+        )
+        task.add_observer(debug_observer)
         # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Event handlers like examples
         @transport.event_handler("on_client_connected")
         async def on_client_connected(transport, client):

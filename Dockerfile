@@ -6,11 +6,13 @@ WORKDIR /app
 # Install system dependencies - Enhanced for dynamic config processing
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tcpdump \
+    bash \
     libopus-dev \
     libsndfile1 \
     gcc \
     g++ \
     python3-dev \
+    dos2unix \
     netcat-openbsd \
     curl \
     iproute2 \
@@ -42,6 +44,7 @@ RUN mkdir -p /app/logs /app/logs/opensips /app/logs/event-monitor
 
 # Make startup script executable
 RUN chmod +x /app/scripts/startup.sh
+RUN dos2unix /app/scripts/startup.sh
 
 # Environment variables - Dynamic configuration support
 ENV CONFIG_FILE=/app/cfg/opensips-ai-voice-connector.ini
