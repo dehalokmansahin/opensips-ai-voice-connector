@@ -3,8 +3,8 @@
 import grpc
 import warnings
 
-import common_pb2 as common__pb2
-import llm_service_pb2 as llm__service__pb2
+from google.protobuf import empty_pb2 as google_dot_protobuf_dot_empty__pb2
+import tts_service_pb2 as tts__service__pb2
 
 GRPC_GENERATED_VERSION = '1.74.0'
 GRPC_VERSION = grpc.__version__
@@ -19,15 +19,15 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + f' but the generated code in llm_service_pb2_grpc.py depends on'
+        + f' but the generated code in tts_service_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
     )
 
 
-class LLMServiceStub(object):
-    """Language Model service for banking conversations
+class TTSServiceStub(object):
+    """Text-to-Speech service - based on Piper WebSocket implementation
     """
 
     def __init__(self, channel):
@@ -36,72 +36,65 @@ class LLMServiceStub(object):
         Args:
             channel: A grpc.Channel.
         """
-        self.GenerateResponse = channel.unary_unary(
-                '/opensips.ai.llm.LLMService/GenerateResponse',
-                request_serializer=llm__service__pb2.GenerateResponseRequest.SerializeToString,
-                response_deserializer=llm__service__pb2.GenerateResponseResponse.FromString,
+        self.SynthesizeText = channel.unary_stream(
+                '/opensips.ai.tts.TTSService/SynthesizeText',
+                request_serializer=tts__service__pb2.SynthesizeRequest.SerializeToString,
+                response_deserializer=tts__service__pb2.SynthesizeResponse.FromString,
                 _registered_method=True)
-        self.GenerateResponseStream = channel.unary_stream(
-                '/opensips.ai.llm.LLMService/GenerateResponseStream',
-                request_serializer=llm__service__pb2.GenerateResponseRequest.SerializeToString,
-                response_deserializer=llm__service__pb2.GenerateResponseResponse.FromString,
+        self.SynthesizeSingle = channel.unary_unary(
+                '/opensips.ai.tts.TTSService/SynthesizeSingle',
+                request_serializer=tts__service__pb2.SynthesizeRequest.SerializeToString,
+                response_deserializer=tts__service__pb2.SynthesizeResponse.FromString,
                 _registered_method=True)
-        self.AnalyzeIntent = channel.unary_unary(
-                '/opensips.ai.llm.LLMService/AnalyzeIntent',
-                request_serializer=llm__service__pb2.AnalyzeIntentRequest.SerializeToString,
-                response_deserializer=llm__service__pb2.AnalyzeIntentResponse.FromString,
+        self.Configure = channel.unary_unary(
+                '/opensips.ai.tts.TTSService/Configure',
+                request_serializer=tts__service__pb2.ConfigureRequest.SerializeToString,
+                response_deserializer=tts__service__pb2.ConfigureResponse.FromString,
                 _registered_method=True)
-        self.UpdateContext = channel.unary_unary(
-                '/opensips.ai.llm.LLMService/UpdateContext',
-                request_serializer=llm__service__pb2.UpdateContextRequest.SerializeToString,
-                response_deserializer=llm__service__pb2.UpdateContextResponse.FromString,
-                _registered_method=True)
-        self.ProcessBankingIntent = channel.unary_unary(
-                '/opensips.ai.llm.LLMService/ProcessBankingIntent',
-                request_serializer=llm__service__pb2.ProcessBankingIntentRequest.SerializeToString,
-                response_deserializer=llm__service__pb2.ProcessBankingIntentResponse.FromString,
+        self.GetVoices = channel.unary_unary(
+                '/opensips.ai.tts.TTSService/GetVoices',
+                request_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
+                response_deserializer=tts__service__pb2.VoicesResponse.FromString,
                 _registered_method=True)
         self.HealthCheck = channel.unary_unary(
-                '/opensips.ai.llm.LLMService/HealthCheck',
-                request_serializer=common__pb2.HealthCheckRequest.SerializeToString,
-                response_deserializer=common__pb2.HealthCheckResponse.FromString,
+                '/opensips.ai.tts.TTSService/HealthCheck',
+                request_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
+                response_deserializer=tts__service__pb2.HealthResponse.FromString,
+                _registered_method=True)
+        self.GetStats = channel.unary_unary(
+                '/opensips.ai.tts.TTSService/GetStats',
+                request_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
+                response_deserializer=tts__service__pb2.StatsResponse.FromString,
                 _registered_method=True)
 
 
-class LLMServiceServicer(object):
-    """Language Model service for banking conversations
+class TTSServiceServicer(object):
+    """Text-to-Speech service - based on Piper WebSocket implementation
     """
 
-    def GenerateResponse(self, request, context):
-        """Generate response to user input
+    def SynthesizeText(self, request, context):
+        """Synthesize text to speech (streaming audio chunks)
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def GenerateResponseStream(self, request, context):
-        """Stream-based response generation
+    def SynthesizeSingle(self, request, context):
+        """Single shot synthesis (for small texts)
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def AnalyzeIntent(self, request, context):
-        """Analyze user intent
+    def Configure(self, request, context):
+        """Configure TTS parameters
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def UpdateContext(self, request, context):
-        """Update conversation context
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-    def ProcessBankingIntent(self, request, context):
-        """Banking-specific intent processing
+    def GetVoices(self, request, context):
+        """Get available voices
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -114,80 +107,60 @@ class LLMServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetStats(self, request, context):
+        """Get service stats
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
 
-def add_LLMServiceServicer_to_server(servicer, server):
+
+def add_TTSServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'GenerateResponse': grpc.unary_unary_rpc_method_handler(
-                    servicer.GenerateResponse,
-                    request_deserializer=llm__service__pb2.GenerateResponseRequest.FromString,
-                    response_serializer=llm__service__pb2.GenerateResponseResponse.SerializeToString,
+            'SynthesizeText': grpc.unary_stream_rpc_method_handler(
+                    servicer.SynthesizeText,
+                    request_deserializer=tts__service__pb2.SynthesizeRequest.FromString,
+                    response_serializer=tts__service__pb2.SynthesizeResponse.SerializeToString,
             ),
-            'GenerateResponseStream': grpc.unary_stream_rpc_method_handler(
-                    servicer.GenerateResponseStream,
-                    request_deserializer=llm__service__pb2.GenerateResponseRequest.FromString,
-                    response_serializer=llm__service__pb2.GenerateResponseResponse.SerializeToString,
+            'SynthesizeSingle': grpc.unary_unary_rpc_method_handler(
+                    servicer.SynthesizeSingle,
+                    request_deserializer=tts__service__pb2.SynthesizeRequest.FromString,
+                    response_serializer=tts__service__pb2.SynthesizeResponse.SerializeToString,
             ),
-            'AnalyzeIntent': grpc.unary_unary_rpc_method_handler(
-                    servicer.AnalyzeIntent,
-                    request_deserializer=llm__service__pb2.AnalyzeIntentRequest.FromString,
-                    response_serializer=llm__service__pb2.AnalyzeIntentResponse.SerializeToString,
+            'Configure': grpc.unary_unary_rpc_method_handler(
+                    servicer.Configure,
+                    request_deserializer=tts__service__pb2.ConfigureRequest.FromString,
+                    response_serializer=tts__service__pb2.ConfigureResponse.SerializeToString,
             ),
-            'UpdateContext': grpc.unary_unary_rpc_method_handler(
-                    servicer.UpdateContext,
-                    request_deserializer=llm__service__pb2.UpdateContextRequest.FromString,
-                    response_serializer=llm__service__pb2.UpdateContextResponse.SerializeToString,
-            ),
-            'ProcessBankingIntent': grpc.unary_unary_rpc_method_handler(
-                    servicer.ProcessBankingIntent,
-                    request_deserializer=llm__service__pb2.ProcessBankingIntentRequest.FromString,
-                    response_serializer=llm__service__pb2.ProcessBankingIntentResponse.SerializeToString,
+            'GetVoices': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetVoices,
+                    request_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
+                    response_serializer=tts__service__pb2.VoicesResponse.SerializeToString,
             ),
             'HealthCheck': grpc.unary_unary_rpc_method_handler(
                     servicer.HealthCheck,
-                    request_deserializer=common__pb2.HealthCheckRequest.FromString,
-                    response_serializer=common__pb2.HealthCheckResponse.SerializeToString,
+                    request_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
+                    response_serializer=tts__service__pb2.HealthResponse.SerializeToString,
+            ),
+            'GetStats': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetStats,
+                    request_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
+                    response_serializer=tts__service__pb2.StatsResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'opensips.ai.llm.LLMService', rpc_method_handlers)
+            'opensips.ai.tts.TTSService', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('opensips.ai.llm.LLMService', rpc_method_handlers)
+    server.add_registered_method_handlers('opensips.ai.tts.TTSService', rpc_method_handlers)
 
 
  # This class is part of an EXPERIMENTAL API.
-class LLMService(object):
-    """Language Model service for banking conversations
+class TTSService(object):
+    """Text-to-Speech service - based on Piper WebSocket implementation
     """
 
     @staticmethod
-    def GenerateResponse(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/opensips.ai.llm.LLMService/GenerateResponse',
-            llm__service__pb2.GenerateResponseRequest.SerializeToString,
-            llm__service__pb2.GenerateResponseResponse.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def GenerateResponseStream(request,
+    def SynthesizeText(request,
             target,
             options=(),
             channel_credentials=None,
@@ -200,9 +173,9 @@ class LLMService(object):
         return grpc.experimental.unary_stream(
             request,
             target,
-            '/opensips.ai.llm.LLMService/GenerateResponseStream',
-            llm__service__pb2.GenerateResponseRequest.SerializeToString,
-            llm__service__pb2.GenerateResponseResponse.FromString,
+            '/opensips.ai.tts.TTSService/SynthesizeText',
+            tts__service__pb2.SynthesizeRequest.SerializeToString,
+            tts__service__pb2.SynthesizeResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -214,7 +187,7 @@ class LLMService(object):
             _registered_method=True)
 
     @staticmethod
-    def AnalyzeIntent(request,
+    def SynthesizeSingle(request,
             target,
             options=(),
             channel_credentials=None,
@@ -227,9 +200,9 @@ class LLMService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/opensips.ai.llm.LLMService/AnalyzeIntent',
-            llm__service__pb2.AnalyzeIntentRequest.SerializeToString,
-            llm__service__pb2.AnalyzeIntentResponse.FromString,
+            '/opensips.ai.tts.TTSService/SynthesizeSingle',
+            tts__service__pb2.SynthesizeRequest.SerializeToString,
+            tts__service__pb2.SynthesizeResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -241,7 +214,7 @@ class LLMService(object):
             _registered_method=True)
 
     @staticmethod
-    def UpdateContext(request,
+    def Configure(request,
             target,
             options=(),
             channel_credentials=None,
@@ -254,9 +227,9 @@ class LLMService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/opensips.ai.llm.LLMService/UpdateContext',
-            llm__service__pb2.UpdateContextRequest.SerializeToString,
-            llm__service__pb2.UpdateContextResponse.FromString,
+            '/opensips.ai.tts.TTSService/Configure',
+            tts__service__pb2.ConfigureRequest.SerializeToString,
+            tts__service__pb2.ConfigureResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -268,7 +241,7 @@ class LLMService(object):
             _registered_method=True)
 
     @staticmethod
-    def ProcessBankingIntent(request,
+    def GetVoices(request,
             target,
             options=(),
             channel_credentials=None,
@@ -281,9 +254,9 @@ class LLMService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/opensips.ai.llm.LLMService/ProcessBankingIntent',
-            llm__service__pb2.ProcessBankingIntentRequest.SerializeToString,
-            llm__service__pb2.ProcessBankingIntentResponse.FromString,
+            '/opensips.ai.tts.TTSService/GetVoices',
+            google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
+            tts__service__pb2.VoicesResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -308,9 +281,36 @@ class LLMService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/opensips.ai.llm.LLMService/HealthCheck',
-            common__pb2.HealthCheckRequest.SerializeToString,
-            common__pb2.HealthCheckResponse.FromString,
+            '/opensips.ai.tts.TTSService/HealthCheck',
+            google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
+            tts__service__pb2.HealthResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetStats(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/opensips.ai.tts.TTSService/GetStats',
+            google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
+            tts__service__pb2.StatsResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -31,7 +31,10 @@
       "Bash(./scripts/validate-dev-setup.sh:*)",
       "Bash(grep:*)",
       "Bash(./scripts/dev-start.sh:*)",
-      "Bash(timeout:*)"
+      "Bash(timeout:*)",
+      "Bash(git commit:*)",
+      "Bash(diff:*)",
+      "Bash(./scripts/generate-proto.sh:*)"
     ],
     "deny": []
   }

@@ -1,0 +1,116 @@
+syntax = "proto3";
+
+package opensips.ai.asr;
+
+import "google/protobuf/empty.proto";
+
+option go_package = "github.com/opensips/ai-voice-connector/proto/asr";
+
+// Automatic Speech Recognition service - based on Vosk implementation
+service ASRService {
+  // Stream-based speech recognition (primary method)
+  rpc StreamingRecognize(stream StreamingRecognizeRequest) returns (stream StreamingRecognizeResponse);
+  
+  // Single shot recognition
+  rpc Recognize(RecognizeRequest) returns (RecognizeResponse);
+  
+  // Configure recognition parameters
+  rpc Configure(ConfigureRequest) returns (ConfigureResponse);
+  
+  // Health check
+  rpc HealthCheck(google.protobuf.Empty) returns (HealthResponse);
+  
+  // Get service stats
+  rpc GetStats(google.protobuf.Empty) returns (StatsResponse);
+}
+
+// Streaming recognition request (like Vosk WebSocket pattern)
+message StreamingRecognizeRequest {
+  oneof request_type {
+    RecognitionConfig config = 1;    // Configuration (first message)
+    bytes audio_data = 2;            // Raw audio data
+    string control_message = 3;      // {"eof": 1} or {"reset": 1}
+  }
+}
+
+// Streaming recognition response
+message StreamingRecognizeResponse {
+  RecognitionResult result = 1;
+  bool is_final = 2;
+  bool end_of_utterance = 3;
+}
+
+// Single recognition request
+message RecognizeRequest {
+  RecognitionConfig config = 1;
+  bytes audio_data = 2;
+}
+
+// Single recognition response
+message RecognizeResponse {
+  RecognitionResult result = 1;
+}
+
+// Configuration request
+message ConfigureRequest {
+  RecognitionConfig config = 1;
+}
+
+// Configuration response
+message ConfigureResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// Recognition configuration (based on Vosk parameters)
+message RecognitionConfig {
+  float sample_rate = 1;           // 8000, 16000 Hz
+  string model_path = 2;           // Vosk model path
+  string spk_model_path = 3;       // Speaker model path (optional)
+  bool show_words = 4;             // Word-level timestamps
+  int32 max_alternatives = 5;      // Number of alternatives
+  repeated string phrase_list = 6; // Custom phrase list for better recognition
+}
+
+// Recognition result (matching Vosk JSON format)
+message RecognitionResult {
+  string text = 1;                 // Final/partial text
+  float confidence = 2;            // Overall confidence
+  repeated WordInfo words = 3;     // Word-level info
+  repeated Alternative alternatives = 4; // Alternative hypotheses
+}
+
+// Word information with timing
+message WordInfo {
+  string word = 1;
+  float confidence = 2;
+  float start = 3;                // Start time in seconds
+  float end = 4;                  // End time in seconds
+}
+
+// Alternative recognition hypothesis
+message Alternative {
+  string text = 1;
+  float confidence = 2;
+}
+
+// Health check response
+message HealthResponse {
+  enum Status {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+  }
+  Status status = 1;
+  string message = 2;
+  string model_loaded = 3;
+}
+
+// Service statistics
+message StatsResponse {
+  int32 active_connections = 1;
+  int32 total_connections = 2;
+  float average_processing_time = 3;
+  int64 uptime_seconds = 4;
+  string model_info = 5;
+}

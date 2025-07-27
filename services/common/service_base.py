@@ -189,32 +189,5 @@ class BaseService(ABC):
         """Service-specific health check - implement in subclasses"""
         pass
 
-class ServiceRegistry:
-    """Simple service registry for service discovery"""
-    
-    def __init__(self):
-        self.services: Dict[str, Dict[str, Any]] = {}
-    
-    def register_service(self, name: str, address: str, port: int, metadata: Dict[str, Any] = None):
-        """Register a service"""
-        self.services[name] = {
-            'name': name,
-            'address': address,
-            'port': port,
-            'endpoint': f"{address}:{port}",
-            'registered_at': time.time(),
-            'metadata': metadata or {}
-        }
-    
-    def get_service(self, name: str) -> Optional[Dict[str, Any]]:
-        """Get service information"""
-        return self.services.get(name)
-    
-    def list_services(self) -> Dict[str, Dict[str, Any]]:
-        """List all registered services"""
-        return self.services.copy()
-    
-    def unregister_service(self, name: str):
-        """Unregister a service"""
-        if name in self.services:
-            del self.services[name]
+# ServiceRegistry removed - use core/grpc_clients/service_registry.py instead
+# This ensures unified service discovery pattern across the entire system
