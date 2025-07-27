@@ -1,0 +1,110 @@
+syntax = "proto3";
+
+package opensips.ai.common;
+
+option go_package = "github.com/opensips/ai-voice-connector/proto/common";
+
+// Common timestamp message
+message Timestamp {
+  int64 seconds = 1;
+  int32 nanos = 2;
+}
+
+// Common status response
+message Status {
+  enum Code {
+    OK = 0;
+    INVALID_ARGUMENT = 1;
+    NOT_FOUND = 2;
+    ALREADY_EXISTS = 3;
+    PERMISSION_DENIED = 4;
+    RESOURCE_EXHAUSTED = 5;
+    FAILED_PRECONDITION = 6;
+    ABORTED = 7;
+    OUT_OF_RANGE = 8;
+    UNIMPLEMENTED = 9;
+    INTERNAL = 10;
+    UNAVAILABLE = 11;
+    DATA_LOSS = 12;
+    UNAUTHENTICATED = 13;
+  }
+  
+  Code code = 1;
+  string message = 2;
+  map<string, string> details = 3;
+}
+
+// Health check message
+message HealthCheckRequest {
+  string service = 1;
+}
+
+message HealthCheckResponse {
+  enum ServingStatus {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+    SERVICE_UNKNOWN = 3;
+  }
+  ServingStatus status = 1;
+  string message = 2;
+  map<string, string> details = 3;
+}
+
+// Audio data structures
+message AudioConfig {
+  int32 sample_rate = 1;
+  int32 channels = 2;
+  string encoding = 3; // pcm16, pcmu, etc.
+  int32 bits_per_sample = 4;
+}
+
+message AudioChunk {
+  bytes data = 1;
+  AudioConfig config = 2;
+  Timestamp timestamp = 3;
+  string session_id = 4;
+}
+
+// Session management
+message SessionInfo {
+  string session_id = 1;
+  string call_id = 2;
+  string caller_number = 3;
+  string called_number = 4;
+  Timestamp created_at = 5;
+  string status = 6;
+  map<string, string> metadata = 7;
+}
+
+// Banking specific structures
+message CustomerInfo {
+  string customer_id = 1;
+  string account_number = 2;
+  string phone_number = 3;
+  bool authenticated = 4;
+  string auth_method = 5;
+  Timestamp auth_timestamp = 6;
+}
+
+message BankingIntent {
+  string intent_type = 1; // card_delivery_status, account_balance, etc.
+  map<string, string> parameters = 2;
+  float confidence = 3;
+}
+
+// Conversation context
+message ConversationContext {
+  string session_id = 1;
+  repeated ConversationTurn turns = 2;
+  BankingIntent current_intent = 3;
+  CustomerInfo customer = 4;
+  map<string, string> context_data = 5;
+}
+
+message ConversationTurn {
+  string speaker = 1; // user or assistant
+  string text = 2;
+  Timestamp timestamp = 3;
+  map<string, string> metadata = 4;
+}

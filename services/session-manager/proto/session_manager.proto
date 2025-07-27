@@ -1,0 +1,169 @@
+syntax = "proto3";
+
+package opensips.ai.session;
+
+import "common.proto";
+
+option go_package = "github.com/opensips/ai-voice-connector/proto/session";
+
+// Session management service
+service SessionManagerService {
+  // Session lifecycle
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
+  rpc UpdateSession(UpdateSessionRequest) returns (UpdateSessionResponse);
+  rpc EndSession(EndSessionRequest) returns (EndSessionResponse);
+  
+  // Session queries
+  rpc ListActiveSessions(ListActiveSessionsRequest) returns (ListActiveSessionsResponse);
+  rpc GetSessionsByCallerId(GetSessionsByCallerIdRequest) returns (GetSessionsByCallerIdResponse);
+  
+  // Metrics and monitoring
+  rpc GetSessionMetrics(GetSessionMetricsRequest) returns (GetSessionMetricsResponse);
+  
+  // Health check
+  rpc HealthCheck(opensips.ai.common.HealthCheckRequest) returns (opensips.ai.common.HealthCheckResponse);
+}
+
+// Session management messages
+message CreateSessionRequest {
+  string call_id = 1;
+  string caller_number = 2;
+  string called_number = 3;
+  map<string, string> metadata = 4;
+  SessionConfig config = 5;
+}
+
+message CreateSessionResponse {
+  opensips.ai.common.Status status = 1;
+  opensips.ai.common.SessionInfo session = 2;
+}
+
+message GetSessionRequest {
+  string session_id = 1;
+}
+
+message GetSessionResponse {
+  opensips.ai.common.Status status = 1;
+  opensips.ai.common.SessionInfo session = 2;
+  SessionDetails details = 3;
+}
+
+message UpdateSessionRequest {
+  string session_id = 1;
+  map<string, string> metadata_updates = 2;
+  string status_update = 3;
+}
+
+message UpdateSessionResponse {
+  opensips.ai.common.Status status = 1;
+  opensips.ai.common.SessionInfo updated_session = 2;
+}
+
+message EndSessionRequest {
+  string session_id = 1;
+  string end_reason = 2;
+  SessionSummary summary = 3;
+}
+
+message EndSessionResponse {
+  opensips.ai.common.Status status = 1;
+}
+
+// Session queries
+message ListActiveSessionsRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+  string filter = 3;  // Optional filter expression
+}
+
+message ListActiveSessionsResponse {
+  opensips.ai.common.Status status = 1;
+  repeated opensips.ai.common.SessionInfo sessions = 2;
+  string next_page_token = 3;
+  int32 total_count = 4;
+}
+
+message GetSessionsByCallerIdRequest {
+  string caller_number = 1;
+  int32 limit = 2;
+  bool include_ended = 3;
+}
+
+message GetSessionsByCallerIdResponse {
+  opensips.ai.common.Status status = 1;
+  repeated opensips.ai.common.SessionInfo sessions = 2;
+}
+
+// Session configuration
+message SessionConfig {
+  int32 max_duration_seconds = 1;
+  int32 idle_timeout_seconds = 2;
+  bool enable_recording = 3;
+  bool enable_transcription = 4;
+  string priority_level = 5;      // low, normal, high
+  repeated string allowed_intents = 6;
+}
+
+// Session details and summary
+message SessionDetails {
+  opensips.ai.common.SessionInfo basic_info = 1;
+  SessionStatistics statistics = 2;
+  repeated SessionEvent events = 3;
+  SessionConfig config = 4;
+}
+
+message SessionStatistics {
+  int32 total_conversation_turns = 1;
+  float total_duration_seconds = 2;
+  float total_talk_time_seconds = 3;
+  float average_response_time_ms = 4;
+  int32 pipeline_errors = 5;
+  int32 banking_transactions = 6;
+  map<string, int32> intent_counts = 7;
+}
+
+message SessionEvent {
+  opensips.ai.common.Timestamp timestamp = 1;
+  string event_type = 2;          // session_start, user_input, ai_response, error, etc.
+  map<string, string> event_data = 3;
+  string severity = 4;            // info, warning, error
+}
+
+message SessionSummary {
+  string outcome = 1;             // completed, failed, timeout, user_hangup
+  string primary_intent = 2;
+  bool goals_achieved = 3;
+  string customer_satisfaction = 4; // very_satisfied, satisfied, neutral, dissatisfied
+  repeated string issues_encountered = 5;
+  string notes = 6;
+}
+
+// Metrics
+message GetSessionMetricsRequest {
+  opensips.ai.common.Timestamp start_time = 1;
+  opensips.ai.common.Timestamp end_time = 2;
+  string aggregation_level = 3;   // hour, day, week
+}
+
+message GetSessionMetricsResponse {
+  opensips.ai.common.Status status = 1;
+  SessionMetrics metrics = 2;
+}
+
+message SessionMetrics {
+  int32 total_sessions = 1;
+  int32 active_sessions = 2;
+  int32 completed_sessions = 3;
+  int32 failed_sessions = 4;
+  float average_session_duration = 5;
+  float average_response_time = 6;
+  float success_rate = 7;
+  repeated MetricPoint time_series = 8;
+  map<string, int32> intent_distribution = 9;
+}
+
+message MetricPoint {
+  opensips.ai.common.Timestamp timestamp = 1;
+  map<string, float> values = 2;
+}

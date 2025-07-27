@@ -1,0 +1,125 @@
+syntax = "proto3";
+
+package opensips.ai.tts;
+
+import "google/protobuf/empty.proto";
+
+option go_package = "github.com/opensips/ai-voice-connector/proto/tts";
+
+// Text-to-Speech service - based on Piper WebSocket implementation
+service TTSService {
+  // Synthesize text to speech (streaming audio chunks)
+  rpc SynthesizeText(SynthesizeRequest) returns (stream SynthesizeResponse);
+  
+  // Single shot synthesis (for small texts)
+  rpc SynthesizeSingle(SynthesizeRequest) returns (SynthesizeResponse);
+  
+  // Configure TTS parameters
+  rpc Configure(ConfigureRequest) returns (ConfigureResponse);
+  
+  // Get available voices
+  rpc GetVoices(google.protobuf.Empty) returns (VoicesResponse);
+  
+  // Health check
+  rpc HealthCheck(google.protobuf.Empty) returns (HealthResponse);
+  
+  // Get service stats
+  rpc GetStats(google.protobuf.Empty) returns (StatsResponse);
+}
+
+// Synthesis request (based on Piper WebSocket JSON format)
+message SynthesizeRequest {
+  string text = 1;                 // Text to synthesize
+  string voice = 2;                // Voice name (e.g., tr_TR-fahrettin-medium)
+  int32 sample_rate = 3;           // Output sample rate (22050, 16000, 8000)
+}
+
+// Synthesis response - streaming audio chunks
+message SynthesizeResponse {
+  oneof response_type {
+    SynthesisStarted started = 1;    // Synthesis started signal
+    bytes audio_chunk = 2;           // Raw audio data (PCM 16-bit)
+    SynthesisCompleted completed = 3; // Synthesis completed signal
+    SynthesisError error = 4;        // Error occurred
+  }
+}
+
+// Synthesis status messages
+message SynthesisStarted {
+  string message = 1;              // "Starting audio stream"
+  AudioInfo audio_info = 2;        // Audio format information
+}
+
+message SynthesisCompleted {
+  string message = 1;              // "Audio stream complete"
+  SynthesisStats stats = 2;        // Synthesis statistics
+}
+
+message SynthesisError {
+  string error_message = 1;        // Error description
+  string error_code = 2;           // Error type
+}
+
+// Audio format information
+message AudioInfo {
+  int32 sample_rate = 1;           // Sample rate (Hz)
+  int32 channels = 2;              // Number of channels (1 for mono)
+  int32 bit_depth = 3;             // Bit depth (16)
+  string format = 4;               // Format description (e.g., "PCM 16-bit mono")
+}
+
+// Synthesis statistics
+message SynthesisStats {
+  float audio_duration_seconds = 1; // Total audio duration
+  int32 total_bytes = 2;           // Total audio bytes generated
+  int32 packet_count = 3;          // Number of packets sent
+  float processing_time_ms = 4;    // Processing time
+}
+
+// Configuration request
+message ConfigureRequest {
+  string voice = 1;                // Default voice
+  int32 sample_rate = 2;           // Default sample rate
+}
+
+// Configuration response
+message ConfigureResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// Available voices response
+message VoicesResponse {
+  repeated VoiceInfo voices = 1;
+}
+
+// Voice information
+message VoiceInfo {
+  string name = 1;                 // Voice identifier
+  string display_name = 2;         // Human readable name
+  string language = 3;             // Language code (tr-TR)
+  string gender = 4;               // MALE, FEMALE
+  string description = 5;          // Voice description
+  repeated int32 supported_rates = 6; // Supported sample rates
+}
+
+// Health check response
+message HealthResponse {
+  enum Status {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+  }
+  Status status = 1;
+  string message = 2;
+  string voice_model = 3;          // Loaded voice model
+}
+
+// Service statistics
+message StatsResponse {
+  int32 active_sessions = 1;
+  int32 total_syntheses = 2;
+  float average_processing_time = 3;
+  int64 uptime_seconds = 4;
+  string voice_model = 5;
+}

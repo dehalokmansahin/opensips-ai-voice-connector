@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+package opensips.ai.vad;
+
+import "common.proto";
+
+option go_package = "github.com/opensips/ai-voice-connector/proto/vad";
+
+// Voice Activity Detection service
+service VADService {
+  // Process audio for voice activity detection
+  rpc DetectVoiceActivity(DetectVoiceActivityRequest) returns (DetectVoiceActivityResponse);
+  
+  // Stream-based VAD processing
+  rpc DetectVoiceActivityStream(stream DetectVoiceActivityRequest) returns (stream DetectVoiceActivityResponse);
+  
+  // Configure VAD parameters
+  rpc ConfigureVAD(ConfigureVADRequest) returns (ConfigureVADResponse);
+  
+  // Health check
+  rpc HealthCheck(opensips.ai.common.HealthCheckRequest) returns (opensips.ai.common.HealthCheckResponse);
+}
+
+// VAD request messages
+message DetectVoiceActivityRequest {
+  string session_id = 1;
+  opensips.ai.common.AudioChunk audio_chunk = 2;
+  VADConfig config = 3;
+}
+
+message DetectVoiceActivityResponse {
+  opensips.ai.common.Status status = 1;
+  string session_id = 2;
+  VADResult result = 3;
+  VADMetrics metrics = 4;
+}
+
+// VAD configuration
+message ConfigureVADRequest {
+  string session_id = 1;
+  VADConfig config = 2;
+}
+
+message ConfigureVADResponse {
+  opensips.ai.common.Status status = 1;
+}
+
+message VADConfig {
+  float confidence_threshold = 1;  // 0.0 - 1.0
+  float start_threshold_seconds = 2;  // Minimum duration to trigger voice start
+  float stop_threshold_seconds = 3;   // Minimum silence to trigger voice stop
+  float min_volume_threshold = 4;     // Minimum volume level
+  string model_type = 5;              // silero, webrtc, etc.
+}
+
+// VAD result structures
+message VADResult {
+  bool voice_detected = 1;
+  float confidence = 2;
+  VoiceActivity activity = 3;
+  opensips.ai.common.Timestamp detection_time = 4;
+  AudioProperties audio_properties = 5;
+}
+
+message VoiceActivity {
+  enum ActivityType {
+    SILENCE = 0;
+    VOICE_START = 1;
+    VOICE_CONTINUE = 2;
+    VOICE_END = 3;
+  }
+  
+  ActivityType type = 1;
+  opensips.ai.common.Timestamp start_time = 2;
+  opensips.ai.common.Timestamp end_time = 3;
+  float duration_ms = 4;
+}
+
+message AudioProperties {
+  float volume_level = 1;
+  float signal_to_noise_ratio = 2;
+  float spectral_centroid = 3;
+  bool clipping_detected = 4;
+}
+
+// VAD performance metrics
+message VADMetrics {
+  float processing_time_ms = 1;
+  float audio_chunk_duration_ms = 2;
+  int32 samples_processed = 3;
+  float cpu_usage_percent = 4;
+  string model_version = 5;
+}

@@ -1,0 +1,21 @@
+# VAD Service Dependencies
+
+# Core gRPC
+grpcio==1.60.0
+grpcio-tools==1.60.0
+
+# Pipecat VAD dependencies (proven working from legacy)
+torch==2.7.0
+torchaudio==2.7.0
+silero-vad==5.1.2
+onnxruntime==1.19.2
+
+# Audio processing
+numpy==2.2.5
+soundfile==0.12.1
+
+# Logging
+structlog==24.1.0
+
+# Async utilities
+asyncio

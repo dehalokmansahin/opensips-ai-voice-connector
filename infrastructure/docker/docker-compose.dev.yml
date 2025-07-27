@@ -1,0 +1,263 @@
+version: '3.8'
+
+services:
+  # AI Voice Connector - Main orchestrator service
+  ai-voice-connector:
+    build:
+      context: ../..
+      dockerfile: services/ai-voice-connector/Dockerfile
+    container_name: ai-voice-connector
+    ports:
+      - "8080:8080"  # FastAPI HTTP server
+      - "50051:50051"  # gRPC server
+    environment:
+      - PYTHONPATH=/app
+      - LOG_LEVEL=INFO
+      - GRPC_PORT=50051
+      - HTTP_PORT=8080
+      - OPENSIPS_HOST=opensips
+      - OPENSIPS_MI_PORT=8087
+    volumes:
+      - ../../logs:/app/logs
+      - ../../services/ai-voice-connector:/app/services/ai-voice-connector
+    networks:
+      - opensips_network
+    depends_on:
+      - opensips
+      - session-manager
+      - vad-service
+    restart: unless-stopped
+
+  # OpenSIPS SIP Proxy
+  opensips:
+    image: opensips/opensips:3.6
+    container_name: opensips
+    ports:
+      - "5060:5060/udp"
+      - "5060:5060/tcp"
+      - "8087:8087/udp"  # MI interface
+      - "8090:8090/udp"  # Event interface
+    volumes:
+      - ../../infrastructure/opensips/opensips.cfg:/etc/opensips/opensips.cfg
+      - ../../logs/opensips:/var/log/opensips
+    environment:
+      - OPENSIPS_MI_PORT=8087
+      - OPENSIPS_EVENT_PORT=8090
+      - AI_BACKEND_HOST=ai-voice-connector
+      - AI_BACKEND_PORT=50051
+    networks:
+      - opensips_network
+    restart: unless-stopped
+
+  # VAD Service
+  vad-service:
+    build:
+      context: ../..
+      dockerfile: services/vad-service/Dockerfile
+    container_name: vad-service
+    ports:
+      - "50052:50052"
+    environment:
+      - GRPC_PORT=50052
+      - MODEL_PATH=/app/models
+      - LOG_LEVEL=INFO
+    volumes:
+      - vad_models:/app/models
+      - ../../logs/vad:/app/logs
+    networks:
+      - opensips_network
+    restart: unless-stopped
+
+  # ASR Service
+  asr-service:
+    build:
+      context: ../..
+      dockerfile: services/asr-service/Dockerfile
+    container_name: asr-service
+    ports:
+      - "50053:50053"
+    environment:
+      - GRPC_PORT=50053
+      - MODEL_PATH=/app/models
+      - PROVIDER=vosk  # vosk or faster-whisper
+      - LOG_LEVEL=INFO
+    volumes:
+      - asr_models:/app/models
+      - ../../logs/asr:/app/logs
+    networks:
+      - opensips_network
+    restart: unless-stopped
+
+  # LLM Service
+  llm-service:
+    build:
+      context: ../..
+      dockerfile: services/llm-service/Dockerfile
+    container_name: llm-service
+    ports:
+      - "50054:50054"
+    environment:
+      - GRPC_PORT=50054
+      - MODEL_PATH=/app/models
+      - PROVIDER=llama  # llama or openai
+      - LOG_LEVEL=INFO
+    volumes:
+      - llm_models:/app/models
+      - ../../logs/llm:/app/logs
+    networks:
+      - opensips_network
+    restart: unless-stopped
+
+  # TTS Service
+  tts-service:
+    build:
+      context: ../..
+      dockerfile: services/tts-service/Dockerfile
+    container_name: tts-service
+    ports:
+      - "50055:50055"
+    environment:
+      - GRPC_PORT=50055
+      - MODEL_PATH=/app/models
+      - PROVIDER=piper  # piper or elevenlabs
+      - LOG_LEVEL=INFO
+    volumes:
+      - tts_models:/app/models
+      - ../../logs/tts:/app/logs
+    networks:
+      - opensips_network
+    restart: unless-stopped
+
+  # Session Manager Service
+  session-manager:
+    build:
+      context: ../..
+      dockerfile: services/session-manager/Dockerfile
+    container_name: session-manager
+    ports:
+      - "50056:50056"
+    environment:
+      - GRPC_PORT=50056
+      - DATABASE_URL=postgresql://opensips:opensips_password@postgres:5432/opensips
+      - REDIS_URL=redis://:redis_password@redis:6379/0
+      - LOG_LEVEL=INFO
+    volumes:
+      - ../../logs/session:/app/logs
+    networks:
+      - opensips_network
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+  # Context Store Service
+  context-store:
+    build:
+      context: ../..
+      dockerfile: services/context-store/Dockerfile
+    container_name: context-store
+    ports:
+      - "50057:50057"
+    environment:
+      - GRPC_PORT=50057
+      - REDIS_URL=redis://:redis_password@redis:6379/1
+      - LOG_LEVEL=INFO
+    volumes:
+      - ../../logs/context:/app/logs
+    networks:
+      - opensips_network
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  # Banking Service
+  banking-service:
+    build:
+      context: ../..
+      dockerfile: services/banking-service/Dockerfile
+    container_name: banking-service
+    ports:
+      - "50058:50058"
+    environment:
+      - GRPC_PORT=50058
+      - DATABASE_URL=postgresql://opensips:opensips_password@postgres:5432/opensips
+      - LOG_LEVEL=INFO
+    volumes:
+      - ../../logs/banking:/app/logs
+    networks:
+      - opensips_network
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: opensips-postgres
+    environment:
+      - POSTGRES_DB=opensips
+      - POSTGRES_USER=opensips
+      - POSTGRES_PASSWORD=opensips_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../../infrastructure/docker/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - opensips_network
+    restart: unless-stopped
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: opensips-redis
+    command: redis-server --appendonly yes --requirepass redis_password
+    volumes:
+      - redis_data:/data
+    networks:
+      - opensips_network
+    restart: unless-stopped
+
+  # Prometheus Monitoring
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: opensips-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ../../infrastructure/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+    networks:
+      - opensips_network
+    restart: unless-stopped
+
+networks:
+  opensips_network:
+    driver: bridge
+    name: opensips_network
+
+volumes:
+  vad_models:
+    driver: local
+    name: opensips_vad_models
+  asr_models:
+    driver: local
+    name: opensips_asr_models
+  llm_models:
+    driver: local
+    name: opensips_llm_models
+  tts_models:
+    driver: local
+    name: opensips_tts_models
+  postgres_data:
+    driver: local
+    name: opensips_postgres_data
+  redis_data:
+    driver: local
+    name: opensips_redis_data
+  prometheus_data:
+    driver: local
+    name: opensips_prometheus_data

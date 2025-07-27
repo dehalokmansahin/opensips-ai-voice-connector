@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(md-tree:*)",
+      "Bash(mkdir:*)",
+      "Bash(chmod:*)",
+      "Bash(./scripts/proto-gen.sh:*)",
+      "Bash(python:*)",
+      "Bash(find:*)"
+    ],
+    "deny": []
+  }
+}
