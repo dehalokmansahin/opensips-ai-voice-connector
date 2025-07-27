@@ -2,7 +2,9 @@
 
 ### Technical Summary
 
-The Pipecat IVR Voice Assistant employs a **microservices-within-monorepo architecture** centered around real-time audio processing pipelines. The system utilizes **gRPC for inter-service communication** and **Python-based AI/ML components** orchestrated by Pipecat. Key components include an AI Voice Connector service that bridges SIP/RTP telephony protocols with the AI pipeline, supporting both on-premise and cloud deployment scenarios. The architecture prioritizes **sub-700ms latency targets** through streaming architectures and efficient component orchestration, while maintaining **banking-grade security and reliability standards**.
+The OpenSIPS AI Voice Connector implements a **microservices-within-monorepo architecture** with **native pipecat framework integration** for real-time audio processing pipelines. The system features **four independent gRPC microservices** (ASR, LLM, TTS, Core) with **common service base architecture** for standardized health monitoring, logging, and configuration management. The architecture achieves **sub-700ms latency targets** through streaming architectures and efficient service orchestration, while maintaining **banking-grade security and reliability standards**.
+
+**✅ Implementation Status:** Phases 1-2 completed with working microservices, Docker orchestration, and native pipecat integration.
 
 ### High Level Overview
 

@@ -1,107 +1,193 @@
-# Pipecat IVR Voice Assistant Product Requirements Document (PRD)
+# OpenSIPS AI Voice Connector Product Requirements Document (PRD)
 
 ## Goals and Background Context
 
 ### Goals
 
-- Develop a real-time, low-latency voice assistant that enhances banking IVR user experience
-- Enable natural, bidirectional spoken interactions over standard SIP/RTP infrastructure
-- Integrate seamlessly with existing banking call center systems
-- Provide sub-200ms response latency for real-time conversational flow
+- Develop a real-time, low-latency voice assistant that enhances banking IVR user experience using microservices architecture
+- Enable natural, bidirectional spoken interactions over standard SIP/RTP infrastructure with gRPC-based service communication
+- Integrate seamlessly with existing banking call center systems through containerized deployment
+- Provide sub-700ms end-to-end response latency for real-time conversational flow
 - Support standard telephony audio formats (PCMU/8000) without requiring specialized hardware
 - Deliver reliable barge-in capabilities for natural conversation interruption handling
-- Maintain high availability and fault tolerance for production banking environments
+- Maintain high availability and fault tolerance through independent microservices deployment
+- Enable scalable deployment options (on-premise and cloud) via Docker orchestration
 
 ### Background Context
 
 Banking IVR systems traditionally rely on menu-driven interactions that frustrate users with lengthy navigation paths and limited flexibility. This project addresses the need for conversational AI that can understand natural speech and respond intelligently while maintaining the reliability and security standards required for financial services.
 
-The solution leverages Pipecat as the core orchestrator with an AI Voice Connector layer that manages the complex coordination between Voice Activity Detection (VAD), Automatic Speech Recognition (ASR), Large Language Models (LLM), and Text-to-Speech (TTS) components. By utilizing standard SIP/RTP protocols through OpenSIPS, the system integrates with existing telephony infrastructure without requiring specialized hardware or proprietary protocols.
+The solution has evolved from a monolithic Pipecat-based approach to a modern microservices architecture where each AI component (ASR, LLM, TTS) operates as an independent gRPC service. The core application orchestrates these services through a robust service discovery and management layer, with OpenSIPS handling SIP/RTP telephony integration. This architecture enables independent scaling, deployment, and maintenance of AI components while maintaining the reliability and security standards required for financial services.
 
 ### Change Log
 
 | Date | Version | Description | Author |
 |------|---------|-------------|---------|
 | 2025-07-27 | 1.0 | Initial PRD creation from Project Brief | John (PM) |
+| 2025-07-27 | 2.0 | Updated with microservices architecture and current implementation status | John (PM) |
 
 ## Requirements
 
 ### Functional
 
-**FR1:** The system must process incoming SIP/RTP audio calls through OpenSIPS integration
-**FR2:** The system must convert PCMU/8000 audio to PCM 16-bit, 16kHz for internal processing
-**FR3:** The system must detect speech segments using VAD (Silero) with configurable thresholds
-**FR4:** The system must convert speech to text using ASR (VOSK or Faster-Whisper)
-**FR5:** The system must process user queries through LLM (LLaMA or OpenAI GPT-4o) via gRPC interfaces
-**FR6:** The system must generate voice responses using TTS (Piper or ElevenLabs)
-**FR7:** The system must support real-time barge-in/interruption capabilities
+**FR1:** The system must process incoming SIP/RTP audio calls through OpenSIPS integration with core application orchestration
+**FR2:** The system must convert PCMU/8000 audio to PCM 16-bit, 16kHz for internal processing via audio transport layer
+**FR3:** The system must detect speech segments using VAD (Silero) integrated through native pipecat audio.vad components
+**FR4:** The system must convert speech to text using dedicated ASR gRPC service (Native Vosk integration, with future Faster-Whisper cloud option)
+**FR5:** The system must process user queries through dedicated LLM gRPC service (LLaMA with llama-cpp-python, with future OpenAI cloud option)
+**FR6:** The system must generate voice responses using dedicated TTS gRPC service (Piper with native integration, with future ElevenLabs cloud option)
+**FR7:** The system must support real-time barge-in/interruption capabilities using pipecat audio.interruptions and pipeline orchestration
 **FR8:** The system must handle "Card Delivery Status Inquiry" as the MVP pilot scenario
-**FR9:** The system must maintain session context and conversation memory
+**FR9:** The system must maintain session context and conversation memory across microservices
 **FR10:** The system must encode TTS output back to PCMU/8000 for SIP/RTP transmission
+**FR11:** Each microservice (ASR, LLM, TTS) must operate independently with health monitoring and service discovery
+**FR12:** The system must support Docker containerization with orchestrated deployment of all services
+**FR13:** Services must communicate exclusively via gRPC with proper error handling and retry policies
+**FR14:** The system must utilize native pipecat framework components (frames, observers, serializers, audio utilities) for pipeline orchestration and monitoring
+**FR15:** Each service must support configurable backend selection (local vs cloud providers) for flexible deployment scenarios (future feature)
 
 ### Non Functional
 
-**NFR1:** End-to-end response latency must not exceed 700ms (p95)
-**NFR2:** TTS first audio output must be delivered within 200ms
-**NFR3:** ASR first token must be available within 250ms
-**NFR4:** LLM first token response must be generated within 300ms
-**NFR5:** The system must handle 20ms RTP packet processing (~160 bytes each)
-**NFR6:** The system must maintain high availability for production banking environments
-**NFR7:** The system must log all pipeline stages with session IDs for monitoring using gRPC-based telemetry
-**NFR8:** The system must support both on-premise and cloud deployment options
+**NFR1:** End-to-end response latency must not exceed 700ms (p95) across all microservices
+**NFR2:** TTS service first audio output must be delivered within 200ms
+**NFR3:** ASR service first token must be available within 250ms
+**NFR4:** LLM service first token response must be generated within 300ms
+**NFR5:** The system must handle 20ms RTP packet processing (~160 bytes each) in core application
+**NFR6:** Each microservice must maintain independent high availability with health checks and graceful shutdown
+**NFR7:** The system must log all pipeline stages with session IDs using structured logging across all services
+**NFR8:** The system must support both on-premise and cloud deployment through Docker Compose and Kubernetes
+**NFR9:** Services must be horizontally scalable through container orchestration
+**NFR10:** gRPC communication must include authentication, timeouts, and circuit breaker patterns
+**NFR11:** Service discovery must enable dynamic endpoint resolution and health monitoring
 
 ## Technical Assumptions
 
 ### Repository Structure: **Monorepo**
 
 ### Service Architecture
-**Microservices within Monorepo** - Separate services for AI Voice Connector, OpenSIPS proxy, and pipeline components while maintaining unified codebase management.
+**Microservices within Monorepo** - Four independent services:
+1. **ASR Service** (port 50051) - Native Vosk speech recognition with enhanced service base
+2. **LLM Service** (port 50052) - LLaMA processing with llama-cpp-python integration  
+3. **TTS Service** (port 50053) - Piper text-to-speech with streaming audio output
+4. **Core Application** (port 8080) - OpenSIPS integration, pipeline management, and service orchestration
+
+All services use common BaseService framework with standardized health checks, logging, and configuration management.
 
 ### Testing Requirements  
-**Unit + Integration** - Unit tests for individual pipeline components, integration tests for end-to-end audio flow, and real-time latency validation.
+**Unit + Integration** - Unit tests for individual service components, integration tests for gRPC communication, end-to-end audio flow validation, and container orchestration testing.
 
 ### Additional Technical Assumptions and Requests
 
 **Languages & Frameworks:**
-- **Python** for Pipecat pipeline and AI components (ASR, LLM, TTS)
+- **Python 3.10+** for all microservices and core application
+- **gRPC/protobuf** for all inter-service communication with health probes
+- **Docker & Docker Compose** for container orchestration and deployment
+- **FastAPI** for HTTP management interface and health endpoints
 - **OpenSIPS configuration** for SIP proxy and routing
-- **Docker containerization** for deployment consistency
-- **gRPC** for inter-service communication and API interfaces
-- **WebRTC/SIP protocols** for real-time audio transport
+- **Native Pipecat Framework** (pipecat/src/pipecat) with selective component usage including:
+  - **Frames system** for audio/text/control message passing
+  - **Observers** for pipeline monitoring and logging
+  - **Serializers** for audio format conversion and transport
+  - **Audio utilities** including VAD, interruption strategies, and audio processing
+  - **Pipeline orchestration** for managing audio flow and AI component coordination
 
-**AI/ML Stack:**
-- **Pipecat** as core pipeline orchestrator  
-- **Silero VAD** for speech detection
-- **VOSK/Faster-Whisper** for ASR flexibility
-- **LLaMA (local) / OpenAI GPT-4o (cloud)** for LLM options
-- **Piper (local) / ElevenLabs (cloud)** for TTS options
+**AI/ML Stack (Current Implementation):**
+- **Native Vosk** for CPU-based ASR processing (primary implementation)
+- **llama-cpp-python** for local LLM inference with threading support (primary implementation)
+- **Piper TTS** with native library integration for audio synthesis (primary implementation)
+- **Silero VAD** integrated through pipecat.services.audio.vad components
+- **Native Pipecat Audio Processing** including filters, resamplers, and mixers
+- **Service-specific health checks** with model validation
 
-**Infrastructure:**
-- **GPU support** required for LLM inference and potentially ASR
-- **Real-time processing** capabilities with <700ms total latency
-- **Session management** for conversation context
-- **Monitoring & logging** with structured logging and metrics
+**AI/ML Stack (Future Cloud Options):**
+- **Faster-Whisper** cloud integration for enhanced ASR accuracy (future feature)
+- **OpenAI GPT-4o** cloud integration for advanced LLM capabilities (future feature)
+- **ElevenLabs** cloud integration for premium TTS quality (future feature)
+- **Configurable backend selection** per service for hybrid deployment scenarios
 
-**Deployment Targets:**
-- **On-premise deployment** for security/compliance requirements
-- **Cloud deployment option** for scalability
-- **Docker orchestration** (Docker Compose or Kubernetes)
+**Infrastructure (Current Implementation):**
+- **Docker containerization** with multi-stage builds and health checks
+- **Service discovery** through Docker networking and service registry
+- **Structured logging** with service-specific identifiers and session tracking
+- **Configuration management** via environment variables and config files
+- **Independent scaling** of each microservice based on load requirements
+
+**Deployment Targets (Implemented):**
+- **Development mode** with live code mounting and debug logging
+- **Production mode** with optimized containers and security hardening
+- **Docker Compose orchestration** with dependency management and health checks
+- **Model volume mounting** for efficient AI model management
 
 ## Epic List
 
-**Epic 1: Foundation & Core Infrastructure**  
-Establish project setup, containerization, OpenSIPS configuration, and basic audio pipeline with health monitoring.
+**Epic 1: Foundation & Core Infrastructure** ✅ **COMPLETED**  
+~~Establish project setup, containerization, OpenSIPS configuration, and basic audio pipeline with health monitoring.~~
+Established monorepo structure, minimal pipecat extraction, core application architecture, and gRPC service foundations.
 
-**Epic 2: Core AI Pipeline Integration**  
-Implement VAD, ASR, LLM, and TTS components with Pipecat orchestration for basic voice processing.
+**Epic 2: Core AI Pipeline Integration** ✅ **COMPLETED**  
+~~Implement VAD, ASR, LLM, and TTS components with Pipecat orchestration for basic voice processing.~~
+Implemented independent microservices for ASR (Vosk), LLM (LLaMA), and TTS (Piper) with common service base, health monitoring, and Docker orchestration.
 
-**Epic 3: Real-time Audio Transport & SIP Integration**  
-Complete RTP audio handling, PCMU/PCM conversion, and full SIP call flow integration.
+**Epic 3: Real-time Audio Transport & SIP Integration** 🔄 **IN PROGRESS**  
+Complete RTP audio handling, PCMU/PCM conversion, full SIP call flow integration, and OpenSIPS refactoring for microservices architecture.
 
-**Epic 4: Banking IVR Features & Optimization**  
-Implement Card Delivery Status Inquiry MVP scenario, conversation context, and performance optimization to meet latency targets.
+**Epic 4: Banking IVR Features & Optimization** ⏳ **PENDING**  
+Implement Card Delivery Status Inquiry MVP scenario, conversation context, performance optimization, and production deployment preparation.
 
-## Epic 1: Foundation & Core Infrastructure
+**Epic 5: Cloud AI Integration & Hybrid Deployment** 🚀 **FUTURE**  
+Add cloud AI provider support (OpenAI, ElevenLabs, Faster-Whisper) with configurable backend selection and hybrid deployment capabilities.
+
+## Current Implementation Status (Updated July 27, 2025)
+
+### ✅ Completed Components
+
+**Core Architecture:**
+- Monorepo structure with clean service separation (`core/`, `services/`, `config/`)
+- Native pipecat framework integration (pipecat/src/pipecat) with selective component usage
+- gRPC service architecture with common BaseService foundation  
+- Docker containerization with development and production modes
+- Service discovery and health monitoring infrastructure
+- Pipecat-based pipeline orchestration with frames, observers, and audio utilities
+
+**Microservices Implementation:**
+- **ASR Service** (enhanced_asr_server.py): Native Vosk integration with streaming recognition, health checks, and service statistics
+  - *Future:* Faster-Whisper cloud backend support
+- **LLM Service** (enhanced_llm_server.py): LLaMA with llama-cpp-python, conversation context, and streaming generation
+  - *Future:* OpenAI GPT-4o cloud backend support  
+- **TTS Service** (enhanced_tts_server.py): Piper TTS with streaming audio synthesis and voice management
+  - *Future:* ElevenLabs cloud backend support
+- **Common Service Base** (service_base.py): Standardized logging, health checks, configuration, and graceful shutdown
+
+**Docker Infrastructure:**
+- Production docker-compose.yml with service orchestration and health dependencies
+- Development docker-compose.dev.yml with live code mounting
+- Individual service Dockerfiles with proper health checks
+- Service networking and volume management for model files
+
+**Native Pipecat Integration:**
+- **Frame System**: Core audio/text/control message passing using pipecat.frames
+- **Audio Processing**: VAD (pipecat.audio.vad.silero), audio filters, and resamplers
+- **Pipeline Management**: Pipeline orchestration using pipecat.pipeline components
+- **Observers**: Monitoring and logging with pipecat.observers for debugging and analytics
+- **Serializers**: Audio format conversion using pipecat.serializers for transport protocols
+- **Services Integration**: Leveraging pipecat.services architecture patterns for AI component management
+
+### 🔄 Current Phase: OpenSIPS Integration Refactoring
+
+**Next Steps:**
+- Refactor OpenSIPS integration layer to work with new microservices architecture
+- Update RTP transport to communicate with gRPC services using pipecat transport components
+- Implement conversation pipeline manager with native pipecat pipeline orchestration
+- Integrate pipecat observers for comprehensive pipeline monitoring and logging
+- Test end-to-end audio flow with pipecat frames and serializers
+
+### ⏳ Remaining Work
+
+**Phase 3:** Complete SIP/RTP integration with microservices
+**Phase 4:** Implement banking IVR features and performance optimization
+**Phase 5:** Production deployment and testing
+
+## Epic 1: Foundation & Core Infrastructure ✅ COMPLETED
 
 **Epic Goal:** Establish foundational project infrastructure including containerization, basic OpenSIPS configuration, Pipecat setup, and health monitoring while delivering an initial voice pipeline demonstration that validates the core technical stack.
 
@@ -390,6 +476,75 @@ Implement Card Delivery Status Inquiry MVP scenario, conversation context, and p
 5. Security and compliance testing for banking regulations
 6. MVP demonstration and stakeholder sign-off
 
+## Epic 5: Cloud AI Integration & Hybrid Deployment 🚀 FUTURE
+
+**Epic Goal:** Enhance the system with cloud AI provider integrations to offer premium quality options and hybrid deployment flexibility, enabling customers to choose between cost-effective local processing and high-quality cloud services based on their specific needs and infrastructure constraints.
+
+### Story 5.1: Faster-Whisper ASR Cloud Integration
+**As a** system administrator,  
+**I want** the option to use Faster-Whisper cloud ASR service,  
+**so that** I can achieve higher transcription accuracy for critical banking conversations.
+
+**Acceptance Criteria:**
+1. Faster-Whisper API integration with secure authentication
+2. Configuration option to switch between Vosk (local) and Faster-Whisper (cloud)
+3. Streaming audio support with cloud API
+4. Error handling and fallback to local ASR if cloud unavailable
+5. Cost monitoring and usage tracking for cloud service
+6. Performance comparison testing between local and cloud options
+
+### Story 5.2: OpenAI GPT-4o LLM Cloud Integration
+**As a** banking customer,  
+**I want** access to advanced language understanding capabilities,  
+**so that** I can have more natural and intelligent conversations about complex banking needs.
+
+**Acceptance Criteria:**
+1. OpenAI GPT-4o API integration with secure key management
+2. Configuration option to switch between LLaMA (local) and OpenAI (cloud)
+3. Banking-specific prompt engineering and safety controls
+4. Conversation context management with cloud API
+5. Cost optimization through intelligent caching and request batching
+6. Compliance validation for cloud data processing
+
+### Story 5.3: ElevenLabs TTS Cloud Integration
+**As a** banking customer,  
+**I want** natural, high-quality voice responses,  
+**so that** my experience feels more human and professional.
+
+**Acceptance Criteria:**
+1. ElevenLabs API integration with voice selection options
+2. Configuration option to switch between Piper (local) and ElevenLabs (cloud)
+3. Streaming audio synthesis with low latency
+4. Voice customization for brand consistency
+5. Audio quality optimization for telephony transmission
+6. Cost management and voice usage monitoring
+
+### Story 5.4: Configurable Backend Selection Framework
+**As a** system administrator,  
+**I want** flexible configuration options for AI backend selection,  
+**so that** I can optimize for cost, quality, and compliance requirements.
+
+**Acceptance Criteria:**
+1. Service-level configuration for backend selection (local/cloud/hybrid)
+2. Runtime switching capabilities without service restart
+3. Load balancing between local and cloud backends
+4. Health monitoring for all backend options
+5. Automatic failover from cloud to local backends
+6. Configuration validation and deployment testing
+
+### Story 5.5: Hybrid Deployment Scenarios
+**As a** enterprise customer,  
+**I want** the ability to use different AI backends based on call priority or customer tier,  
+**so that** I can optimize costs while maintaining quality for premium customers.
+
+**Acceptance Criteria:**
+1. Customer tier-based backend routing
+2. Call priority assessment and backend selection
+3. Real-time cost vs quality optimization
+4. Monitoring and analytics for hybrid usage patterns
+5. Business rule engine for backend selection logic
+6. Cost reporting and optimization recommendations
+
 ## Checklist Results Report
 
 ### Executive Summary
@@ -462,12 +617,40 @@ Implement Card Delivery Status Inquiry MVP scenario, conversation context, and p
 
 ### Final Decision
 
-**✅ READY FOR ARCHITECT** - The PRD provides comprehensive requirements with clear technical guidance. The identified gaps are enhancement-level items that don't block architectural design work.
+**✅ ARCHITECTURE IMPLEMENTED** - The microservices architecture has been successfully implemented with gRPC services, Docker orchestration, and service management. Current focus is on OpenSIPS integration refactoring (Phase 3).
+
+## Docker Deployment Guide
+
+### Quick Start
+```bash
+# Development mode with live code changes
+docker-compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+
+# Production mode
+docker-compose up -d
+
+# Check service health
+docker-compose ps
+```
+
+### Service Endpoints
+- **ASR Service**: localhost:50051 (gRPC)
+- **LLM Service**: localhost:50052 (gRPC) 
+- **TTS Service**: localhost:50053 (gRPC)
+- **Core Application**: localhost:8080 (HTTP management)
+
+### Model Requirements
+Place AI model files in respective directories:
+- `models/vosk/` - Vosk ASR model files
+- `models/llm/` - LLaMA model files (.gguf format)
+- `models/piper/` - Piper TTS model files (.onnx + .json)
+
+See `README.Docker.md` for complete deployment instructions.
 
 ## Next Steps
 
-### UX Expert Prompt
-Begin UX analysis and voice user interface design for the banking IVR voice assistant using this PRD as foundation. Focus on conversation flow optimization and voice interaction patterns.
+### Current Priority: Phase 3 - OpenSIPS Integration
+Refactor the existing OpenSIPS integration layer to work with the new microservices architecture, enabling end-to-end voice call processing.
 
-### Architect Prompt
-Initiate architectural design phase for the Pipecat-based voice assistant system using this PRD as requirements foundation. Design the complete technical architecture including component integration, deployment patterns, and scalability considerations.
+### Phase 4: Banking Features Implementation  
+Once Phase 3 is complete, implement the Card Delivery Status Inquiry MVP scenario with banking-specific conversation flows and performance optimization.
