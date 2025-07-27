@@ -37,6 +37,16 @@ from .networking import (
     calculate_bandwidth
 )
 
+from .database import (
+    DatabaseManager,
+    TestScenario,
+    TestExecution,
+    StepExecution,
+    IntentTrainingData,
+    get_database_manager,
+    initialize_database
+)
+
 __all__ = [
     # Logging
     "setup_logging",
@@ -71,4 +81,13 @@ __all__ = [
     "test_network_latency",
     "format_bytes",
     "calculate_bandwidth",
+    
+    # Database
+    "DatabaseManager",
+    "TestScenario",
+    "TestExecution",
+    "StepExecution",
+    "IntentTrainingData",
+    "get_database_manager",
+    "initialize_database",
 ]

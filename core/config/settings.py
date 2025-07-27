@@ -40,6 +40,7 @@ class ServicesConfig:
     """All gRPC services configuration"""
     asr: ServiceConfig
     tts: ServiceConfig
+    intent_recognition: Optional[ServiceConfig] = None
     vad: Optional[ServiceConfig] = None
 
 @dataclass
@@ -124,9 +125,15 @@ class Settings:
         tts_port = self._get_config_value('tts', 'port', '50053', int)
         tts_timeout = self._get_config_value('tts', 'timeout', '30.0', float)
         
+        # Intent Recognition Service
+        intent_host = self._get_config_value('intent', 'host', 'localhost')
+        intent_port = self._get_config_value('intent', 'port', '50054', int)
+        intent_timeout = self._get_config_value('intent', 'timeout', '30.0', float)
+        
         self.services = ServicesConfig(
             asr=ServiceConfig(host=asr_host, port=asr_port, timeout=asr_timeout),
-            tts=ServiceConfig(host=tts_host, port=tts_port, timeout=tts_timeout)
+            tts=ServiceConfig(host=tts_host, port=tts_port, timeout=tts_timeout),
+            intent_recognition=ServiceConfig(host=intent_host, port=intent_port, timeout=intent_timeout)
         )
     
     async def _load_audio_config(self):
@@ -192,6 +199,10 @@ class Settings:
             tts=ServiceConfig(
                 host=os.getenv('TTS_SERVICE_HOST', 'localhost'),
                 port=int(os.getenv('TTS_SERVICE_PORT', '50053'))
+            ),
+            intent_recognition=ServiceConfig(
+                host=os.getenv('INTENT_SERVICE_HOST', 'localhost'),
+                port=int(os.getenv('INTENT_SERVICE_PORT', '50054'))
             )
         )
         

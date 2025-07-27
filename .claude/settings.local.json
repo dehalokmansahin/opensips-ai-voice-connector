@@ -36,7 +36,9 @@
       "Bash(diff:*)",
       "Bash(./scripts/generate-proto.sh:*)",
       "Bash(.bmad-core/tasks/execute-checklist:*)",
-      "Bash(sed:*)"
+      "Bash(sed:*)",
+      "Bash(echo)",
+      "Bash(/dev/null)"
     ],
     "deny": []
   }

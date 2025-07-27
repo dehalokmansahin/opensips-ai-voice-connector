@@ -3,6 +3,7 @@
 from .service_registry import ServiceRegistry
 from .asr_client import ASRClient, StreamingSession
 from .tts_client import TTSClient, TTSQueue, SentenceFlushAggregator
+from .intent_client import IntentClient, IntentRecognitionManager
 
 __all__ = [
     "ServiceRegistry",
@@ -11,4 +12,6 @@ __all__ = [
     "TTSClient",
     "TTSQueue",
     "SentenceFlushAggregator",
+    "IntentClient",
+    "IntentRecognitionManager",
 ]

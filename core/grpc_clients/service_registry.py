@@ -38,6 +38,10 @@ class ServiceRegistry:
             # Initialize TTS service
             await self._initialize_service('tts', self.config.tts)
             
+            # Initialize Intent Recognition service
+            if hasattr(self.config, 'intent_recognition') and self.config.intent_recognition:
+                await self._initialize_service('intent', self.config.intent_recognition)
+            
             # Initialize VAD service if configured
             if self.config.vad:
                 await self._initialize_service('vad', self.config.vad)

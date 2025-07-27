@@ -1,0 +1,55 @@
+# Intent Recognition Service - Development Dockerfile
+# Foundation with hot reload for development
+
+FROM python:3.10-slim
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV INTENT_SERVICE_PORT=50054
+ENV INTENT_MODEL_PATH=/app/models
+ENV CUDA_VISIBLE_DEVICES=""
+ENV ENVIRONMENT=development
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    libgomp1 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create app directory
+WORKDIR /app
+
+# Copy requirements and install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install development dependencies
+RUN pip install --no-cache-dir \
+    watchdog \
+    pytest \
+    pytest-asyncio
+
+# Create directories
+RUN mkdir -p /app/models /app/data /app/logs
+
+# Copy source code
+COPY . .
+
+# Generate gRPC code
+RUN python -m grpc_tools.protoc \
+    --python_out=./src \
+    --grpc_python_out=./src \
+    --proto_path=./proto \
+    intent_service.proto
+
+# Set permissions
+RUN chmod +x ./src/main.py
+
+# Expose service port
+EXPOSE 50054
+
+# Development command with hot reload
+CMD ["python", "-m", "src.main"]

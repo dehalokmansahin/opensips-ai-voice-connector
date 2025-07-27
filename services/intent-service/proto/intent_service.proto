@@ -1,0 +1,145 @@
+syntax = "proto3";
+
+package opensips.ai.intent;
+
+import "google/protobuf/empty.proto";
+
+option go_package = "github.com/opensips/ai-voice-connector/proto/intent";
+
+// Intent Recognition service for IVR automation
+service IntentRecognition {
+  // Classify text into intent categories
+  rpc ClassifyIntent(ClassifyIntentRequest) returns (ClassifyIntentResponse);
+  
+  // Classify multiple texts in batch
+  rpc ClassifyIntentBatch(ClassifyIntentBatchRequest) returns (ClassifyIntentBatchResponse);
+  
+  // Get list of supported intents
+  rpc GetSupportedIntents(google.protobuf.Empty) returns (GetSupportedIntentsResponse);
+  
+  // Update model training data
+  rpc UpdateTrainingData(UpdateTrainingDataRequest) returns (UpdateTrainingDataResponse);
+  
+  // Health check
+  rpc HealthCheck(google.protobuf.Empty) returns (HealthResponse);
+  
+  // Get service statistics
+  rpc GetStats(google.protobuf.Empty) returns (StatsResponse);
+}
+
+// Single intent classification request
+message ClassifyIntentRequest {
+  string text = 1;                          // Text to classify
+  float confidence_threshold = 2;           // Minimum confidence threshold (default: 0.85)
+  repeated string candidate_intents = 3;    // Optional: limit to specific intents
+  string session_id = 4;                    // Optional: session identifier for tracking
+}
+
+// Single intent classification response
+message ClassifyIntentResponse {
+  string intent = 1;                        // Predicted intent label
+  float confidence = 2;                     // Confidence score (0.0 to 1.0)
+  bool meets_threshold = 3;                 // Whether confidence meets threshold
+  repeated IntentScore alternative_intents = 4; // Alternative intent scores
+  ClassificationMetrics metrics = 5;        // Processing metrics
+}
+
+// Batch classification request
+message ClassifyIntentBatchRequest {
+  repeated ClassifyIntentRequest requests = 1;
+}
+
+// Batch classification response
+message ClassifyIntentBatchResponse {
+  repeated ClassifyIntentResponse responses = 1;
+  BatchMetrics batch_metrics = 2;
+}
+
+// Intent score for alternatives
+message IntentScore {
+  string intent = 1;                        // Intent label
+  float confidence = 2;                     // Confidence score
+}
+
+// Classification processing metrics
+message ClassificationMetrics {
+  float processing_time_ms = 1;             // Time taken for classification
+  int32 token_count = 2;                    // Number of tokens processed
+  string model_version = 3;                 // Model version used
+}
+
+// Batch processing metrics
+message BatchMetrics {
+  float total_processing_time_ms = 1;       // Total batch processing time
+  int32 successful_classifications = 2;     // Number of successful classifications
+  int32 failed_classifications = 3;         // Number of failed classifications
+  float average_processing_time_ms = 4;     // Average per-item processing time
+}
+
+// Supported intents response
+message GetSupportedIntentsResponse {
+  repeated IntentInfo supported_intents = 1;
+  int32 total_count = 2;
+  string model_version = 3;
+}
+
+// Intent information
+message IntentInfo {
+  string intent_label = 1;                  // Intent identifier
+  string display_name = 2;                  // Human-readable name
+  string description = 3;                   // Intent description
+  float default_threshold = 4;              // Default confidence threshold
+  repeated string example_phrases = 5;      // Example phrases for this intent
+  int32 training_sample_count = 6;          // Number of training samples
+}
+
+// Training data update request
+message UpdateTrainingDataRequest {
+  repeated TrainingExample examples = 1;
+  bool retrain_immediately = 2;             // Whether to retrain model immediately
+  string update_source = 3;                 // Source of training data update
+}
+
+// Training example
+message TrainingExample {
+  string text = 1;                          // Training text
+  string intent_label = 2;                  // Correct intent label
+  float confidence_threshold = 3;           // Required confidence for this example
+}
+
+// Training data update response
+message UpdateTrainingDataResponse {
+  bool success = 1;
+  string message = 2;
+  int32 examples_added = 3;
+  bool model_retrained = 4;
+  string new_model_version = 5;
+}
+
+// Health check response
+message HealthResponse {
+  enum Status {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+    LOADING = 3;
+  }
+  Status status = 1;
+  string message = 2;
+  string model_version = 3;                 // Loaded model version
+  int32 supported_intents_count = 4;        // Number of supported intents
+  float model_load_time_ms = 5;             // Time taken to load model
+}
+
+// Service statistics
+message StatsResponse {
+  int64 total_classifications = 1;          // Total classifications performed
+  int64 successful_classifications = 2;     // Successful classifications
+  int64 failed_classifications = 3;         // Failed classifications
+  float average_processing_time_ms = 4;     // Average processing time
+  float average_confidence = 5;             // Average confidence score
+  int64 uptime_seconds = 6;                 // Service uptime
+  string model_version = 7;                 // Current model version
+  int32 active_sessions = 8;                // Active sessions
+  map<string, int64> intent_usage_count = 9; // Usage count per intent
+}

@@ -189,3 +189,10 @@ test_*.py
 yolo_*.py
 .bmad-core
 .cursor
+
+# Database and test data files
+data/databases/*.db
+data/databases/*.db-journal
+data/test_results/
+data/training_data/*.json
+data/training_data/*.csv

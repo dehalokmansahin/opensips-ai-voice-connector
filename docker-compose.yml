@@ -57,6 +57,33 @@ services:
     networks:
       - opensips-ai-network
 
+  # Intent Recognition Service
+  intent-service:
+    build:
+      context: ./services/intent-service
+      dockerfile: Dockerfile
+    container_name: opensips-intent-service
+    ports:
+      - "50054:50054"
+    environment:
+      - INTENT_SERVICE_PORT=50054
+      - INTENT_MODEL_PATH=/app/models
+      - LOG_LEVEL=INFO
+      - INTENT_MAX_WORKERS=10
+      - CUDA_VISIBLE_DEVICES=""  # CPU-only deployment
+    volumes:
+      - ./models/intent:/app/models:ro
+      - ./data/training_data:/app/data/training_data:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import grpc; import sys; sys.path.append('./src'); import intent_service_pb2_grpc; import intent_service_pb2; from google.protobuf.empty_pb2 import Empty; channel = grpc.insecure_channel('localhost:50054'); stub = intent_service_pb2_grpc.IntentRecognitionStub(channel); stub.HealthCheck(Empty(), timeout=5); print('OK')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - opensips-ai-network
+
   # Core Application
   opensips-ai-core:
     build:
@@ -71,6 +98,7 @@ services:
       - CORE_LOG_LEVEL=INFO
       - ASR_SERVICE_URL=asr-service:50051
       - TTS_SERVICE_URL=tts-service:50053
+      - INTENT_SERVICE_URL=intent-service:50054
       - OPENSIPS_HOST=0.0.0.0
       - OPENSIPS_PORT=5060
       - RTP_PORT_RANGE_START=10000
@@ -80,9 +108,12 @@ services:
         condition: service_healthy
       tts-service:
         condition: service_healthy
+      intent-service:
+        condition: service_healthy
     volumes:
       - ./config:/app/config:ro
       - ./logs:/app/logs:rw
+      - ./data:/app/data:rw
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
@@ -105,3 +136,4 @@ volumes:
   vosk-models:
   piper-models:
   application-logs:
+  test-data:
