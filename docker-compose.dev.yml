@@ -1,0 +1,66 @@
+version: '3.8'
+
+# Development override for docker-compose.yml
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+services:
+  # ASR Service - Development
+  asr-service:
+    build:
+      context: ./services/asr-service
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ./services/asr-service/src:/app/src:rw
+      - ./services/common:/app/common:ro
+      - ./models/vosk:/app/model:ro
+    environment:
+      - LOG_LEVEL=DEBUG
+      - PYTHONPATH=/app:/app/src:/app/common
+    command: ["python", "-u", "/app/src/enhanced_asr_server.py"]
+
+  # LLM Service - Development
+  llm-service:
+    build:
+      context: ./services/llm-service
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ./services/llm-service/src:/app/src:rw
+      - ./services/common:/app/common:ro
+      - ./models/llm:/app/model:ro
+      - ./models/rag_model:/app/rag_model:rw
+    environment:
+      - LOG_LEVEL=DEBUG
+      - PYTHONPATH=/app:/app/src:/app/common
+    command: ["python", "-u", "/app/src/enhanced_llm_server.py"]
+
+  # TTS Service - Development
+  tts-service:
+    build:
+      context: ./services/tts-service
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ./services/tts-service/src:/app/src:rw
+      - ./services/common:/app/common:ro
+      - ./models/piper:/app/model:ro
+    environment:
+      - LOG_LEVEL=DEBUG
+      - PYTHONPATH=/app:/app/src:/app/common
+    command: ["python", "-u", "/app/src/enhanced_tts_server.py"]
+
+  # Core Application - Development
+  opensips-ai-core:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ./core:/app/core:rw
+      - ./config:/app/config:rw
+      - ./logs:/app/logs:rw
+    environment:
+      - CORE_LOG_LEVEL=DEBUG
+      - PYTHONPATH=/app:/app/core
+    command: ["python", "-u", "/app/core/main.py"]
+    ports:
+      - "8080:8080"
+      - "5060:5060/udp"
+      - "10000-10100:10000-10100/udp"

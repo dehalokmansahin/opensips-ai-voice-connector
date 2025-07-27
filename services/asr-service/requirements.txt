@@ -1,0 +1,12 @@
+# Native ASR Service Requirements
+# Based on C:\Cursor\vosk-server legacy dependencies
+
+# Core gRPC dependencies  
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
+
+# Native Vosk ASR dependencies (from legacy)
+vosk>=0.3.45
+
+# Async support
+asyncio

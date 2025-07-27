@@ -1,0 +1,15 @@
+# Native TTS Service Requirements  
+# Based on C:\Cursor\piper-tts legacy dependencies
+
+# Core gRPC dependencies
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
+
+# Native Piper TTS dependencies (from legacy)
+piper-tts>=1.2.0
+
+# Audio processing (from legacy)
+numpy>=1.24.0
+
+# Async support
+asyncio

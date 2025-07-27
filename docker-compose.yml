@@ -1,0 +1,145 @@
+version: '3.8'
+
+services:
+  # ASR Service
+  asr-service:
+    build:
+      context: ./services/asr-service
+      dockerfile: Dockerfile
+    container_name: opensips-asr-service
+    ports:
+      - "50051:50051"
+    environment:
+      - ASR_SERVICE_LISTEN_ADDR=[::]:50051
+      - VOSK_MODEL_PATH=/app/model
+      - VOSK_SAMPLE_RATE=16000
+      - VOSK_SHOW_WORDS=true
+      - LOG_LEVEL=INFO
+      - ASR_MAX_WORKERS=10
+    volumes:
+      - ./models/vosk:/app/model:ro
+    healthcheck:
+      test: ["CMD", "grpc-health-probe", "-addr=localhost:50051", "-service=ASRService"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - opensips-ai-network
+
+  # LLM Service
+  llm-service:
+    build:
+      context: ./services/llm-service
+      dockerfile: Dockerfile
+    container_name: opensips-llm-service
+    ports:
+      - "50052:50052"
+    environment:
+      - LLM_SERVICE_LISTEN_ADDR=[::]:50052
+      - LLM_MODEL_PATH=/app/model/llama-model.gguf
+      - LLM_CONTEXT_SIZE=2048
+      - LLM_THREADS=4
+      - LLM_GPU_LAYERS=0
+      - LLM_TEMPERATURE=0.7
+      - LLM_MAX_TOKENS=150
+      - LLM_USE_MLOCK=false
+      - LOG_LEVEL=INFO
+      - LLM_MAX_WORKERS=4
+      - TRANSFORMERS_OFFLINE=1
+      - HF_HUB_OFFLINE=1
+      - HF_HUB_DISABLE_TELEMETRY=1
+    volumes:
+      - ./models/llm:/app/model:ro
+      - ./models/rag_model:/app/rag_model:rw
+    healthcheck:
+      test: ["CMD", "grpc-health-probe", "-addr=localhost:50052", "-service=LLMService"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - opensips-ai-network
+
+  # TTS Service
+  tts-service:
+    build:
+      context: ./services/tts-service
+      dockerfile: Dockerfile
+    container_name: opensips-tts-service
+    ports:
+      - "50053:50053"
+    environment:
+      - TTS_SERVICE_LISTEN_ADDR=[::]:50053
+      - PIPER_MODEL_DIR=/app/model
+      - PIPER_MODEL_NAME=tr_TR-fahrettin-medium
+      - PIPER_SAMPLE_RATE=22050
+      - PIPER_DEFAULT_VOICE=tr_TR-fahrettin-medium
+      - LOG_LEVEL=INFO
+      - TTS_MAX_WORKERS=10
+    volumes:
+      - ./models/piper:/app/model:ro
+    healthcheck:
+      test: ["CMD", "grpc-health-probe", "-addr=localhost:50053", "-service=TTSService"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - opensips-ai-network
+
+  # Core Application
+  opensips-ai-core:
+    build:
+      context: .
+      dockerfile: Dockerfile.core
+    container_name: opensips-ai-core
+    ports:
+      - "8080:8080"  # HTTP management interface
+      - "5060:5060/udp"  # SIP
+      - "10000-10100:10000-10100/udp"  # RTP range
+    environment:
+      - CORE_LOG_LEVEL=INFO
+      - ASR_SERVICE_URL=asr-service:50051
+      - LLM_SERVICE_URL=llm-service:50052
+      - TTS_SERVICE_URL=tts-service:50053
+      - OPENSIPS_HOST=0.0.0.0
+      - OPENSIPS_PORT=5060
+      - RTP_PORT_RANGE_START=10000
+      - RTP_PORT_RANGE_END=10100
+    depends_on:
+      asr-service:
+        condition: service_healthy
+      llm-service:
+        condition: service_healthy
+      tts-service:
+        condition: service_healthy
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/app/logs:rw
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - opensips-ai-network
+
+networks:
+  opensips-ai-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  # Named volumes for persistent data
+  vosk-models:
+  llm-models:
+  piper-models:
+  application-logs:

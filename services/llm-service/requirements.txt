@@ -1,0 +1,19 @@
+# Native LLM Service Requirements
+# Based on C:\Cursor\llama-turkish-server legacy dependencies
+
+# Core gRPC dependencies
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
+
+# Native LLM dependencies (from legacy)
+llama-cpp-python>=0.2.0
+
+# Optional: RAG support (from legacy)
+sentence-transformers>=2.2.0
+chromadb>=0.4.0
+
+# Async support
+asyncio
+
+# Logging and utilities
+structlog>=23.0.0
