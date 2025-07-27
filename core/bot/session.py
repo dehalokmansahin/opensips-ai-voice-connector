@@ -14,6 +14,7 @@ from ..grpc_clients.asr_client import StreamingSession as ASRStreamingSession
 from ..grpc_clients.llm_client import ConversationManager
 from ..grpc_clients.tts_client import SentenceFlushAggregator
 from ..opensips.rtp_transport import RTPTransport
+from ..pipecat.transports import PipecatRTPTransport
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,10 @@ class ConversationSession:
         self.conversation_manager: Optional[ConversationManager] = None
         self.tts_aggregator: Optional[SentenceFlushAggregator] = None
         
+        # Pipecat integration
+        self.pipecat_transport: Optional[PipecatRTPTransport] = None
+        self.use_pipecat = True  # Enable pipecat integration
+        
         # Conversation tracking
         self.transcript: List[Dict[str, Any]] = []
         self.message_count = 0
@@ -81,6 +86,61 @@ class ConversationSession:
         """Initialize conversation session"""
         try:
             logger.info(f"Initializing conversation session: {self.call_id}")
+            
+            if self.use_pipecat and self.rtp_transport:
+                # Use pipecat-integrated transport
+                await self._initialize_pipecat_transport()
+            else:
+                # Use legacy approach
+                await self._initialize_legacy_components()
+            
+            # Send welcome message
+            await self._send_welcome_message()
+            
+            self.state = SessionState.ACTIVE
+            logger.info(f"Conversation session initialized: {self.call_id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize session {self.call_id}: {e}")
+            self.state = SessionState.CLOSED
+            raise
+    
+    async def _initialize_pipecat_transport(self):
+        """Initialize pipecat-integrated RTP transport"""
+        try:
+            logger.info(f"Initializing pipecat transport: {self.call_id}")
+            
+            # Create session configuration for pipecat
+            session_config = {
+                'system_prompt': self.config.system_prompt if self.config else "Sen Türkçe konuşan bir yapay zeka asistanısın. Kısa ve net cevaplar ver.",
+                'asr_config': self.config.asr_config if self.config else {},
+                'llm_config': self.config.llm_config if self.config else {},
+                'tts_config': self.config.tts_config if self.config else {}
+            }
+            
+            # Create pipecat RTP transport
+            self.pipecat_transport = PipecatRTPTransport(
+                rtp_transport=self.rtp_transport,
+                asr_client=self.asr_client,
+                llm_client=self.llm_client,
+                tts_client=self.tts_client,
+                session_config=session_config,
+                call_id=self.call_id
+            )
+            
+            # Start the integrated transport
+            await self.pipecat_transport.start()
+            
+            logger.info(f"Pipecat transport initialized: {self.call_id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize pipecat transport: {e}")
+            raise
+    
+    async def _initialize_legacy_components(self):
+        """Initialize legacy conversation components"""
+        try:
+            logger.info(f"Initializing legacy components: {self.call_id}")
             
             # Initialize conversation manager
             system_prompt = self.config.system_prompt if self.config else ""
@@ -102,15 +162,10 @@ class ConversationSession:
             # Initialize ASR streaming session
             await self._initialize_asr_session()
             
-            # Send welcome message
-            await self._send_welcome_message()
-            
-            self.state = SessionState.ACTIVE
-            logger.info(f"Conversation session initialized: {self.call_id}")
+            logger.info(f"Legacy components initialized: {self.call_id}")
             
         except Exception as e:
-            logger.error(f"Failed to initialize session {self.call_id}: {e}")
-            self.state = SessionState.CLOSED
+            logger.error(f"Failed to initialize legacy components: {e}")
             raise
     
     async def _initialize_asr_session(self):
@@ -142,7 +197,13 @@ class ConversationSession:
         """Send welcome message to user"""
         try:
             welcome_message = "Merhaba! Size nasıl yardımcı olabilirim?"
-            await self._generate_and_send_tts(welcome_message)
+            
+            if self.pipecat_transport:
+                # Use pipecat transport
+                await self.pipecat_transport.send_system_message(welcome_message)
+            else:
+                # Use legacy method
+                await self._generate_and_send_tts(welcome_message)
             
             # Add to transcript
             self._add_to_transcript("assistant", welcome_message)
@@ -343,7 +404,13 @@ class ConversationSession:
         """Send system message (for broadcasting, etc.)"""
         try:
             system_message = f"Sistem mesajı: {message}"
-            await self._generate_and_send_tts(system_message)
+            
+            if self.pipecat_transport:
+                # Use pipecat transport
+                await self.pipecat_transport.send_system_message(system_message)
+            else:
+                # Use legacy method
+                await self._generate_and_send_tts(system_message)
             
         except Exception as e:
             logger.error(f"Error sending system message: {e}")
@@ -377,7 +444,12 @@ class ConversationSession:
                 except asyncio.CancelledError:
                     pass
             
-            # Stop ASR session
+            # Clean up pipecat transport
+            if self.pipecat_transport:
+                await self.pipecat_transport.stop()
+                self.pipecat_transport = None
+            
+            # Stop ASR session (legacy)
             if self.asr_session:
                 await self.asr_session.stop()
             
@@ -397,7 +469,7 @@ class ConversationSession:
             duration = (datetime.now() - self.created_at).total_seconds()
             idle_time = (datetime.now() - self.last_activity).total_seconds()
             
-            return {
+            stats = {
                 'call_id': self.call_id,
                 'state': self.state.value,
                 'created_at': self.created_at.isoformat(),
@@ -408,8 +480,16 @@ class ConversationSession:
                 'transcript_length': len(self.transcript),
                 'has_rtp_transport': self.rtp_transport is not None,
                 'generating_response': self._generating_response,
-                'processing_audio': self._processing_audio
+                'processing_audio': self._processing_audio,
+                'use_pipecat': self.use_pipecat,
+                'has_pipecat_transport': self.pipecat_transport is not None
             }
+            
+            # Add pipecat transport stats if available
+            if self.pipecat_transport:
+                stats['pipecat_transport_stats'] = self.pipecat_transport.get_stats()
+            
+            return stats
             
         except Exception as e:
             logger.error(f"Error getting session stats: {e}")

@@ -62,6 +62,9 @@ class AudioRawFrame(Frame):
     sample_rate: int
     num_channels: int = 1
 
+# Alias for compatibility
+AudioFrame = AudioRawFrame
+
 @dataclass
 class TextFrame(Frame):
     """Text data frame"""

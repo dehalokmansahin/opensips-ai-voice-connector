@@ -266,7 +266,7 @@ class RTPTransport:
         """Serialize RTP packet to binary data"""
         try:
             # Create fixed header
-            version_cc = (packet.version << 6) | (int(packet.padding) << 5) | \\
+            version_cc = (packet.version << 6) | (int(packet.padding) << 5) | \
                         (int(packet.extension) << 4) | packet.cc
             
             marker_pt = (int(packet.marker) << 7) | packet.payload_type

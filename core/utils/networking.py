@@ -12,6 +12,16 @@ import time
 
 logger = logging.getLogger(__name__)
 
+def check_port_available(port: int, host: str = "0.0.0.0") -> bool:
+    """Check if a port is available"""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind((host, port))
+        sock.close()
+        return True
+    except OSError:
+        return False
+
 def find_free_port(start_port: int = 8000, end_port: int = 9000, host: str = "0.0.0.0") -> Optional[int]:
     """Find a free port in the given range"""
     for port in range(start_port, end_port + 1):

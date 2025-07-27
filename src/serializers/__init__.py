@@ -1,1 +1,0 @@
-# OpenSIPS Serializers Module 

@@ -6,7 +6,9 @@
       "Bash(chmod:*)",
       "Bash(./scripts/proto-gen.sh:*)",
       "Bash(python:*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(rm:*)",
+      "Bash(ls:*)"
     ],
     "deny": []
   }

@@ -329,7 +329,8 @@ class OpenSIPSIntegration:
             self._is_running = False
             
             # Clean up all active calls
-            for call_id in list(self.active_calls.keys()):\n                await self._cleanup_call(call_id)
+            for call_id in list(self.active_calls.keys()):
+                await self._cleanup_call(call_id)
             
             # Stop event listener
             if self.event_listener:

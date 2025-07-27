@@ -96,6 +96,11 @@ def pcm16_to_pcmu(pcm_data: bytes) -> bytes:
         logger.error(f"Error converting PCM16 to PCMU: {e}")
         return b''
 
+# Alias for backward compatibility
+def convert_sample_rate(audio_data: bytes, input_rate: int, output_rate: int) -> bytes:
+    """Convert audio sample rate (backward compatibility alias)"""
+    return resample_audio(audio_data, input_rate, output_rate)
+
 def resample_audio(
     audio_data: bytes,
     input_rate: int,
