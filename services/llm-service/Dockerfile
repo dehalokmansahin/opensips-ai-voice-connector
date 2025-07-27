@@ -10,19 +10,16 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install grpc-health-probe for health checks
-RUN wget -qO/bin/grpc-health-probe https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/v0.4.19/grpc-health-probe-linux-amd64 && \
-    chmod +x /bin/grpc-health-probe
+# Install grpc-health-probe for health checks (optional for development)
+# RUN wget -qO/bin/grpc-health-probe https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/v0.4.19/grpc-health-probe-linux-amd64 && \
+#     chmod +x /bin/grpc-health-probe
 
 # Create app directory
 WORKDIR /app
 
 # Copy requirements first for better caching
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy common services
-COPY ../common /app/common
+COPY requirements_simple.txt .
+RUN pip install --no-cache-dir -r requirements_simple.txt
 
 # Copy source code
 COPY src/ /app/src/
@@ -40,14 +37,14 @@ ENV HF_HOME=/app/rag_model
 ENV TORCH_HOME=/app/rag_model
 
 # Set Python path
-ENV PYTHONPATH=/app:/app/src:/app/common
+ENV PYTHONPATH=/app:/app/src
 
 # Expose gRPC port
 EXPOSE 50052
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD grpc-health-probe -addr=localhost:50052 -service=LLMService
+# Health check (commented for development)
+# HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+#     CMD grpc-health-probe -addr=localhost:50052 -service=LLMService
 
-# Run the service
-CMD ["python", "/app/src/enhanced_llm_server.py"]
+# Run the service (use gRPC server for production)
+CMD ["python", "/app/src/llm_grpc_server.py"]

@@ -22,10 +22,10 @@ _runtime_version.ValidateProtobufRuntimeVersion(
 _sym_db = _symbol_database.Default()
 
 
-import common_pb2 as common__pb2
+from google.protobuf import empty_pb2 as google_dot_protobuf_dot_empty__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x11\x61sr_service.proto\x12\x0fopensips.ai.asr\x1a\x0c\x63ommon.proto\"\xa7\x01\n\x16RecognizeSpeechRequest\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x33\n\x0b\x61udio_chunk\x18\x02 \x01(\x0b\x32\x1e.opensips.ai.common.AudioChunk\x12*\n\x06\x63onfig\x18\x03 \x01(\x0b\x32\x1a.opensips.ai.asr.ASRConfig\x12\x18\n\x10\x65nd_of_utterance\x18\x04 \x01(\x08\"\xb3\x01\n\x17RecognizeSpeechResponse\x12*\n\x06status\x18\x01 \x01(\x0b\x32\x1a.opensips.ai.common.Status\x12\x12\n\nsession_id\x18\x02 \x01(\t\x12*\n\x06result\x18\x03 \x01(\x0b\x32\x1a.opensips.ai.asr.ASRResult\x12,\n\x07metrics\x18\x04 \x01(\x0b\x32\x1b.opensips.ai.asr.ASRMetrics\"U\n\x13\x43onfigureASRRequest\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12*\n\x06\x63onfig\x18\x02 \x01(\x0b\x32\x1a.opensips.ai.asr.ASRConfig\"B\n\x14\x43onfigureASRResponse\x12*\n\x06status\x18\x01 \x01(\x0b\x32\x1a.opensips.ai.common.Status\"\xed\x01\n\tASRConfig\x12\x15\n\rlanguage_code\x18\x01 \x01(\t\x12\x12\n\nmodel_type\x18\x02 \x01(\t\x12$\n\x1c\x65nable_automatic_punctuation\x18\x03 \x01(\x08\x12 \n\x18\x65nable_word_time_offsets\x18\x04 \x01(\x08\x12\x1e\n\x16\x65nable_interim_results\x18\x05 \x01(\x08\x12\x1c\n\x14\x63onfidence_threshold\x18\x06 \x01(\x02\x12\x18\n\x10max_alternatives\x18\x07 \x01(\x05\x12\x15\n\rboost_phrases\x18\x08 \x03(\t\"\xe7\x01\n\tASRResult\x12\x12\n\ntranscript\x18\x01 \x01(\t\x12\x12\n\nconfidence\x18\x02 \x01(\x02\x12\x10\n\x08is_final\x18\x03 \x01(\x08\x12\x38\n\x0c\x61lternatives\x18\x04 \x03(\x0b\x32\".opensips.ai.asr.SpeechAlternative\x12(\n\x05words\x18\x05 \x03(\x0b\x32\x19.opensips.ai.asr.WordInfo\x12<\n\x08metadata\x18\x06 \x01(\x0b\x32*.opensips.ai.asr.SpeechRecognitionMetadata\"e\n\x11SpeechAlternative\x12\x12\n\ntranscript\x18\x01 \x01(\t\x12\x12\n\nconfidence\x18\x02 \x01(\x02\x12(\n\x05words\x18\x03 \x03(\x0b\x32\x19.opensips.ai.asr.WordInfo\"\xa5\x01\n\x08WordInfo\x12\x0c\n\x04word\x18\x01 \x01(\t\x12\x12\n\nconfidence\x18\x02 \x01(\x02\x12\x31\n\nstart_time\x18\x03 \x01(\x0b\x32\x1d.opensips.ai.common.Timestamp\x12/\n\x08\x65nd_time\x18\x04 \x01(\x0b\x32\x1d.opensips.ai.common.Timestamp\x12\x13\n\x0bspeaker_tag\x18\x05 \x01(\t\"\x9d\x02\n\x19SpeechRecognitionMetadata\x12\x15\n\rmodel_version\x18\x01 \x01(\t\x12\x19\n\x11language_detected\x18\x02 \x01(\t\x12\x1b\n\x13\x61udio_quality_score\x18\x03 \x01(\x02\x12!\n\x19speech_adaptation_applied\x18\x04 \x01(\x08\x12W\n\x0f\x63ustom_metadata\x18\x05 \x03(\x0b\x32>.opensips.ai.asr.SpeechRecognitionMetadata.CustomMetadataEntry\x1a\x35\n\x13\x43ustomMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\x1e\n\x1cGetSupportedLanguagesRequest\"\x80\x01\n\x1dGetSupportedLanguagesResponse\x12*\n\x06status\x18\x01 \x01(\x0b\x32\x1a.opensips.ai.common.Status\x12\x33\n\tlanguages\x18\x02 \x03(\x0b\x32 .opensips.ai.asr.LanguageSupport\"\x93\x01\n\x0fLanguageSupport\x12\x15\n\rlanguage_code\x18\x01 \x01(\t\x12\x15\n\rlanguage_name\x18\x02 \x01(\t\x12\x18\n\x10supported_models\x18\x03 \x03(\t\x12\x1a\n\x12supports_real_time\x18\x04 \x01(\x08\x12\x1c\n\x14supports_word_timing\x18\x05 \x01(\x08\"\xe0\x01\n\nASRMetrics\x12\x1a\n\x12processing_time_ms\x18\x01 \x01(\x02\x12\x19\n\x11\x61udio_duration_ms\x18\x02 \x01(\x02\x12\x18\n\x10real_time_factor\x18\x03 \x01(\x02\x12\x18\n\x10words_recognized\x18\x04 \x01(\x05\x12\x1f\n\x17\x61verage_word_confidence\x18\x05 \x01(\x02\x12\x12\n\nmodel_used\x18\x06 \x01(\t\x12\x19\n\x11\x63pu_usage_percent\x18\x07 \x01(\x02\x12\x17\n\x0fmemory_usage_mb\x18\x08 \x01(\x02\x32\x97\x04\n\nASRService\x12\x64\n\x0fRecognizeSpeech\x12\'.opensips.ai.asr.RecognizeSpeechRequest\x1a(.opensips.ai.asr.RecognizeSpeechResponse\x12n\n\x15RecognizeSpeechStream\x12\'.opensips.ai.asr.RecognizeSpeechRequest\x1a(.opensips.ai.asr.RecognizeSpeechResponse(\x01\x30\x01\x12[\n\x0c\x43onfigureASR\x12$.opensips.ai.asr.ConfigureASRRequest\x1a%.opensips.ai.asr.ConfigureASRResponse\x12v\n\x15GetSupportedLanguages\x12-.opensips.ai.asr.GetSupportedLanguagesRequest\x1a..opensips.ai.asr.GetSupportedLanguagesResponse\x12^\n\x0bHealthCheck\x12&.opensips.ai.common.HealthCheckRequest\x1a\'.opensips.ai.common.HealthCheckResponseB2Z0github.com/opensips/ai-voice-connector/proto/asrb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x11\x61sr_service.proto\x12\x0fopensips.ai.asr\x1a\x1bgoogle/protobuf/empty.proto\"\x92\x01\n\x19StreamingRecognizeRequest\x12\x34\n\x06\x63onfig\x18\x01 \x01(\x0b\x32\".opensips.ai.asr.RecognitionConfigH\x00\x12\x14\n\naudio_data\x18\x02 \x01(\x0cH\x00\x12\x19\n\x0f\x63ontrol_message\x18\x03 \x01(\tH\x00\x42\x0e\n\x0crequest_type\"|\n\x1aStreamingRecognizeResponse\x12\x32\n\x06result\x18\x01 \x01(\x0b\x32\".opensips.ai.asr.RecognitionResult\x12\x10\n\x08is_final\x18\x02 \x01(\x08\x12\x18\n\x10\x65nd_of_utterance\x18\x03 \x01(\x08\"Z\n\x10RecognizeRequest\x12\x32\n\x06\x63onfig\x18\x01 \x01(\x0b\x32\".opensips.ai.asr.RecognitionConfig\x12\x12\n\naudio_data\x18\x02 \x01(\x0c\"G\n\x11RecognizeResponse\x12\x32\n\x06result\x18\x01 \x01(\x0b\x32\".opensips.ai.asr.RecognitionResult\"F\n\x10\x43onfigureRequest\x12\x32\n\x06\x63onfig\x18\x01 \x01(\x0b\x32\".opensips.ai.asr.RecognitionConfig\"5\n\x11\x43onfigureResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\"\x97\x01\n\x11RecognitionConfig\x12\x13\n\x0bsample_rate\x18\x01 \x01(\x02\x12\x12\n\nmodel_path\x18\x02 \x01(\t\x12\x16\n\x0espk_model_path\x18\x03 \x01(\t\x12\x12\n\nshow_words\x18\x04 \x01(\x08\x12\x18\n\x10max_alternatives\x18\x05 \x01(\x05\x12\x13\n\x0bphrase_list\x18\x06 \x03(\t\"\x93\x01\n\x11RecognitionResult\x12\x0c\n\x04text\x18\x01 \x01(\t\x12\x12\n\nconfidence\x18\x02 \x01(\x02\x12(\n\x05words\x18\x03 \x03(\x0b\x32\x19.opensips.ai.asr.WordInfo\x12\x32\n\x0c\x61lternatives\x18\x04 \x03(\x0b\x32\x1c.opensips.ai.asr.Alternative\"H\n\x08WordInfo\x12\x0c\n\x04word\x18\x01 \x01(\t\x12\x12\n\nconfidence\x18\x02 \x01(\x02\x12\r\n\x05start\x18\x03 \x01(\x02\x12\x0b\n\x03\x65nd\x18\x04 \x01(\x02\"/\n\x0b\x41lternative\x12\x0c\n\x04text\x18\x01 \x01(\t\x12\x12\n\nconfidence\x18\x02 \x01(\x02\"\xa4\x01\n\x0eHealthResponse\x12\x36\n\x06status\x18\x01 \x01(\x0e\x32&.opensips.ai.asr.HealthResponse.Status\x12\x0f\n\x07message\x18\x02 \x01(\t\x12\x14\n\x0cmodel_loaded\x18\x03 \x01(\t\"3\n\x06Status\x12\x0b\n\x07UNKNOWN\x10\x00\x12\x0b\n\x07SERVING\x10\x01\x12\x0f\n\x0bNOT_SERVING\x10\x02\"\x93\x01\n\rStatsResponse\x12\x1a\n\x12\x61\x63tive_connections\x18\x01 \x01(\x05\x12\x19\n\x11total_connections\x18\x02 \x01(\x05\x12\x1f\n\x17\x61verage_processing_time\x18\x03 \x01(\x02\x12\x16\n\x0euptime_seconds\x18\x04 \x01(\x03\x12\x12\n\nmodel_info\x18\x05 \x01(\t2\xb3\x03\n\nASRService\x12q\n\x12StreamingRecognize\x12*.opensips.ai.asr.StreamingRecognizeRequest\x1a+.opensips.ai.asr.StreamingRecognizeResponse(\x01\x30\x01\x12R\n\tRecognize\x12!.opensips.ai.asr.RecognizeRequest\x1a\".opensips.ai.asr.RecognizeResponse\x12R\n\tConfigure\x12!.opensips.ai.asr.ConfigureRequest\x1a\".opensips.ai.asr.ConfigureResponse\x12\x46\n\x0bHealthCheck\x12\x16.google.protobuf.Empty\x1a\x1f.opensips.ai.asr.HealthResponse\x12\x42\n\x08GetStats\x12\x16.google.protobuf.Empty\x1a\x1e.opensips.ai.asr.StatsResponseB2Z0github.com/opensips/ai-voice-connector/proto/asrb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -33,36 +33,32 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'asr_service_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'Z0github.com/opensips/ai-voice-connector/proto/asr'
-  _globals['_SPEECHRECOGNITIONMETADATA_CUSTOMMETADATAENTRY']._loaded_options = None
-  _globals['_SPEECHRECOGNITIONMETADATA_CUSTOMMETADATAENTRY']._serialized_options = b'8\001'
-  _globals['_RECOGNIZESPEECHREQUEST']._serialized_start=53
-  _globals['_RECOGNIZESPEECHREQUEST']._serialized_end=220
-  _globals['_RECOGNIZESPEECHRESPONSE']._serialized_start=223
-  _globals['_RECOGNIZESPEECHRESPONSE']._serialized_end=402
-  _globals['_CONFIGUREASRREQUEST']._serialized_start=404
-  _globals['_CONFIGUREASRREQUEST']._serialized_end=489
-  _globals['_CONFIGUREASRRESPONSE']._serialized_start=491
-  _globals['_CONFIGUREASRRESPONSE']._serialized_end=557
-  _globals['_ASRCONFIG']._serialized_start=560
-  _globals['_ASRCONFIG']._serialized_end=797
-  _globals['_ASRRESULT']._serialized_start=800
-  _globals['_ASRRESULT']._serialized_end=1031
-  _globals['_SPEECHALTERNATIVE']._serialized_start=1033
-  _globals['_SPEECHALTERNATIVE']._serialized_end=1134
-  _globals['_WORDINFO']._serialized_start=1137
-  _globals['_WORDINFO']._serialized_end=1302
-  _globals['_SPEECHRECOGNITIONMETADATA']._serialized_start=1305
-  _globals['_SPEECHRECOGNITIONMETADATA']._serialized_end=1590
-  _globals['_SPEECHRECOGNITIONMETADATA_CUSTOMMETADATAENTRY']._serialized_start=1537
-  _globals['_SPEECHRECOGNITIONMETADATA_CUSTOMMETADATAENTRY']._serialized_end=1590
-  _globals['_GETSUPPORTEDLANGUAGESREQUEST']._serialized_start=1592
-  _globals['_GETSUPPORTEDLANGUAGESREQUEST']._serialized_end=1622
-  _globals['_GETSUPPORTEDLANGUAGESRESPONSE']._serialized_start=1625
-  _globals['_GETSUPPORTEDLANGUAGESRESPONSE']._serialized_end=1753
-  _globals['_LANGUAGESUPPORT']._serialized_start=1756
-  _globals['_LANGUAGESUPPORT']._serialized_end=1903
-  _globals['_ASRMETRICS']._serialized_start=1906
-  _globals['_ASRMETRICS']._serialized_end=2130
-  _globals['_ASRSERVICE']._serialized_start=2133
-  _globals['_ASRSERVICE']._serialized_end=2668
+  _globals['_STREAMINGRECOGNIZEREQUEST']._serialized_start=68
+  _globals['_STREAMINGRECOGNIZEREQUEST']._serialized_end=214
+  _globals['_STREAMINGRECOGNIZERESPONSE']._serialized_start=216
+  _globals['_STREAMINGRECOGNIZERESPONSE']._serialized_end=340
+  _globals['_RECOGNIZEREQUEST']._serialized_start=342
+  _globals['_RECOGNIZEREQUEST']._serialized_end=432
+  _globals['_RECOGNIZERESPONSE']._serialized_start=434
+  _globals['_RECOGNIZERESPONSE']._serialized_end=505
+  _globals['_CONFIGUREREQUEST']._serialized_start=507
+  _globals['_CONFIGUREREQUEST']._serialized_end=577
+  _globals['_CONFIGURERESPONSE']._serialized_start=579
+  _globals['_CONFIGURERESPONSE']._serialized_end=632
+  _globals['_RECOGNITIONCONFIG']._serialized_start=635
+  _globals['_RECOGNITIONCONFIG']._serialized_end=786
+  _globals['_RECOGNITIONRESULT']._serialized_start=789
+  _globals['_RECOGNITIONRESULT']._serialized_end=936
+  _globals['_WORDINFO']._serialized_start=938
+  _globals['_WORDINFO']._serialized_end=1010
+  _globals['_ALTERNATIVE']._serialized_start=1012
+  _globals['_ALTERNATIVE']._serialized_end=1059
+  _globals['_HEALTHRESPONSE']._serialized_start=1062
+  _globals['_HEALTHRESPONSE']._serialized_end=1226
+  _globals['_HEALTHRESPONSE_STATUS']._serialized_start=1175
+  _globals['_HEALTHRESPONSE_STATUS']._serialized_end=1226
+  _globals['_STATSRESPONSE']._serialized_start=1229
+  _globals['_STATSRESPONSE']._serialized_end=1376
+  _globals['_ASRSERVICE']._serialized_start=1379
+  _globals['_ASRSERVICE']._serialized_end=1814
 # @@protoc_insertion_point(module_scope)

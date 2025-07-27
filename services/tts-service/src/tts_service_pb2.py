@@ -22,10 +22,10 @@ _runtime_version.ValidateProtobufRuntimeVersion(
 _sym_db = _symbol_database.Default()
 
 
-import common_pb2 as common__pb2
+from google.protobuf import empty_pb2 as google_dot_protobuf_dot_empty__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x11tts_service.proto\x12\x0fopensips.ai.tts\x1a\x0c\x63ommon.proto\"g\n\x17SynthesizeSpeechRequest\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0c\n\x04text\x18\x02 \x01(\t\x12*\n\x06\x63onfig\x18\x03 \x01(\x0b\x32\x1a.opensips.ai.tts.TTSConfig\"\xb4\x01\n\x18SynthesizeSpeechResponse\x12*\n\x06status\x18\x01 \x01(\x0b\x32\x1a.opensips.ai.common.Status\x12\x12\n\nsession_id\x18\x02 \x01(\t\x12*\n\x06result\x18\x03 \x01(\x0b\x32\x1a.opensips.ai.tts.TTSResult\x12,\n\x07metrics\x18\x04 \x01(\x0b\x32\x1b.opensips.ai.tts.TTSMetrics\"U\n\x13\x43onfigureTTSRequest\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12*\n\x06\x63onfig\x18\x02 \x01(\x0b\x32\x1a.opensips.ai.tts.TTSConfig\"B\n\x14\x43onfigureTTSResponse\x12*\n\x06status\x18\x01 \x01(\x0b\x32\x1a.opensips.ai.common.Status\"\xcf\x02\n\tTTSConfig\x12\x12\n\nvoice_name\x18\x01 \x01(\t\x12\x15\n\rlanguage_code\x18\x02 \x01(\t\x12\x15\n\rspeaking_rate\x18\x03 \x01(\x02\x12\r\n\x05pitch\x18\x04 \x01(\x02\x12\x16\n\x0evolume_gain_db\x18\x05 \x01(\x02\x12\x35\n\x0c\x61udio_config\x18\x06 \x01(\x0b\x32\x1f.opensips.ai.common.AudioConfig\x12\x13\n\x0b\x65ngine_type\x18\x07 \x01(\t\x12\x43\n\rvoice_effects\x18\x08 \x03(\x0b\x32,.opensips.ai.tts.TTSConfig.VoiceEffectsEntry\x12\x13\n\x0b\x65nable_ssml\x18\t \x01(\x08\x1a\x33\n\x11VoiceEffectsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"G\n\x19GetAvailableVoicesRequest\x12\x15\n\rlanguage_code\x18\x01 \x01(\t\x12\x13\n\x0b\x65ngine_type\x18\x02 \x01(\t\"t\n\x1aGetAvailableVoicesResponse\x12*\n\x06status\x18\x01 \x01(\x0b\x32\x1a.opensips.ai.common.Status\x12*\n\x06voices\x18\x02 \x03(\x0b\x32\x1a.opensips.ai.tts.VoiceInfo\"\x81\x02\n\tVoiceInfo\x12\x12\n\nvoice_name\x18\x01 \x01(\t\x12\x14\n\x0c\x64isplay_name\x18\x02 \x01(\t\x12\x15\n\rlanguage_code\x18\x03 \x01(\t\x12\x15\n\rlanguage_name\x18\x04 \x01(\t\x12\x0e\n\x06gender\x18\x05 \x01(\t\x12\x11\n\tage_group\x18\x06 \x01(\t\x12\x0e\n\x06\x61\x63\x63\x65nt\x18\x07 \x01(\t\x12\x13\n\x0b\x65ngine_type\x18\x08 \x01(\t\x12\x1a\n\x12supported_features\x18\t \x03(\t\x12\x38\n\x0c\x63\x61pabilities\x18\n \x01(\x0b\x32\".opensips.ai.tts.AudioCapabilities\"\xa2\x01\n\x11\x41udioCapabilities\x12\x1e\n\x16supported_sample_rates\x18\x01 \x03(\x05\x12\x1b\n\x13supported_encodings\x18\x02 \x03(\t\x12\x1a\n\x12supports_streaming\x18\x03 \x01(\x08\x12\x19\n\x11min_speaking_rate\x18\x04 \x01(\x02\x12\x19\n\x11max_speaking_rate\x18\x05 \x01(\x02\"\xbd\x01\n\tTTSResult\x12-\n\x05\x61udio\x18\x01 \x01(\x0b\x32\x1e.opensips.ai.common.AudioChunk\x12\x18\n\x10synthesized_text\x18\x02 \x01(\t\x12\x31\n\x0cword_timings\x18\x03 \x03(\x0b\x32\x1b.opensips.ai.tts.WordTiming\x12\x34\n\x08metadata\x18\x04 \x01(\x0b\x32\".opensips.ai.tts.SynthesisMetadata\"~\n\nWordTiming\x12\x0c\n\x04word\x18\x01 \x01(\t\x12\x31\n\nstart_time\x18\x02 \x01(\x0b\x32\x1d.opensips.ai.common.Timestamp\x12/\n\x08\x65nd_time\x18\x03 \x01(\x0b\x32\x1d.opensips.ai.common.Timestamp\"\xa7\x02\n\x11SynthesisMetadata\x12\x12\n\nvoice_used\x18\x01 \x01(\t\x12\x16\n\x0e\x65ngine_version\x18\x02 \x01(\t\x12\x1c\n\x14\x61\x63tual_speaking_rate\x18\x03 \x01(\x02\x12\x14\n\x0c\x61\x63tual_pitch\x18\x04 \x01(\x02\x12\x17\n\x0f\x63haracter_count\x18\x05 \x01(\x05\x12\x11\n\tssml_used\x18\x06 \x01(\x08\x12O\n\x0f\x61pplied_effects\x18\x07 \x03(\x0b\x32\x36.opensips.ai.tts.SynthesisMetadata.AppliedEffectsEntry\x1a\x35\n\x13\x41ppliedEffectsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\x81\x02\n\nTTSMetrics\x12\x1a\n\x12processing_time_ms\x18\x01 \x01(\x02\x12\x19\n\x11\x61udio_duration_ms\x18\x02 \x01(\x02\x12\x18\n\x10real_time_factor\x18\x03 \x01(\x02\x12\x1c\n\x14\x63haracters_processed\x18\x04 \x01(\x05\x12\x1d\n\x15\x63haracters_per_second\x18\x05 \x01(\x02\x12\x12\n\nmodel_used\x18\x06 \x01(\t\x12\x19\n\x11\x63pu_usage_percent\x18\x07 \x01(\x02\x12\x17\n\x0fmemory_usage_mb\x18\x08 \x01(\x02\x12\x1d\n\x15\x61udio_bytes_generated\x18\t \x01(\x05\x32\x92\x04\n\nTTSService\x12g\n\x10SynthesizeSpeech\x12(.opensips.ai.tts.SynthesizeSpeechRequest\x1a).opensips.ai.tts.SynthesizeSpeechResponse\x12o\n\x16SynthesizeSpeechStream\x12(.opensips.ai.tts.SynthesizeSpeechRequest\x1a).opensips.ai.tts.SynthesizeSpeechResponse0\x01\x12[\n\x0c\x43onfigureTTS\x12$.opensips.ai.tts.ConfigureTTSRequest\x1a%.opensips.ai.tts.ConfigureTTSResponse\x12m\n\x12GetAvailableVoices\x12*.opensips.ai.tts.GetAvailableVoicesRequest\x1a+.opensips.ai.tts.GetAvailableVoicesResponse\x12^\n\x0bHealthCheck\x12&.opensips.ai.common.HealthCheckRequest\x1a\'.opensips.ai.common.HealthCheckResponseB2Z0github.com/opensips/ai-voice-connector/proto/ttsb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x11tts_service.proto\x12\x0fopensips.ai.tts\x1a\x1bgoogle/protobuf/empty.proto\"E\n\x11SynthesizeRequest\x12\x0c\n\x04text\x18\x01 \x01(\t\x12\r\n\x05voice\x18\x02 \x01(\t\x12\x13\n\x0bsample_rate\x18\x03 \x01(\x05\"\xde\x01\n\x12SynthesizeResponse\x12\x34\n\x07started\x18\x01 \x01(\x0b\x32!.opensips.ai.tts.SynthesisStartedH\x00\x12\x15\n\x0b\x61udio_chunk\x18\x02 \x01(\x0cH\x00\x12\x38\n\tcompleted\x18\x03 \x01(\x0b\x32#.opensips.ai.tts.SynthesisCompletedH\x00\x12\x30\n\x05\x65rror\x18\x04 \x01(\x0b\x32\x1f.opensips.ai.tts.SynthesisErrorH\x00\x42\x0f\n\rresponse_type\"S\n\x10SynthesisStarted\x12\x0f\n\x07message\x18\x01 \x01(\t\x12.\n\naudio_info\x18\x02 \x01(\x0b\x32\x1a.opensips.ai.tts.AudioInfo\"U\n\x12SynthesisCompleted\x12\x0f\n\x07message\x18\x01 \x01(\t\x12.\n\x05stats\x18\x02 \x01(\x0b\x32\x1f.opensips.ai.tts.SynthesisStats\";\n\x0eSynthesisError\x12\x15\n\rerror_message\x18\x01 \x01(\t\x12\x12\n\nerror_code\x18\x02 \x01(\t\"U\n\tAudioInfo\x12\x13\n\x0bsample_rate\x18\x01 \x01(\x05\x12\x10\n\x08\x63hannels\x18\x02 \x01(\x05\x12\x11\n\tbit_depth\x18\x03 \x01(\x05\x12\x0e\n\x06\x66ormat\x18\x04 \x01(\t\"w\n\x0eSynthesisStats\x12\x1e\n\x16\x61udio_duration_seconds\x18\x01 \x01(\x02\x12\x13\n\x0btotal_bytes\x18\x02 \x01(\x05\x12\x14\n\x0cpacket_count\x18\x03 \x01(\x05\x12\x1a\n\x12processing_time_ms\x18\x04 \x01(\x02\"6\n\x10\x43onfigureRequest\x12\r\n\x05voice\x18\x01 \x01(\t\x12\x13\n\x0bsample_rate\x18\x02 \x01(\x05\"5\n\x11\x43onfigureResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\"<\n\x0eVoicesResponse\x12*\n\x06voices\x18\x01 \x03(\x0b\x32\x1a.opensips.ai.tts.VoiceInfo\"\x7f\n\tVoiceInfo\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x14\n\x0c\x64isplay_name\x18\x02 \x01(\t\x12\x10\n\x08language\x18\x03 \x01(\t\x12\x0e\n\x06gender\x18\x04 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\x05 \x01(\t\x12\x17\n\x0fsupported_rates\x18\x06 \x03(\x05\"\xa3\x01\n\x0eHealthResponse\x12\x36\n\x06status\x18\x01 \x01(\x0e\x32&.opensips.ai.tts.HealthResponse.Status\x12\x0f\n\x07message\x18\x02 \x01(\t\x12\x13\n\x0bvoice_model\x18\x03 \x01(\t\"3\n\x06Status\x12\x0b\n\x07UNKNOWN\x10\x00\x12\x0b\n\x07SERVING\x10\x01\x12\x0f\n\x0bNOT_SERVING\x10\x02\"\x8f\x01\n\rStatsResponse\x12\x17\n\x0f\x61\x63tive_sessions\x18\x01 \x01(\x05\x12\x17\n\x0ftotal_syntheses\x18\x02 \x01(\x05\x12\x1f\n\x17\x61verage_processing_time\x18\x03 \x01(\x02\x12\x16\n\x0euptime_seconds\x18\x04 \x01(\x03\x12\x13\n\x0bvoice_model\x18\x05 \x01(\t2\xec\x03\n\nTTSService\x12[\n\x0eSynthesizeText\x12\".opensips.ai.tts.SynthesizeRequest\x1a#.opensips.ai.tts.SynthesizeResponse0\x01\x12[\n\x10SynthesizeSingle\x12\".opensips.ai.tts.SynthesizeRequest\x1a#.opensips.ai.tts.SynthesizeResponse\x12R\n\tConfigure\x12!.opensips.ai.tts.ConfigureRequest\x1a\".opensips.ai.tts.ConfigureResponse\x12\x44\n\tGetVoices\x12\x16.google.protobuf.Empty\x1a\x1f.opensips.ai.tts.VoicesResponse\x12\x46\n\x0bHealthCheck\x12\x16.google.protobuf.Empty\x1a\x1f.opensips.ai.tts.HealthResponse\x12\x42\n\x08GetStats\x12\x16.google.protobuf.Empty\x1a\x1e.opensips.ai.tts.StatsResponseB2Z0github.com/opensips/ai-voice-connector/proto/ttsb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -33,40 +33,34 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'tts_service_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'Z0github.com/opensips/ai-voice-connector/proto/tts'
-  _globals['_TTSCONFIG_VOICEEFFECTSENTRY']._loaded_options = None
-  _globals['_TTSCONFIG_VOICEEFFECTSENTRY']._serialized_options = b'8\001'
-  _globals['_SYNTHESISMETADATA_APPLIEDEFFECTSENTRY']._loaded_options = None
-  _globals['_SYNTHESISMETADATA_APPLIEDEFFECTSENTRY']._serialized_options = b'8\001'
-  _globals['_SYNTHESIZESPEECHREQUEST']._serialized_start=52
-  _globals['_SYNTHESIZESPEECHREQUEST']._serialized_end=155
-  _globals['_SYNTHESIZESPEECHRESPONSE']._serialized_start=158
-  _globals['_SYNTHESIZESPEECHRESPONSE']._serialized_end=338
-  _globals['_CONFIGURETTSREQUEST']._serialized_start=340
-  _globals['_CONFIGURETTSREQUEST']._serialized_end=425
-  _globals['_CONFIGURETTSRESPONSE']._serialized_start=427
-  _globals['_CONFIGURETTSRESPONSE']._serialized_end=493
-  _globals['_TTSCONFIG']._serialized_start=496
-  _globals['_TTSCONFIG']._serialized_end=831
-  _globals['_TTSCONFIG_VOICEEFFECTSENTRY']._serialized_start=780
-  _globals['_TTSCONFIG_VOICEEFFECTSENTRY']._serialized_end=831
-  _globals['_GETAVAILABLEVOICESREQUEST']._serialized_start=833
-  _globals['_GETAVAILABLEVOICESREQUEST']._serialized_end=904
-  _globals['_GETAVAILABLEVOICESRESPONSE']._serialized_start=906
-  _globals['_GETAVAILABLEVOICESRESPONSE']._serialized_end=1022
-  _globals['_VOICEINFO']._serialized_start=1025
-  _globals['_VOICEINFO']._serialized_end=1282
-  _globals['_AUDIOCAPABILITIES']._serialized_start=1285
-  _globals['_AUDIOCAPABILITIES']._serialized_end=1447
-  _globals['_TTSRESULT']._serialized_start=1450
-  _globals['_TTSRESULT']._serialized_end=1639
-  _globals['_WORDTIMING']._serialized_start=1641
-  _globals['_WORDTIMING']._serialized_end=1767
-  _globals['_SYNTHESISMETADATA']._serialized_start=1770
-  _globals['_SYNTHESISMETADATA']._serialized_end=2065
-  _globals['_SYNTHESISMETADATA_APPLIEDEFFECTSENTRY']._serialized_start=2012
-  _globals['_SYNTHESISMETADATA_APPLIEDEFFECTSENTRY']._serialized_end=2065
-  _globals['_TTSMETRICS']._serialized_start=2068
-  _globals['_TTSMETRICS']._serialized_end=2325
-  _globals['_TTSSERVICE']._serialized_start=2328
-  _globals['_TTSSERVICE']._serialized_end=2858
+  _globals['_SYNTHESIZEREQUEST']._serialized_start=67
+  _globals['_SYNTHESIZEREQUEST']._serialized_end=136
+  _globals['_SYNTHESIZERESPONSE']._serialized_start=139
+  _globals['_SYNTHESIZERESPONSE']._serialized_end=361
+  _globals['_SYNTHESISSTARTED']._serialized_start=363
+  _globals['_SYNTHESISSTARTED']._serialized_end=446
+  _globals['_SYNTHESISCOMPLETED']._serialized_start=448
+  _globals['_SYNTHESISCOMPLETED']._serialized_end=533
+  _globals['_SYNTHESISERROR']._serialized_start=535
+  _globals['_SYNTHESISERROR']._serialized_end=594
+  _globals['_AUDIOINFO']._serialized_start=596
+  _globals['_AUDIOINFO']._serialized_end=681
+  _globals['_SYNTHESISSTATS']._serialized_start=683
+  _globals['_SYNTHESISSTATS']._serialized_end=802
+  _globals['_CONFIGUREREQUEST']._serialized_start=804
+  _globals['_CONFIGUREREQUEST']._serialized_end=858
+  _globals['_CONFIGURERESPONSE']._serialized_start=860
+  _globals['_CONFIGURERESPONSE']._serialized_end=913
+  _globals['_VOICESRESPONSE']._serialized_start=915
+  _globals['_VOICESRESPONSE']._serialized_end=975
+  _globals['_VOICEINFO']._serialized_start=977
+  _globals['_VOICEINFO']._serialized_end=1104
+  _globals['_HEALTHRESPONSE']._serialized_start=1107
+  _globals['_HEALTHRESPONSE']._serialized_end=1270
+  _globals['_HEALTHRESPONSE_STATUS']._serialized_start=1219
+  _globals['_HEALTHRESPONSE_STATUS']._serialized_end=1270
+  _globals['_STATSRESPONSE']._serialized_start=1273
+  _globals['_STATSRESPONSE']._serialized_end=1416
+  _globals['_TTSSERVICE']._serialized_start=1419
+  _globals['_TTSSERVICE']._serialized_end=1911
 # @@protoc_insertion_point(module_scope)

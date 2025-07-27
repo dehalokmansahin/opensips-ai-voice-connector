@@ -295,7 +295,7 @@ async def serve():
     tts_service_pb2_grpc.add_TTSServiceServicer_to_server(TTSServiceImpl(), server)
     
     # Listen on port
-    listen_addr = os.getenv('TTS_SERVICE_LISTEN_ADDR', '[::]:50055')
+    listen_addr = os.getenv('TTS_SERVICE_LISTEN_ADDR', '[::]:50053')
     server.add_insecure_port(listen_addr)
     
     # Start server

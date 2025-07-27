@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-import common_pb2 as common__pb2
+from google.protobuf import empty_pb2 as google_dot_protobuf_dot_empty__pb2
 import tts_service_pb2 as tts__service__pb2
 
 GRPC_GENERATED_VERSION = '1.74.0'
@@ -27,7 +27,7 @@ if _version_not_supported:
 
 
 class TTSServiceStub(object):
-    """Text-to-Speech service
+    """Text-to-Speech service - based on Piper WebSocket implementation
     """
 
     def __init__(self, channel):
@@ -36,59 +36,64 @@ class TTSServiceStub(object):
         Args:
             channel: A grpc.Channel.
         """
-        self.SynthesizeSpeech = channel.unary_unary(
-                '/opensips.ai.tts.TTSService/SynthesizeSpeech',
-                request_serializer=tts__service__pb2.SynthesizeSpeechRequest.SerializeToString,
-                response_deserializer=tts__service__pb2.SynthesizeSpeechResponse.FromString,
+        self.SynthesizeText = channel.unary_stream(
+                '/opensips.ai.tts.TTSService/SynthesizeText',
+                request_serializer=tts__service__pb2.SynthesizeRequest.SerializeToString,
+                response_deserializer=tts__service__pb2.SynthesizeResponse.FromString,
                 _registered_method=True)
-        self.SynthesizeSpeechStream = channel.unary_stream(
-                '/opensips.ai.tts.TTSService/SynthesizeSpeechStream',
-                request_serializer=tts__service__pb2.SynthesizeSpeechRequest.SerializeToString,
-                response_deserializer=tts__service__pb2.SynthesizeSpeechResponse.FromString,
+        self.SynthesizeSingle = channel.unary_unary(
+                '/opensips.ai.tts.TTSService/SynthesizeSingle',
+                request_serializer=tts__service__pb2.SynthesizeRequest.SerializeToString,
+                response_deserializer=tts__service__pb2.SynthesizeResponse.FromString,
                 _registered_method=True)
-        self.ConfigureTTS = channel.unary_unary(
-                '/opensips.ai.tts.TTSService/ConfigureTTS',
-                request_serializer=tts__service__pb2.ConfigureTTSRequest.SerializeToString,
-                response_deserializer=tts__service__pb2.ConfigureTTSResponse.FromString,
+        self.Configure = channel.unary_unary(
+                '/opensips.ai.tts.TTSService/Configure',
+                request_serializer=tts__service__pb2.ConfigureRequest.SerializeToString,
+                response_deserializer=tts__service__pb2.ConfigureResponse.FromString,
                 _registered_method=True)
-        self.GetAvailableVoices = channel.unary_unary(
-                '/opensips.ai.tts.TTSService/GetAvailableVoices',
-                request_serializer=tts__service__pb2.GetAvailableVoicesRequest.SerializeToString,
-                response_deserializer=tts__service__pb2.GetAvailableVoicesResponse.FromString,
+        self.GetVoices = channel.unary_unary(
+                '/opensips.ai.tts.TTSService/GetVoices',
+                request_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
+                response_deserializer=tts__service__pb2.VoicesResponse.FromString,
                 _registered_method=True)
         self.HealthCheck = channel.unary_unary(
                 '/opensips.ai.tts.TTSService/HealthCheck',
-                request_serializer=common__pb2.HealthCheckRequest.SerializeToString,
-                response_deserializer=common__pb2.HealthCheckResponse.FromString,
+                request_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
+                response_deserializer=tts__service__pb2.HealthResponse.FromString,
+                _registered_method=True)
+        self.GetStats = channel.unary_unary(
+                '/opensips.ai.tts.TTSService/GetStats',
+                request_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
+                response_deserializer=tts__service__pb2.StatsResponse.FromString,
                 _registered_method=True)
 
 
 class TTSServiceServicer(object):
-    """Text-to-Speech service
+    """Text-to-Speech service - based on Piper WebSocket implementation
     """
 
-    def SynthesizeSpeech(self, request, context):
-        """Synthesize speech from text
+    def SynthesizeText(self, request, context):
+        """Synthesize text to speech (streaming audio chunks)
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def SynthesizeSpeechStream(self, request, context):
-        """Stream-based speech synthesis
+    def SynthesizeSingle(self, request, context):
+        """Single shot synthesis (for small texts)
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def ConfigureTTS(self, request, context):
+    def Configure(self, request, context):
         """Configure TTS parameters
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def GetAvailableVoices(self, request, context):
+    def GetVoices(self, request, context):
         """Get available voices
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -102,33 +107,45 @@ class TTSServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetStats(self, request, context):
+        """Get service stats
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_TTSServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'SynthesizeSpeech': grpc.unary_unary_rpc_method_handler(
-                    servicer.SynthesizeSpeech,
-                    request_deserializer=tts__service__pb2.SynthesizeSpeechRequest.FromString,
-                    response_serializer=tts__service__pb2.SynthesizeSpeechResponse.SerializeToString,
+            'SynthesizeText': grpc.unary_stream_rpc_method_handler(
+                    servicer.SynthesizeText,
+                    request_deserializer=tts__service__pb2.SynthesizeRequest.FromString,
+                    response_serializer=tts__service__pb2.SynthesizeResponse.SerializeToString,
             ),
-            'SynthesizeSpeechStream': grpc.unary_stream_rpc_method_handler(
-                    servicer.SynthesizeSpeechStream,
-                    request_deserializer=tts__service__pb2.SynthesizeSpeechRequest.FromString,
-                    response_serializer=tts__service__pb2.SynthesizeSpeechResponse.SerializeToString,
+            'SynthesizeSingle': grpc.unary_unary_rpc_method_handler(
+                    servicer.SynthesizeSingle,
+                    request_deserializer=tts__service__pb2.SynthesizeRequest.FromString,
+                    response_serializer=tts__service__pb2.SynthesizeResponse.SerializeToString,
             ),
-            'ConfigureTTS': grpc.unary_unary_rpc_method_handler(
-                    servicer.ConfigureTTS,
-                    request_deserializer=tts__service__pb2.ConfigureTTSRequest.FromString,
-                    response_serializer=tts__service__pb2.ConfigureTTSResponse.SerializeToString,
+            'Configure': grpc.unary_unary_rpc_method_handler(
+                    servicer.Configure,
+                    request_deserializer=tts__service__pb2.ConfigureRequest.FromString,
+                    response_serializer=tts__service__pb2.ConfigureResponse.SerializeToString,
             ),
-            'GetAvailableVoices': grpc.unary_unary_rpc_method_handler(
-                    servicer.GetAvailableVoices,
-                    request_deserializer=tts__service__pb2.GetAvailableVoicesRequest.FromString,
-                    response_serializer=tts__service__pb2.GetAvailableVoicesResponse.SerializeToString,
+            'GetVoices': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetVoices,
+                    request_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
+                    response_serializer=tts__service__pb2.VoicesResponse.SerializeToString,
             ),
             'HealthCheck': grpc.unary_unary_rpc_method_handler(
                     servicer.HealthCheck,
-                    request_deserializer=common__pb2.HealthCheckRequest.FromString,
-                    response_serializer=common__pb2.HealthCheckResponse.SerializeToString,
+                    request_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
+                    response_serializer=tts__service__pb2.HealthResponse.SerializeToString,
+            ),
+            'GetStats': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetStats,
+                    request_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
+                    response_serializer=tts__service__pb2.StatsResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -139,38 +156,11 @@ def add_TTSServiceServicer_to_server(servicer, server):
 
  # This class is part of an EXPERIMENTAL API.
 class TTSService(object):
-    """Text-to-Speech service
+    """Text-to-Speech service - based on Piper WebSocket implementation
     """
 
     @staticmethod
-    def SynthesizeSpeech(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/opensips.ai.tts.TTSService/SynthesizeSpeech',
-            tts__service__pb2.SynthesizeSpeechRequest.SerializeToString,
-            tts__service__pb2.SynthesizeSpeechResponse.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def SynthesizeSpeechStream(request,
+    def SynthesizeText(request,
             target,
             options=(),
             channel_credentials=None,
@@ -183,9 +173,9 @@ class TTSService(object):
         return grpc.experimental.unary_stream(
             request,
             target,
-            '/opensips.ai.tts.TTSService/SynthesizeSpeechStream',
-            tts__service__pb2.SynthesizeSpeechRequest.SerializeToString,
-            tts__service__pb2.SynthesizeSpeechResponse.FromString,
+            '/opensips.ai.tts.TTSService/SynthesizeText',
+            tts__service__pb2.SynthesizeRequest.SerializeToString,
+            tts__service__pb2.SynthesizeResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -197,7 +187,7 @@ class TTSService(object):
             _registered_method=True)
 
     @staticmethod
-    def ConfigureTTS(request,
+    def SynthesizeSingle(request,
             target,
             options=(),
             channel_credentials=None,
@@ -210,9 +200,9 @@ class TTSService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/opensips.ai.tts.TTSService/ConfigureTTS',
-            tts__service__pb2.ConfigureTTSRequest.SerializeToString,
-            tts__service__pb2.ConfigureTTSResponse.FromString,
+            '/opensips.ai.tts.TTSService/SynthesizeSingle',
+            tts__service__pb2.SynthesizeRequest.SerializeToString,
+            tts__service__pb2.SynthesizeResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -224,7 +214,7 @@ class TTSService(object):
             _registered_method=True)
 
     @staticmethod
-    def GetAvailableVoices(request,
+    def Configure(request,
             target,
             options=(),
             channel_credentials=None,
@@ -237,9 +227,36 @@ class TTSService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/opensips.ai.tts.TTSService/GetAvailableVoices',
-            tts__service__pb2.GetAvailableVoicesRequest.SerializeToString,
-            tts__service__pb2.GetAvailableVoicesResponse.FromString,
+            '/opensips.ai.tts.TTSService/Configure',
+            tts__service__pb2.ConfigureRequest.SerializeToString,
+            tts__service__pb2.ConfigureResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetVoices(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/opensips.ai.tts.TTSService/GetVoices',
+            google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
+            tts__service__pb2.VoicesResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -265,8 +282,35 @@ class TTSService(object):
             request,
             target,
             '/opensips.ai.tts.TTSService/HealthCheck',
-            common__pb2.HealthCheckRequest.SerializeToString,
-            common__pb2.HealthCheckResponse.FromString,
+            google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
+            tts__service__pb2.HealthResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetStats(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/opensips.ai.tts.TTSService/GetStats',
+            google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
+            tts__service__pb2.StatsResponse.FromString,
             options,
             channel_credentials,
             insecure,

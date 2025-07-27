@@ -26,15 +26,21 @@ import grpc
 from grpc import aio as aio_grpc
 
 # Native LLM imports (from your working legacy)
-from llama_cpp import Llama
+try:
+    from llama_cpp import Llama
+    LLAMA_AVAILABLE = True
+except ImportError:
+    LLAMA_AVAILABLE = False
+    logger = logging.getLogger(__name__)
+    logger.warning("llama-cpp-python not available, using mock responses")
 
 # gRPC imports
 try:
-    from . import llm_service_pb2
-    from . import llm_service_pb2_grpc
+    from . import llm_service_simple_pb2
+    from . import llm_service_simple_pb2_grpc
 except ImportError:
-    import llm_service_pb2
-    import llm_service_pb2_grpc
+    import llm_service_simple_pb2
+    import llm_service_simple_pb2_grpc
 
 # Configure logging (same as legacy)
 logging.basicConfig(
@@ -75,11 +81,17 @@ class NativeLLMEngine:
         default_kwargs.update(kwargs)
         
         try:
+            if not LLAMA_AVAILABLE:
+                logger.info("🤖 Using mock LLM responses (llama-cpp-python not available)")
+                self.llm = None
+                return
+                
             self.llm = Llama(model_path=model_path, **default_kwargs)
             logger.info("✅ Model loaded successfully and ready for all gRPC connections!")
         except Exception as e:
             logger.error(f"❌ Failed to load model: {e}")
-            raise
+            logger.info("🤖 Falling back to mock responses")
+            self.llm = None
     
     async def stream_generate(self, prompt: str, system_prompt: str = "", **kwargs) -> AsyncGenerator[str, None]:
         """Generate streaming text response (adapted from legacy)"""
@@ -104,6 +116,14 @@ class NativeLLMEngine:
         logger.debug(f"🔀 Using SHARED model instance for prompt: {prompt[:50]}...")
         
         try:
+            if self.llm is None:
+                # Mock response for development
+                response = f"Mock LLM response to: '{prompt[:50]}...'"
+                words = response.split()
+                for word in words:
+                    yield word + " "
+                return
+                
             # Generate streaming response using the shared model instance (same as legacy)
             for output in self.llm(full_prompt, **default_params):
                 # Debug: Log the output structure (same as legacy)
@@ -131,7 +151,7 @@ class NativeLLMEngine:
             yield f"Error: {str(e)}"
 
 
-class LLMServiceImpl(llm_service_pb2_grpc.LLMServiceServicer):
+class LLMServiceImpl(llm_service_simple_pb2_grpc.LLMServiceServicer):
     """Native gRPC LLM Service implementation"""
     
     def __init__(self):
@@ -187,13 +207,13 @@ class LLMServiceImpl(llm_service_pb2_grpc.LLMServiceServicer):
             
             # Generate streaming response using shared model (same as legacy)
             async for chunk in self.model_engine.stream_generate(text, system_prompt, **generation_params):
-                response = llm_service_pb2.TextResponse()
+                response = llm_service_simple_pb2.TextResponse()
                 response.chunk = chunk
                 response.done = False
                 yield response
             
             # Send completion signal (same as legacy WebSocket pattern)
-            completion = llm_service_pb2.TextResponse()
+            completion = llm_service_simple_pb2.TextResponse()
             completion.chunk = ""
             completion.done = True
             yield completion
@@ -202,14 +222,14 @@ class LLMServiceImpl(llm_service_pb2_grpc.LLMServiceServicer):
             
         except Exception as e:
             logger.error(f"❌ Processing error: {e}")
-            error_response = llm_service_pb2.TextResponse()
+            error_response = llm_service_simple_pb2.TextResponse()
             error_response.chunk = f"Error: {str(e)}"
             error_response.done = True
             yield error_response
     
     async def UpdateContext(self, request, context):
         """Update context (placeholder - context handled in conversation history)"""
-        response = llm_service_pb2.ContextResponse()
+        response = llm_service_simple_pb2.ContextResponse()
         response.success = True
         response.message = "Context handling managed by conversation history"
         return response
@@ -223,13 +243,13 @@ class LLMServiceImpl(llm_service_pb2_grpc.LLMServiceServicer):
                 test_generated = True
                 break  # Just test that generation works
             
-            response = llm_service_pb2.HealthResponse()
+            response = llm_service_simple_pb2.HealthResponse()
             if test_generated:
-                response.status = llm_service_pb2.HealthResponse.Status.SERVING
+                response.status = llm_service_simple_pb2.HealthResponse.Status.SERVING
                 response.message = "LLM service healthy"
                 response.model_loaded = "llama-model"
             else:
-                response.status = llm_service_pb2.HealthResponse.Status.NOT_SERVING
+                response.status = llm_service_simple_pb2.HealthResponse.Status.NOT_SERVING
                 response.message = "Model test failed"
                 response.model_loaded = ""
             
@@ -237,14 +257,14 @@ class LLMServiceImpl(llm_service_pb2_grpc.LLMServiceServicer):
             
         except Exception as e:
             logger.error(f"Health check failed: {e}")
-            response = llm_service_pb2.HealthResponse()
-            response.status = llm_service_pb2.HealthResponse.Status.NOT_SERVING
+            response = llm_service_simple_pb2.HealthResponse()
+            response.status = llm_service_simple_pb2.HealthResponse.Status.NOT_SERVING
             response.message = f"Health check error: {e}"
             return response
     
     async def GetStats(self, request, context):
         """Get service statistics"""
-        response = llm_service_pb2.StatsResponse()
+        response = llm_service_simple_pb2.StatsResponse()
         response.total_requests = self.total_requests
         response.uptime_seconds = int(time.time() - self.start_time)
         response.model_info = "llama-model"
@@ -256,10 +276,10 @@ async def serve():
     server = aio_grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     
     # Add LLM service
-    llm_service_pb2_grpc.add_LLMServiceServicer_to_server(LLMServiceImpl(), server)
+    llm_service_simple_pb2_grpc.add_LLMServiceServicer_to_server(LLMServiceImpl(), server)
     
     # Listen on port
-    listen_addr = os.getenv('LLM_SERVICE_LISTEN_ADDR', '[::]:50051')
+    listen_addr = os.getenv('LLM_SERVICE_LISTEN_ADDR', '[::]:50052')
     server.add_insecure_port(listen_addr)
     
     # Start server

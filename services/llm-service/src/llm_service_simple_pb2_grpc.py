@@ -3,8 +3,8 @@
 import grpc
 import warnings
 
-import asr_service_pb2 as asr__service__pb2
 from google.protobuf import empty_pb2 as google_dot_protobuf_dot_empty__pb2
+import llm_service_simple_pb2 as llm__service__simple__pb2
 
 GRPC_GENERATED_VERSION = '1.74.0'
 GRPC_VERSION = grpc.__version__
@@ -19,15 +19,15 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + f' but the generated code in asr_service_pb2_grpc.py depends on'
+        + f' but the generated code in llm_service_simple_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
     )
 
 
-class ASRServiceStub(object):
-    """Automatic Speech Recognition service - based on Vosk implementation
+class LLMServiceStub(object):
+    """Simple LLM service - based on legacy WebSocket implementation
     """
 
     def __init__(self, channel):
@@ -36,53 +36,41 @@ class ASRServiceStub(object):
         Args:
             channel: A grpc.Channel.
         """
-        self.StreamingRecognize = channel.stream_stream(
-                '/opensips.ai.asr.ASRService/StreamingRecognize',
-                request_serializer=asr__service__pb2.StreamingRecognizeRequest.SerializeToString,
-                response_deserializer=asr__service__pb2.StreamingRecognizeResponse.FromString,
+        self.ProcessText = channel.unary_stream(
+                '/opensips.ai.llm.LLMService/ProcessText',
+                request_serializer=llm__service__simple__pb2.TextProcessingRequest.SerializeToString,
+                response_deserializer=llm__service__simple__pb2.TextResponse.FromString,
                 _registered_method=True)
-        self.Recognize = channel.unary_unary(
-                '/opensips.ai.asr.ASRService/Recognize',
-                request_serializer=asr__service__pb2.RecognizeRequest.SerializeToString,
-                response_deserializer=asr__service__pb2.RecognizeResponse.FromString,
-                _registered_method=True)
-        self.Configure = channel.unary_unary(
-                '/opensips.ai.asr.ASRService/Configure',
-                request_serializer=asr__service__pb2.ConfigureRequest.SerializeToString,
-                response_deserializer=asr__service__pb2.ConfigureResponse.FromString,
+        self.UpdateContext = channel.unary_unary(
+                '/opensips.ai.llm.LLMService/UpdateContext',
+                request_serializer=llm__service__simple__pb2.ContextUpdateRequest.SerializeToString,
+                response_deserializer=llm__service__simple__pb2.ContextResponse.FromString,
                 _registered_method=True)
         self.HealthCheck = channel.unary_unary(
-                '/opensips.ai.asr.ASRService/HealthCheck',
+                '/opensips.ai.llm.LLMService/HealthCheck',
                 request_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
-                response_deserializer=asr__service__pb2.HealthResponse.FromString,
+                response_deserializer=llm__service__simple__pb2.HealthResponse.FromString,
                 _registered_method=True)
         self.GetStats = channel.unary_unary(
-                '/opensips.ai.asr.ASRService/GetStats',
+                '/opensips.ai.llm.LLMService/GetStats',
                 request_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
-                response_deserializer=asr__service__pb2.StatsResponse.FromString,
+                response_deserializer=llm__service__simple__pb2.StatsResponse.FromString,
                 _registered_method=True)
 
 
-class ASRServiceServicer(object):
-    """Automatic Speech Recognition service - based on Vosk implementation
+class LLMServiceServicer(object):
+    """Simple LLM service - based on legacy WebSocket implementation
     """
 
-    def StreamingRecognize(self, request_iterator, context):
-        """Stream-based speech recognition (primary method)
+    def ProcessText(self, request, context):
+        """Process text and generate streaming response (main method)
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def Recognize(self, request, context):
-        """Single shot recognition
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-    def Configure(self, request, context):
-        """Configure recognition parameters
+    def UpdateContext(self, request, context):
+        """Update context
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -103,47 +91,42 @@ class ASRServiceServicer(object):
         raise NotImplementedError('Method not implemented!')
 
 
-def add_ASRServiceServicer_to_server(servicer, server):
+def add_LLMServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'StreamingRecognize': grpc.stream_stream_rpc_method_handler(
-                    servicer.StreamingRecognize,
-                    request_deserializer=asr__service__pb2.StreamingRecognizeRequest.FromString,
-                    response_serializer=asr__service__pb2.StreamingRecognizeResponse.SerializeToString,
+            'ProcessText': grpc.unary_stream_rpc_method_handler(
+                    servicer.ProcessText,
+                    request_deserializer=llm__service__simple__pb2.TextProcessingRequest.FromString,
+                    response_serializer=llm__service__simple__pb2.TextResponse.SerializeToString,
             ),
-            'Recognize': grpc.unary_unary_rpc_method_handler(
-                    servicer.Recognize,
-                    request_deserializer=asr__service__pb2.RecognizeRequest.FromString,
-                    response_serializer=asr__service__pb2.RecognizeResponse.SerializeToString,
-            ),
-            'Configure': grpc.unary_unary_rpc_method_handler(
-                    servicer.Configure,
-                    request_deserializer=asr__service__pb2.ConfigureRequest.FromString,
-                    response_serializer=asr__service__pb2.ConfigureResponse.SerializeToString,
+            'UpdateContext': grpc.unary_unary_rpc_method_handler(
+                    servicer.UpdateContext,
+                    request_deserializer=llm__service__simple__pb2.ContextUpdateRequest.FromString,
+                    response_serializer=llm__service__simple__pb2.ContextResponse.SerializeToString,
             ),
             'HealthCheck': grpc.unary_unary_rpc_method_handler(
                     servicer.HealthCheck,
                     request_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
-                    response_serializer=asr__service__pb2.HealthResponse.SerializeToString,
+                    response_serializer=llm__service__simple__pb2.HealthResponse.SerializeToString,
             ),
             'GetStats': grpc.unary_unary_rpc_method_handler(
                     servicer.GetStats,
                     request_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
-                    response_serializer=asr__service__pb2.StatsResponse.SerializeToString,
+                    response_serializer=llm__service__simple__pb2.StatsResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'opensips.ai.asr.ASRService', rpc_method_handlers)
+            'opensips.ai.llm.LLMService', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('opensips.ai.asr.ASRService', rpc_method_handlers)
+    server.add_registered_method_handlers('opensips.ai.llm.LLMService', rpc_method_handlers)
 
 
  # This class is part of an EXPERIMENTAL API.
-class ASRService(object):
-    """Automatic Speech Recognition service - based on Vosk implementation
+class LLMService(object):
+    """Simple LLM service - based on legacy WebSocket implementation
     """
 
     @staticmethod
-    def StreamingRecognize(request_iterator,
+    def ProcessText(request,
             target,
             options=(),
             channel_credentials=None,
@@ -153,12 +136,12 @@ class ASRService(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.stream_stream(
-            request_iterator,
+        return grpc.experimental.unary_stream(
+            request,
             target,
-            '/opensips.ai.asr.ASRService/StreamingRecognize',
-            asr__service__pb2.StreamingRecognizeRequest.SerializeToString,
-            asr__service__pb2.StreamingRecognizeResponse.FromString,
+            '/opensips.ai.llm.LLMService/ProcessText',
+            llm__service__simple__pb2.TextProcessingRequest.SerializeToString,
+            llm__service__simple__pb2.TextResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -170,7 +153,7 @@ class ASRService(object):
             _registered_method=True)
 
     @staticmethod
-    def Recognize(request,
+    def UpdateContext(request,
             target,
             options=(),
             channel_credentials=None,
@@ -183,36 +166,9 @@ class ASRService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/opensips.ai.asr.ASRService/Recognize',
-            asr__service__pb2.RecognizeRequest.SerializeToString,
-            asr__service__pb2.RecognizeResponse.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def Configure(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/opensips.ai.asr.ASRService/Configure',
-            asr__service__pb2.ConfigureRequest.SerializeToString,
-            asr__service__pb2.ConfigureResponse.FromString,
+            '/opensips.ai.llm.LLMService/UpdateContext',
+            llm__service__simple__pb2.ContextUpdateRequest.SerializeToString,
+            llm__service__simple__pb2.ContextResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -237,9 +193,9 @@ class ASRService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/opensips.ai.asr.ASRService/HealthCheck',
+            '/opensips.ai.llm.LLMService/HealthCheck',
             google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
-            asr__service__pb2.HealthResponse.FromString,
+            llm__service__simple__pb2.HealthResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -264,9 +220,9 @@ class ASRService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/opensips.ai.asr.ASRService/GetStats',
+            '/opensips.ai.llm.LLMService/GetStats',
             google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
-            asr__service__pb2.StatsResponse.FromString,
+            llm__service__simple__pb2.StatsResponse.FromString,
             options,
             channel_credentials,
             insecure,

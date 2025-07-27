@@ -50,9 +50,27 @@ class NativeVoskASREngine:
         logger.info(f"🔄 Sample rate: {sample_rate} Hz")
         
         try:
-            # Load Vosk model (same as legacy)
-            self.model = Model(model_path)
-            logger.info("✅ Vosk model loaded successfully!")
+            # Try different model paths (similar to simple server logic)
+            model_paths = [
+                os.path.join(model_path, "tr"),  # Turkish model
+                os.path.join(model_path, "en"),  # English model
+                model_path
+            ]
+            
+            model_loaded = False
+            for path in model_paths:
+                if os.path.exists(path):
+                    required_files = ["final.mdl", "conf"]
+                    if any(f in os.listdir(path) for f in required_files):
+                        logger.info(f"Loading Vosk model from: {path}")
+                        self.model = Model(path)
+                        logger.info("✅ Vosk model loaded successfully!")
+                        model_loaded = True
+                        break
+            
+            if not model_loaded:
+                raise Exception(f"No valid Vosk model found in {model_paths}")
+                
         except Exception as e:
             logger.error(f"❌ Failed to load Vosk model: {e}")
             raise
@@ -124,7 +142,7 @@ class ASRServiceImpl(asr_service_pb2_grpc.ASRServiceServicer):
             logger.info("🔄 Pre-loading Vosk ASR model (this happens ONLY ONCE)...")
             
             # Model configuration from environment or defaults (same as legacy)
-            model_path = os.getenv('VOSK_MODEL_PATH', 'model')
+            model_path = os.getenv('VOSK_MODEL_PATH', '/app/model')
             sample_rate = float(os.getenv('VOSK_SAMPLE_RATE', '16000'))
             
             self.vosk_engine = NativeVoskASREngine(
@@ -356,7 +374,7 @@ async def serve():
     asr_service_pb2_grpc.add_ASRServiceServicer_to_server(ASRServiceImpl(), server)
     
     # Listen on port
-    listen_addr = os.getenv('ASR_SERVICE_LISTEN_ADDR', '[::]:50053')
+    listen_addr = os.getenv('ASR_SERVICE_LISTEN_ADDR', '[::]:50051')
     server.add_insecure_port(listen_addr)
     
     # Start server

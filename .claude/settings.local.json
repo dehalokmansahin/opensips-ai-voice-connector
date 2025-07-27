@@ -8,7 +8,13 @@
       "Bash(python:*)",
       "Bash(find:*)",
       "Bash(rm:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(docker:*)",
+      "Bash(pip --version)",
+      "Bash(wmic:*)",
+      "Bash(powershell:*)",
+      "Bash(cp:*)",
+      "Bash(curl:*)"
     ],
     "deny": []
   }

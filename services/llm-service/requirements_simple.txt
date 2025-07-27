@@ -1,0 +1,9 @@
+# Minimal requirements for simple LLM service (development mode)
+# No heavy PyTorch or Transformers dependencies
+
+# Core gRPC dependencies
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
+
+# Basic utilities
+asyncio
