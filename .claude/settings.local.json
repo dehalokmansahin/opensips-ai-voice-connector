@@ -34,7 +34,8 @@
       "Bash(timeout:*)",
       "Bash(git commit:*)",
       "Bash(diff:*)",
-      "Bash(./scripts/generate-proto.sh:*)"
+      "Bash(./scripts/generate-proto.sh:*)",
+      "Bash(.bmad-core/tasks/execute-checklist:*)"
     ],
     "deny": []
   }
