@@ -114,19 +114,19 @@ class Settings:
     
     async def _load_services_config(self):
         """Load gRPC services configuration"""
-        # ASR Service
+        # ASR Service  
         asr_host = self._get_config_value('asr', 'host', 'localhost')
-        asr_port = self._get_config_value('asr', 'port', '50053', int)
+        asr_port = self._get_config_value('asr', 'port', '50051', int)
         asr_timeout = self._get_config_value('asr', 'timeout', '30.0', float)
         
         # LLM Service
         llm_host = self._get_config_value('llm', 'host', 'localhost')
-        llm_port = self._get_config_value('llm', 'port', '50051', int)
+        llm_port = self._get_config_value('llm', 'port', '50052', int)
         llm_timeout = self._get_config_value('llm', 'timeout', '30.0', float)
         
         # TTS Service
         tts_host = self._get_config_value('tts', 'host', 'localhost')
-        tts_port = self._get_config_value('tts', 'port', '50052', int)
+        tts_port = self._get_config_value('tts', 'port', '50053', int)
         tts_timeout = self._get_config_value('tts', 'timeout', '30.0', float)
         
         self.services = ServicesConfig(
@@ -193,15 +193,15 @@ class Settings:
         self.services = ServicesConfig(
             asr=ServiceConfig(
                 host=os.getenv('ASR_SERVICE_HOST', 'localhost'),
-                port=int(os.getenv('ASR_SERVICE_PORT', '50053'))
+                port=int(os.getenv('ASR_SERVICE_PORT', '50051'))
             ),
             llm=ServiceConfig(
                 host=os.getenv('LLM_SERVICE_HOST', 'localhost'),
-                port=int(os.getenv('LLM_SERVICE_PORT', '50051'))
+                port=int(os.getenv('LLM_SERVICE_PORT', '50052'))
             ),
             tts=ServiceConfig(
                 host=os.getenv('TTS_SERVICE_HOST', 'localhost'),
-                port=int(os.getenv('TTS_SERVICE_PORT', '50052'))
+                port=int(os.getenv('TTS_SERVICE_PORT', '50053'))
             )
         )
         

@@ -18,7 +18,7 @@ import websockets
 import numpy as np
 
 # Generated gRPC code (will be created by proto-gen.sh)
-from shared.proto_generated import common_pb2
+from . import common_pb2
 try:
     from . import tts_service_pb2
     from . import tts_service_pb2_grpc

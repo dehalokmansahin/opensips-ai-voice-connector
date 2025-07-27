@@ -3,7 +3,10 @@
 import grpc
 import warnings
 
-import common_pb2 as common__pb2
+try:
+    from . import common_pb2 as common__pb2
+except ImportError:
+    import common_pb2 as common__pb2
 import llm_service_pb2 as llm__service__pb2
 
 GRPC_GENERATED_VERSION = '1.74.0'

@@ -9,12 +9,21 @@ from typing import Dict, Any, Optional
 from dataclasses import dataclass
 from datetime import datetime
 
-from ..grpc_clients import ServiceRegistry, ASRClient, LLMClient, TTSClient
-from ..grpc_clients.asr_client import StreamingSession as ASRStreamingSession
-from ..grpc_clients.llm_client import ConversationManager
-from ..grpc_clients.tts_client import SentenceFlushAggregator
-from ..opensips.rtp_transport import RTPTransport
-from ..config.settings import Settings
+try:
+    from ..grpc_clients import ServiceRegistry, ASRClient, LLMClient, TTSClient
+    from ..grpc_clients.asr_client import StreamingSession as ASRStreamingSession
+    from ..grpc_clients.llm_client import ConversationManager
+    from ..grpc_clients.tts_client import SentenceFlushAggregator
+    from ..opensips.rtp_transport import RTPTransport
+    from ..config.settings import Settings
+except ImportError:
+    # Fallback for external imports
+    from core.grpc_clients import ServiceRegistry, ASRClient, LLMClient, TTSClient
+    from core.grpc_clients.asr_client import StreamingSession as ASRStreamingSession
+    from core.grpc_clients.llm_client import ConversationManager
+    from core.grpc_clients.tts_client import SentenceFlushAggregator
+    from core.opensips.rtp_transport import RTPTransport
+    from core.config.settings import Settings
 from .session import ConversationSession
 
 logger = logging.getLogger(__name__)

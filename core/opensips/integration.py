@@ -9,10 +9,10 @@ import socket
 from typing import Dict, Any, Optional, Callable
 from dataclasses import dataclass
 
-from .event_listener import OpenSIPSEventListener
-from .sip_backend import SIPBackendListener
-from .rtp_transport import RTPTransport
-from ..config.settings import OpenSIPSConfig
+from opensips.event_listener import OpenSIPSEventListener
+from opensips.sip_backend import SIPBackendListener
+from opensips.rtp_transport import RTPTransport
+from config.settings import OpenSIPSConfig
 
 logger = logging.getLogger(__name__)
 

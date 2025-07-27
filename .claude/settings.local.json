@@ -14,7 +14,15 @@
       "Bash(wmic:*)",
       "Bash(powershell:*)",
       "Bash(cp:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(if not exist logs mkdir logs)",
+      "Bash(copy \"services\\common\\common_pb2.py\" \"services\\asr-service\\src\\common_pb2.py\")",
+      "Bash(copy \"services\\common\\common_pb2.py\" \"services\\llm-service\\src\\common_pb2.py\")",
+      "Bash(copy \"services\\common\\common_pb2.py\" \"services\\tts-service\\src\\common_pb2.py\")",
+      "mcp__ide__executeCode",
+      "Bash(fc:*)",
+      "Bash(git rm:*)",
+      "Bash(git add:*)"
     ],
     "deny": []
   }
