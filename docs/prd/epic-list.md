@@ -1,14 +1,11 @@
 # Epic List
 
-**Epic 1: Foundation & Core Infrastructure**  
-Establish project setup, containerization, OpenSIPS configuration, and basic audio pipeline with health monitoring.
+**Epic 1: OpenSIPS Outbound Call Foundation**  
+Configure OpenSIPS for outbound SIP calls and adapt existing services for basic IVR testing.
 
-**Epic 2: Core AI Pipeline Integration**  
-Implement VAD, ASR, LLM, and TTS components with Pipecat orchestration for basic voice processing.
+**Epic 2: Simple Test Framework**  
+Implement basic test scenario execution with Turkish BERT intent recognition.
 
-**Epic 3: Real-time Audio Transport & SIP Integration**  
-Complete RTP audio handling, PCMU/PCM conversion, and full SIP call flow integration.
-
-**Epic 4: Banking IVR Features & Optimization**  
-Implement Card Delivery Status Inquiry MVP scenario, conversation context, and performance optimization to meet latency targets.
+**Epic 3: Basic Web Interface**  
+Create simple web interface for test management and execution.
 

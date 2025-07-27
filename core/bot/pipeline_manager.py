@@ -20,7 +20,8 @@ sys.path.insert(0, str(core_path))
 # Direct imports
 from grpc_clients.service_registry import ServiceRegistry
 from grpc_clients.asr_client import ASRClient, StreamingSession as ASRStreamingSession
-from grpc_clients.llm_client import LLMClient, ConversationManager
+# LLM client removed for IVR testing transformation
+# from grpc_clients.llm_client import LLMClient, ConversationManager
 from grpc_clients.tts_client import TTSClient, SentenceFlushAggregator
 from opensips.rtp_transport import RTPTransport
 from config.settings import Settings
@@ -33,7 +34,8 @@ class SessionConfig:
     """Configuration for conversation session"""
     system_prompt: str = "Sen Türkçe konuşan bir yapay zeka asistanısın. Kısa ve net cevaplar ver."
     asr_config: Dict[str, Any] = None
-    llm_config: Dict[str, Any] = None
+    # LLM config removed - will be replaced by intent recognition in Epic 2
+    # llm_config: Dict[str, Any] = None
     tts_config: Dict[str, Any] = None
     
     def __post_init__(self):
@@ -44,12 +46,8 @@ class SessionConfig:
                 'max_alternatives': 0
             }
         
-        if self.llm_config is None:
-            self.llm_config = {
-                'temperature': 0.7,
-                'max_tokens': 150,
-                'use_rag': True
-            }
+        # LLM config initialization removed
+        # Will be replaced by intent recognition configuration in Epic 2
         
         if self.tts_config is None:
             self.tts_config = {
@@ -70,7 +68,8 @@ class PipelineManager:
         
         # Service clients
         self.asr_client: Optional[ASRClient] = None
-        self.llm_client: Optional[LLMClient] = None
+        # LLM client removed for IVR testing transformation
+        # self.llm_client: Optional[LLMClient] = None
         self.tts_client: Optional[TTSClient] = None
         
         # Active sessions
@@ -84,14 +83,15 @@ class PipelineManager:
         try:
             # Create service clients
             self.asr_client = ASRClient(self.service_registry)
-            self.llm_client = LLMClient(self.service_registry)
+            # LLM client initialization removed
+            # self.llm_client = LLMClient(self.service_registry)
             self.tts_client = TTSClient(self.service_registry)
             
             # Wait for services to be ready
             logger.info("Waiting for services to be ready...")
             
             ready_services = 0
-            for service_name in ['asr', 'llm', 'tts']:
+            for service_name in ['asr', 'tts']:  # LLM removed
                 if await self.service_registry.wait_for_service(service_name, timeout=30.0):
                     ready_services += 1
                     logger.info(f"Service {service_name} is ready")
@@ -130,7 +130,7 @@ class PipelineManager:
             session = ConversationSession(
                 call_id=call_id,
                 asr_client=self.asr_client,
-                llm_client=self.llm_client,
+                # llm_client removed
                 tts_client=self.tts_client,
                 rtp_transport=rtp_transport,
                 config=config,
@@ -181,8 +181,9 @@ class PipelineManager:
             if self.asr_client:
                 await self.asr_client.cleanup()
             
-            if self.llm_client:
-                await self.llm_client.cleanup()
+            # LLM client cleanup removed
+            # if self.llm_client:
+            #     await self.llm_client.cleanup()
             
             if self.tts_client:
                 await self.tts_client.cleanup()
@@ -202,7 +203,7 @@ class PipelineManager:
             }
             
             # Check service health
-            for service_name in ['asr', 'llm', 'tts']:
+            for service_name in ['asr', 'tts']:  # LLM removed
                 is_healthy = self.service_registry.is_service_healthy(service_name)
                 health_status['services'][service_name] = is_healthy
             
@@ -214,12 +215,13 @@ class PipelineManager:
                 except:
                     health_status['services']['asr_client'] = False
             
-            if health_status['services'].get('llm'):
-                try:
-                    llm_healthy = await self.llm_client.health_check()
-                    health_status['services']['llm_client'] = llm_healthy
-                except:
-                    health_status['services']['llm_client'] = False
+            # LLM health check removed
+            # if health_status['services'].get('llm'):
+            #     try:
+            #         llm_healthy = await self.llm_client.health_check()
+            #         health_status['services']['llm_client'] = llm_healthy
+            #     except:
+            #         health_status['services']['llm_client'] = False
             
             if health_status['services'].get('tts'):
                 try:

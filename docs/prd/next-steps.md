@@ -1,7 +1,10 @@
 # Next Steps
 
-### UX Expert Prompt
-Begin UX analysis and voice user interface design for the banking IVR voice assistant using this PRD as foundation. Focus on conversation flow optimization and voice interaction patterns.
+### Implementation Priority
+Start with Epic 1 to establish OpenSIPS outbound calling capabilities and basic test framework foundation.
 
 ### Architect Prompt
-Initiate architectural design phase for the Pipecat-based voice assistant system using this PRD as requirements foundation. Design the complete technical architecture including component integration, deployment patterns, and scalability considerations.
+Review the simplified IVR Flow Automation System requirements and create a technical architecture plan for transforming the existing voice assistant into an automated IVR testing platform using OpenSIPS for outbound calls.
+
+### Development Focus
+Keep implementation simple and focused on core IVR testing capabilities with minimal complexity.

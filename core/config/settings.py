@@ -39,7 +39,6 @@ class ServiceConfig:
 class ServicesConfig:
     """All gRPC services configuration"""
     asr: ServiceConfig
-    llm: ServiceConfig
     tts: ServiceConfig
     vad: Optional[ServiceConfig] = None
 
@@ -119,10 +118,6 @@ class Settings:
         asr_port = self._get_config_value('asr', 'port', '50051', int)
         asr_timeout = self._get_config_value('asr', 'timeout', '30.0', float)
         
-        # LLM Service
-        llm_host = self._get_config_value('llm', 'host', 'localhost')
-        llm_port = self._get_config_value('llm', 'port', '50052', int)
-        llm_timeout = self._get_config_value('llm', 'timeout', '30.0', float)
         
         # TTS Service
         tts_host = self._get_config_value('tts', 'host', 'localhost')
@@ -131,7 +126,6 @@ class Settings:
         
         self.services = ServicesConfig(
             asr=ServiceConfig(host=asr_host, port=asr_port, timeout=asr_timeout),
-            llm=ServiceConfig(host=llm_host, port=llm_port, timeout=llm_timeout),
             tts=ServiceConfig(host=tts_host, port=tts_port, timeout=tts_timeout)
         )
     
@@ -195,10 +189,6 @@ class Settings:
                 host=os.getenv('ASR_SERVICE_HOST', 'localhost'),
                 port=int(os.getenv('ASR_SERVICE_PORT', '50051'))
             ),
-            llm=ServiceConfig(
-                host=os.getenv('LLM_SERVICE_HOST', 'localhost'),
-                port=int(os.getenv('LLM_SERVICE_PORT', '50052'))
-            ),
             tts=ServiceConfig(
                 host=os.getenv('TTS_SERVICE_HOST', 'localhost'),
                 port=int(os.getenv('TTS_SERVICE_PORT', '50053'))
@@ -235,7 +225,6 @@ class Settings:
             },
             'services': {
                 'asr': {'host': self.services.asr.host, 'port': self.services.asr.port},
-                'llm': {'host': self.services.llm.host, 'port': self.services.llm.port},
                 'tts': {'host': self.services.tts.host, 'port': self.services.tts.port},
             },
             'audio': {

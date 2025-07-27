@@ -1,6 +1,6 @@
 """
 gRPC Service Registry for OpenSIPS AI Voice Connector
-Manages connections to ASR, LLM, TTS microservices
+Manages connections to ASR, TTS microservices
 """
 
 import asyncio
@@ -34,9 +34,6 @@ class ServiceRegistry:
         try:
             # Initialize ASR service
             await self._initialize_service('asr', self.config.asr)
-            
-            # Initialize LLM service  
-            await self._initialize_service('llm', self.config.llm)
             
             # Initialize TTS service
             await self._initialize_service('tts', self.config.tts)
@@ -129,8 +126,6 @@ class ServiceRegistry:
         """Get service endpoint"""
         if service_name == 'asr':
             return self.config.asr.endpoint
-        elif service_name == 'llm':
-            return self.config.llm.endpoint
         elif service_name == 'tts':
             return self.config.tts.endpoint
         elif service_name == 'vad' and self.config.vad:
@@ -186,7 +181,7 @@ class ServiceRegistry:
                     'healthy': self._service_status.get(name, False),
                     'endpoint': self.get_service_endpoint(name)
                 }
-                for name in ['asr', 'llm', 'tts', 'vad']
+                for name in ['asr', 'tts', 'vad']
                 if self.get_service_endpoint(name) is not None
             },
             'total_services': len(self._channels),

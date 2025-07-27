@@ -28,40 +28,6 @@ services:
     networks:
       - opensips-ai-network
 
-  # LLM Service
-  llm-service:
-    build:
-      context: ./services/llm-service
-      dockerfile: Dockerfile
-    container_name: opensips-llm-service
-    ports:
-      - "50052:50052"
-    environment:
-      - LLM_SERVICE_LISTEN_ADDR=[::]:50052
-      - LLM_MODEL_PATH=/app/model/llama-model.gguf
-      - LLM_CONTEXT_SIZE=2048
-      - LLM_THREADS=4
-      - LLM_GPU_LAYERS=0
-      - LLM_TEMPERATURE=0.7
-      - LLM_MAX_TOKENS=150
-      - LLM_USE_MLOCK=false
-      - LOG_LEVEL=INFO
-      - LLM_MAX_WORKERS=4
-      - TRANSFORMERS_OFFLINE=1
-      - HF_HUB_OFFLINE=1
-      - HF_HUB_DISABLE_TELEMETRY=1
-    volumes:
-      - ./models/llm:/app/model:ro
-      - ./models/rag_model:/app/rag_model:rw
-    healthcheck:
-      test: ["CMD", "grpc-health-probe", "-addr=localhost:50052", "-service=LLMService"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-    restart: unless-stopped
-    networks:
-      - opensips-ai-network
 
   # TTS Service
   tts-service:
@@ -104,7 +70,6 @@ services:
     environment:
       - CORE_LOG_LEVEL=INFO
       - ASR_SERVICE_URL=asr-service:50051
-      - LLM_SERVICE_URL=llm-service:50052
       - TTS_SERVICE_URL=tts-service:50053
       - OPENSIPS_HOST=0.0.0.0
       - OPENSIPS_PORT=5060
@@ -112,8 +77,6 @@ services:
       - RTP_PORT_RANGE_END=10100
     depends_on:
       asr-service:
-        condition: service_healthy
-      llm-service:
         condition: service_healthy
       tts-service:
         condition: service_healthy
@@ -140,6 +103,5 @@ networks:
 volumes:
   # Named volumes for persistent data
   vosk-models:
-  llm-models:
   piper-models:
   application-logs:

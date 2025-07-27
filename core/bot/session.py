@@ -10,15 +10,19 @@ from datetime import datetime
 from enum import Enum
 
 try:
-    from ..grpc_clients import ASRClient, LLMClient, TTSClient
+    from ..grpc_clients import ASRClient, TTSClient
+    # LLMClient removed for IVR testing transformation
     from ..grpc_clients.asr_client import StreamingSession as ASRStreamingSession
-    from ..grpc_clients.llm_client import ConversationManager
+    # ConversationManager removed for IVR testing transformation
+    # from ..grpc_clients.llm_client import ConversationManager
     from ..grpc_clients.tts_client import SentenceFlushAggregator
 except ImportError:
     # Fallback for external imports
-    from core.grpc_clients import ASRClient, LLMClient, TTSClient
+    from core.grpc_clients import ASRClient, TTSClient
+    # LLMClient removed for IVR testing transformation
     from core.grpc_clients.asr_client import StreamingSession as ASRStreamingSession
-    from core.grpc_clients.llm_client import ConversationManager
+    # ConversationManager removed for IVR testing transformation
+    # from core.grpc_clients.llm_client import ConversationManager
     from core.grpc_clients.tts_client import SentenceFlushAggregator
 try:
     from ..opensips.rtp_transport import RTPTransport
@@ -51,7 +55,7 @@ class ConversationSession:
         self,
         call_id: str,
         asr_client: ASRClient,
-        llm_client: LLMClient,
+        # llm_client: LLMClient,  # Removed for IVR testing
         tts_client: TTSClient,
         rtp_transport: Optional[RTPTransport] = None,
         config: Any = None,

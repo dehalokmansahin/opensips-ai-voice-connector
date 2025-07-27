@@ -8,7 +8,7 @@ Version: 2.0.0 (New Architecture)
 # Core components (avoid importing main.py to prevent circular imports)
 from .config import Settings, OpenSIPSConfig, ServiceConfig, ServicesConfig, AudioConfig, LoggingConfig
 from .opensips import OpenSIPSIntegration, CallInfo, OpenSIPSEventListener, SIPBackendListener, RTPTransport
-from .grpc_clients import ServiceRegistry, ASRClient, LLMClient, TTSClient
+from .grpc_clients import ServiceRegistry, ASRClient, TTSClient
 from .bot import PipelineManager, ConversationSession, SessionState, SessionConfig
 from .utils import setup_logging, get_logger, AudioFormat, find_free_port, get_local_ip
 
@@ -36,7 +36,6 @@ __all__ = [
     # gRPC clients
     "ServiceRegistry",
     "ASRClient",
-    "LLMClient",
     "TTSClient",
     
     # Bot pipeline

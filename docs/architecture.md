@@ -1,1057 +1,630 @@
-# OpenSIPS AI Voice Connector Architecture Document
+# IVR Flow Automation System Brownfield Enhancement Architecture
 
 ## Introduction
 
-This document outlines the implemented architecture for the OpenSIPS AI Voice Connector, a microservices-based voice assistant system with native pipecat integration. The system has evolved from initial design to a production-ready implementation with comprehensive gRPC services, Docker orchestration, and advanced AI processing capabilities.
+This document outlines the architectural approach for enhancing the OpenSIPS AI Voice Connector with IVR Flow Automation System capabilities. Its primary goal is to serve as the guiding architectural blueprint for AI-driven development of new features while ensuring seamless integration with the existing system.
 
-**Implementation Status:**
-This system represents a fully implemented microservices architecture with working gRPC services, Docker containerization, and native pipecat framework integration. The architecture has been validated through implementation of core services including ASR, LLM, TTS, and service orchestration components.
+**Relationship to Existing Architecture:**
+This document supplements existing project architecture by defining how new components will integrate with current systems. Where conflicts arise between new and existing patterns, this document provides guidance on maintaining consistency while implementing enhancements.
 
-### Implementation Approach
+### Existing Project Analysis
 
-This system was built using a microservices-within-monorepo approach leveraging:
+**Current Project State:**
+- **Primary Purpose:** Real-time AI voice processing system for telephony applications with sub-700ms latency
+- **Current Tech Stack:** Python 3.9+, gRPC microservices (ASR/Vosk, LLM/LLaMA, TTS/Piper), OpenSIPS, Docker, Pipecat framework
+- **Architecture Style:** Microservices architecture with gRPC communication and Docker containerization
+- **Deployment Method:** Docker Compose with health checks and service dependency management
 
-- **Native Pipecat Framework** for audio pipeline orchestration and AI component integration
-- **gRPC microservices** for high-performance inter-service communication
-- **Docker containerization** with development and production deployment modes
-- **Common service base** for standardized service management and health monitoring
+**Available Documentation:**
+- Existing README.md with comprehensive project structure
+- Docker compose configurations for dev/prod environments
+- gRPC service implementations and protobuf definitions
+- Comprehensive testing framework with pytest
 
-The implementation prioritizes maintainability, scalability, and banking-grade reliability while achieving sub-700ms latency targets.
+**Identified Constraints:**
+- Must maintain existing ASR/TTS service functionality
+- CPU-only deployment requirement (no GPU dependencies)
+- Existing OpenSIPS integration must be preserved during transformation
+- Current service port allocation and network configuration
 
-### Change Log
+## Enhancement Scope and Integration Strategy
 
-| Date | Version | Description | Author |
-|------|---------|-------------|---------|
-| 2025-07-27 | 1.0 | Initial architecture creation from PRD | Winston (Architect) |
-| 2025-07-27 | 2.0 | Updated to reflect current microservices implementation | Winston (Architect) |
+### Enhancement Overview
+**Enhancement Type:** Service Purpose Transformation + CPU-Only Architecture  
+**Scope:** Convert to outbound IVR testing with CPU-based Turkish BERT intent recognition  
+**Integration Impact:** Major - Remove LLM completely, add CPU-optimized Intent Recognition service
 
-## High Level Architecture
+### Integration Approach
+**Code Integration Strategy:** 
+- Remove LLM service completely (no streaming, no real-time conversation)
+- Add simple Intent Recognition service: **text input → intent classification output**
+- Maintain existing ASR service for IVR response transcription
+- Maintain existing TTS service for sending prompts to IVR
+- Add Test Controller service for orchestrating test scenarios
 
-### Technical Summary
+**API Integration Pattern:**
+```
+Test Flow: TTS → IVR → ASR → Intent Recognition → Test Validation
+          (send prompt) (response) (transcribe) (classify) (pass/fail)
+```
 
-The OpenSIPS AI Voice Connector implements a **microservices-within-monorepo architecture** with **native pipecat framework integration** for real-time audio processing pipelines. The system features **four independent gRPC microservices** (ASR, LLM, TTS, Core) with **common service base architecture** for standardized health monitoring, logging, and configuration management. The architecture achieves **sub-700ms latency targets** through streaming architectures and efficient service orchestration, while maintaining **banking-grade security and reliability standards**.
+**Database Integration:** Add SQLite for test scenarios, results, and intent training data, maintaining separation from existing data flows
 
-### High Level Overview
+**UI Integration:** New web interface for test management replacing conversational interface
 
-**Implementation Status:** ✅ **FULLY IMPLEMENTED**
-- Four working gRPC microservices with health monitoring
-- Docker orchestration with development and production modes  
-- Native pipecat framework integration for audio processing
-- Common service base for standardized service management
+### Compatibility Requirements
+**Existing API Compatibility:** Remove LLM service dependencies, maintain ASR/TTS patterns  
+**Database Schema Compatibility:** No changes to existing data, add new test-specific schemas  
+**UI/UX Consistency:** Complete interface replacement for test management vs. conversation  
+**Performance Impact:** Reduced resource usage without LLM, faster intent recognition responses
 
-**Architecture Style:** Microservices within Monorepo
-- **ASR Service** (port 50051): Native Vosk integration with enhanced service base
-- **LLM Service** (port 50052): LLaMA processing with llama-cpp-python integration
-- **TTS Service** (port 50053): Piper text-to-speech with streaming audio output
-- **Core Application** (port 8080): OpenSIPS integration and pipeline orchestration
+## Tech Stack Alignment
 
-**Repository Structure:** Monorepo with Service Separation
-- `services/` directory with independent microservices
-- `core/` directory with application orchestration and native pipecat integration
-- `shared/` libraries and common utilities
-- Centralized Docker orchestration and configuration management
+### Existing Technology Stack
 
-**Service Architecture:** gRPC-based microservices with native pipecat orchestration
-- **Core Application:** Orchestrates audio flow and session lifecycle using pipecat
-- **Independent AI Services:** ASR, LLM, TTS as separate gRPC services
-- **Service Discovery:** Docker networking with health monitoring
-- **Common Service Base:** Standardized logging, health checks, and configuration
+| Category | Current Technology | Version | Usage in Enhancement | Notes |
+|----------|-------------------|---------|---------------------|-------|
+| **Core Language** | Python | 3.9+ | All services and core application | Maintained |
+| **Service Communication** | gRPC/protobuf | 1.60.0/4.25.1 | ASR, TTS, Intent Recognition, Test Controller | Existing pattern extended |
+| **Web Framework** | FastAPI | 0.108.0 | Test management web interface | Existing pattern reused |
+| **Containerization** | Docker/Docker Compose | Latest | All services including new Intent & Test Controller | Existing pattern extended |
+| **Audio Processing** | numpy, soundfile, scipy | 2.2.5, 0.12.1, 1.15.2 | RTP audio handling for IVR calls | Maintained |
+| **ASR Engine** | Vosk | 0.3.45 | IVR response transcription | Maintained as-is |
+| **TTS Engine** | Piper | 1.2.0 | IVR prompt generation | Maintained as-is |
+| **SIP/Telephony** | OpenSIPS | Custom integration | **Modified for outbound calls** | Reconfigured |
+| **Configuration** | configparser, pydantic | 6.0.0, 2.10.4 | Test scenario and service config | Maintained |
+| **Testing** | pytest suite | 8.2.1+ | Extended for IVR test validation | Extended |
 
-**Implemented Data Flow:**
-1. **Audio Ingestion:** SIP/RTP calls → OpenSIPS → Core Application (pipecat integration)
-2. **Audio Processing:** PCMU/8000 → PCM conversion → pipecat pipeline orchestration
-3. **AI Processing:** Pipecat → gRPC calls to ASR → LLM → TTS services
-4. **Audio Response:** TTS service → pipecat → PCM → PCMU/8000 → RTP transmission
+### New Technology Additions
 
-**Implemented Architectural Decisions:**
-- **gRPC Services:** All AI components implemented as independent gRPC services
-- **Native Pipecat Integration:** Full pipecat framework usage for audio processing and pipeline orchestration
-- **Docker Containerization:** Complete containerization with health checks and service orchestration
-- **Common Service Base:** Standardized service management, health monitoring, and graceful shutdown
+| Technology | Version | Purpose | Rationale | Integration Method |
+|------------|---------|---------|-----------|-------------------|
+| **Turkish BERT** | dbmdz/bert-base-turkish-uncased | Intent classification from IVR responses | CPU-optimized, Turkish language support for IVR testing | New gRPC service (port 50054) |
+| **Transformers** | Latest stable | BERT model loading and inference | Required for Turkish BERT | New Intent Recognition service |
+| **SQLite** | Built-in Python | Test scenarios, results, intent training data | Lightweight, no additional infrastructure | New database files |
+| **ONNX Runtime** | 1.19.2 | CPU-optimized BERT inference | Already in requirements, optimize Turkish BERT | Existing dependency |
 
-### High Level Project Diagram
+## Data Models and Schema Changes
+
+### New Data Models
+
+#### Test Scenario Model
+**Purpose:** Define automated IVR test scenarios with step-by-step execution plans  
+**Integration:** Independent from existing voice assistant data, stored in new SQLite database
+
+**Key Attributes:**
+- `scenario_id`: INTEGER PRIMARY KEY - Unique test scenario identifier
+- `name`: TEXT NOT NULL - Human-readable scenario name
+- `description`: TEXT - Detailed scenario description
+- `target_phone`: TEXT NOT NULL - IVR system phone number to test
+- `steps`: JSON - Array of test steps with prompts, expected intents, DTMF sequences
+- `timeout_seconds`: INTEGER DEFAULT 300 - Scenario execution timeout
+- `created_at`: TIMESTAMP - Creation timestamp
+- `updated_at`: TIMESTAMP - Last modification timestamp
+
+**Relationships:**
+- **With Existing:** None (completely independent from current voice assistant data)
+- **With New:** One-to-many with TestExecution, one-to-many with TestStep
+
+#### Test Execution Model
+**Purpose:** Track individual test scenario execution instances and results  
+**Integration:** Links test scenarios to actual execution outcomes
+
+**Key Attributes:**
+- `execution_id`: INTEGER PRIMARY KEY - Unique execution identifier  
+- `scenario_id`: INTEGER FOREIGN KEY - References test scenario
+- `status`: TEXT CHECK (status IN ('running', 'completed', 'failed', 'timeout')) - Execution status
+- `start_time`: TIMESTAMP - Execution start time
+- `end_time`: TIMESTAMP - Execution completion time
+- `call_id`: TEXT - OpenSIPS call identifier for correlation
+- `final_result`: TEXT CHECK (final_result IN ('pass', 'fail')) - Overall test result
+- `error_message`: TEXT - Error details if execution failed
+
+#### Intent Training Data Model
+**Purpose:** Store and manage Turkish BERT training data for IVR-specific intents
+**Integration:** Supports intent recognition service training and validation
+
+**Key Attributes:**
+- `training_id`: INTEGER PRIMARY KEY - Training data identifier
+- `text_sample`: TEXT NOT NULL - IVR response text sample
+- `intent_label`: TEXT NOT NULL - Assigned intent classification
+- `confidence_threshold`: REAL DEFAULT 0.85 - Minimum confidence for this intent
+- `source`: TEXT - Data source (manual, recorded, synthetic)
+- `validation_status`: TEXT CHECK (validation_status IN ('pending', 'validated', 'rejected')) - Training data quality
+- `created_at`: TIMESTAMP - Data creation timestamp
+
+### Schema Integration Strategy
+**Database Changes Required:**
+- **New Tables:** test_scenarios, test_executions, step_executions, intent_training_data
+- **Modified Tables:** None (completely isolated from existing system)
+- **New Indexes:** scenario_id, execution_id, call_id, intent_label for performance
+- **Migration Strategy:** New SQLite database file(s), no impact on existing data
+
+**Backward Compatibility:**
+- No changes to existing voice assistant data structures
+- Complete isolation of test-related data from conversation data
+- Existing services (ASR, TTS) continue operating without schema awareness
+- New services operate on new database schemas only
+
+## Component Architecture
+
+### New Components
+
+#### Test Controller Service
+**Responsibility:** Orchestrate end-to-end IVR test execution, coordinate between all services, and manage test state  
+**Integration Points:** OpenSIPS (call initiation), ASR Service (transcription), TTS Service (prompts), Intent Recognition Service (validation), Web Interface (API)
+
+**Key Interfaces:**
+- `StartTestExecution(scenario_id)` → `execution_id`
+- `GetExecutionStatus(execution_id)` → `TestExecutionStatus`
+- `StopTestExecution(execution_id)` → `StopResult`
+- `ListActiveExecutions()` → `List[ExecutionSummary]`
+
+**Dependencies:**
+- **Existing Components:** ASR Service (50051), TTS Service (50053), OpenSIPS SIP backend
+- **New Components:** Intent Recognition Service (50054)
+
+**Technology Stack:** Python FastAPI + gRPC client integrations, SQLite for test state, port 50055
+
+#### Intent Recognition Service  
+**Responsibility:** Classify IVR response transcripts using CPU-optimized Turkish BERT model  
+**Integration Points:** Test Controller (classification requests), Training Data Management (model updates)
+
+**Key Interfaces:**
+- `ClassifyIntent(text)` → `IntentResult{intent, confidence}`
+- `BatchClassify(texts[])` → `List[IntentResult]`
+- `UpdateModel(training_data)` → `ModelUpdateResult`
+- `GetSupportedIntents()` → `List[Intent]`
+
+**Dependencies:**
+- **Existing Components:** None (standalone text classification)
+- **New Components:** Test Controller Service
+
+**Technology Stack:** Python + Transformers + ONNX Runtime, Turkish BERT (dbmdz/bert-base-turkish-uncased), gRPC server on port 50054
+
+#### Web Test Management Interface
+**Responsibility:** Provide web UI for creating test scenarios, monitoring executions, and viewing results  
+**Integration Points:** Test Controller Service (all test operations), SQLite (direct read access for reporting)
+
+**Key Interfaces:**
+- REST API endpoints for test scenario CRUD operations
+- WebSocket connections for real-time test execution monitoring  
+- File upload for training data management
+- Dashboard views for test results and analytics
+
+**Dependencies:**
+- **Existing Components:** None (new web interface)
+- **New Components:** Test Controller Service (primary API)
+
+**Technology Stack:** FastAPI web framework, HTML/CSS/JavaScript frontend, WebSocket for real-time updates, port 8080 (reusing existing port)
+
+#### DTMF Generation Module
+**Responsibility:** Generate and send DTMF tones during test calls for IVR navigation  
+**Integration Points:** Test Controller (DTMF commands), OpenSIPS (RTP stream injection)
+
+**Key Interfaces:**
+- `SendDTMF(call_id, tone_sequence, timing)` → `DTMFResult`
+- `SendDTMFWithDelay(call_id, tone, delay_ms)` → `DTMFResult`
+- `ValidateDTMFCapability(call_id)` → `CapabilityResult`
+
+**Dependencies:**
+- **Existing Components:** OpenSIPS RTP transport, Core RTP handling
+- **New Components:** Test Controller Service
+
+**Technology Stack:** Python audio processing, RTP tone injection, integrated into Test Controller service
+
+### Component Interaction Diagram
 
 ```mermaid
 graph TB
-    %% External Systems
-    Caller[Banking Customer] --> SIP[SIP/RTP Network]
-    Bank[Banking Systems] --> API[Banking APIs]
+    WEB[Web Test Interface<br/>FastAPI :8080] --> TC[Test Controller<br/>gRPC :50055]
+    TC --> OSIPS[OpenSIPS<br/>SIP/RTP]
+    TC --> ASR[ASR Service<br/>Vosk :50051]
+    TC --> TTS[TTS Service<br/>Piper :50053]
+    TC --> INTENT[Intent Recognition<br/>Turkish BERT :50054]
+    TC --> DTMF[DTMF Module<br/>Integrated]
+    TC --> DB[(SQLite<br/>Test Data)]
     
-    %% SIP Layer
-    SIP --> OpenSIPS[OpenSIPS Proxy]
+    OSIPS --> IVR[Target IVR System<br/>External]
     
-    %% Core Application (Implemented)
-    OpenSIPS --> Core[Core Application<br/>Port 8080<br/>✅ IMPLEMENTED]
-    Core --> Pipecat[Native Pipecat<br/>Framework Integration<br/>✅ IMPLEMENTED]
-    
-    %% Implemented gRPC Microservices
-    Pipecat --> ASR[ASR Service<br/>Port 50051<br/>Native Vosk<br/>✅ IMPLEMENTED]
-    ASR --> LLM[LLM Service<br/>Port 50052<br/>LLaMA + llama-cpp<br/>✅ IMPLEMENTED]
-    LLM --> TTS[TTS Service<br/>Port 50053<br/>Piper TTS<br/>✅ IMPLEMENTED]
-    
-    %% Service Communication (gRPC)
-    Core -.->|gRPC Health<br/>Monitoring| ASR
-    Core -.->|gRPC Health<br/>Monitoring| LLM  
-    Core -.->|gRPC Health<br/>Monitoring| TTS
-    
-    %% Future Services (Pending Phase 3-4)
-    Core -.->|Future Integration| Session[Session Manager<br/>⏳ PENDING]
-    LLM -.->|Future Integration| Context[Context Store<br/>⏳ PENDING]
-    LLM -.->|Future Integration| Banking[Banking Service<br/>⏳ PENDING]
-    Banking -.->|Future Integration| API
-    
-    %% Docker Infrastructure (Implemented)
-    Docker[Docker Compose<br/>✅ IMPLEMENTED] --> Core
-    Docker --> ASR
-    Docker --> LLM
-    Docker --> TTS
-    
-    %% Service Base (Implemented)
-    Common[Common Service Base<br/>✅ IMPLEMENTED] --> ASR
-    Common --> LLM
-    Common --> TTS
-    
-    %% Storage (Future)
-    Context -.->|Future| Redis[(Redis Cache<br/>⏳ PENDING)]
-    Session -.->|Future| Postgres[(PostgreSQL<br/>⏳ PENDING)]
-    
-    %% gRPC connections (implemented)
-    linkStyle 4 stroke:#00ff00,stroke-width:4px
-    linkStyle 5 stroke:#00ff00,stroke-width:4px
-    linkStyle 6 stroke:#00ff00,stroke-width:4px
-    linkStyle 7 stroke:#00ff00,stroke-width:4px
+    %% Data flow for test execution
+    TC -.->|1. Send Prompt| TTS
+    TTS -.->|2. Audio| OSIPS
+    OSIPS -.->|3. Audio| IVR
+    IVR -.->|4. Response| OSIPS
+    OSIPS -.->|5. Audio| ASR
+    ASR -.->|6. Text| TC
+    TC -.->|7. Classify| INTENT
+    INTENT -.->|8. Intent| TC
+    TC -.->|9. DTMF| DTMF
+    DTMF -.->|10. Tones| OSIPS
 ```
 
-### Architectural and Design Patterns
+## API Design and Integration
 
-The following architectural patterns guide the system design:
+### API Integration Strategy
+**API Integration Strategy:** Extend existing gRPC microservices pattern with new Test Controller and Intent Recognition services, maintaining consistency with current ASR/TTS service APIs
 
-- **Event-Driven Architecture:** Audio events trigger processing pipelines with pub/sub messaging for component decoupling
-  _Rationale:_ Supports real-time streaming requirements and enables horizontal scaling of AI components
+**Authentication:** Leverage existing service-to-service communication patterns, no authentication between internal services (consistent with current architecture)
 
-- **Repository Pattern:** Abstract data access for session and context management 
-  _Rationale:_ Enables testing isolation and future database migration flexibility
+**Versioning:** Follow existing protobuf versioning approach, new services start at v1 with backward compatibility considerations
 
-- **Circuit Breaker Pattern:** Fault tolerance for external API calls (banking services, cloud AI providers)
-  _Rationale:_ Maintains system stability during external service outages, critical for banking reliability
+### New API Endpoints
 
-- **Strategy Pattern:** Pluggable AI providers (local vs cloud for ASR, LLM, TTS)
-  _Rationale:_ Allows runtime switching between cost-effective local processing and high-capability cloud services
+#### Test Controller gRPC Service
 
-- **Command Query Responsibility Segregation (CQRS):** Separate read/write models for session data
-  _Rationale:_ Optimizes for high-frequency session updates and fast context retrieval
+##### StartTestExecution
+- **Method:** POST
+- **Endpoint:** `TestController/StartTestExecution`
+- **Purpose:** Initiate automated IVR test scenario execution
+- **Integration:** Creates new test execution record, initiates OpenSIPS outbound call
 
-- **Gateway Pattern:** AI Voice Connector as unified entry point for telephony integration
-  _Rationale:_ Centralizes SIP/RTP handling and provides consistent interface to AI pipeline
-
-## Tech Stack
-
-This section defines the DEFINITIVE technology selections for the entire project. All implementation decisions must reference these choices.
-
-### Cloud Infrastructure
-
-- **Provider:** Hybrid (On-premise primary, Cloud optional)
-- **Key Services:** Docker orchestration, Redis clustering, PostgreSQL, GPU compute nodes
-- **Deployment Regions:** On-premise banking data centers, optional AWS/Azure regions for non-sensitive workloads
-
-### Technology Stack Table
-
-| Category | Technology | Version | Purpose | Rationale |
-|----------|------------|---------|---------|-----------|
-| **Language** | Python | 3.11.7 | Primary development language | Excellent AI/ML ecosystem, Pipecat compatibility, team expertise |
-| **Runtime** | Python | 3.11.7 | Application runtime | Stable LTS version, optimal AI library support |
-| **Framework** | FastAPI | 0.104.1 | gRPC service framework | High performance, async support, excellent gRPC integration |
-| **Orchestrator** | Pipecat | Latest | Audio pipeline orchestration | Purpose-built for real-time audio AI pipelines |
-| **Communication** | gRPC | 1.60.0 | Inter-service communication | Type safety, performance, streaming support |
-| **SIP Proxy** | OpenSIPS | 3.4.x | SIP signaling and routing | Industry standard, proven banking deployments |
-| **Audio Processing** | PyAudio | 0.2.13 | Audio I/O handling | Low-latency audio streaming |
-| **VAD** | Silero VAD | Latest | Voice activity detection | Optimal accuracy/speed tradeoff |
-| **ASR Local** | VOSK | 0.3.45 | CPU-based speech recognition | Cost-effective, offline capability |
-| **ASR Cloud** | Faster-Whisper | 0.10.0 | GPU-based speech recognition | Higher accuracy for complex queries |
-| **LLM Local** | LLaMA.cpp | Latest | On-premise language model | Privacy compliance, cost control |
-| **LLM Cloud** | OpenAI API | GPT-4o | Cloud language model | Superior reasoning capabilities |
-| **TTS Local** | Piper | 1.2.0 | CPU-based speech synthesis | Offline capability, consistent quality |
-| **TTS Cloud** | ElevenLabs API | Latest | Cloud speech synthesis | Premium voice quality |
-| **Database** | PostgreSQL | 15.5 | Session and configuration data | ACID compliance, banking standards |
-| **Cache** | Redis | 7.2.3 | Session context and caching | High-performance, conversation state |
-| **Monitoring** | Prometheus | 2.48.0 | Metrics collection | Industry standard, excellent alerting |
-| **Logging** | Structured logging | Python stdlib | Application logging | JSON format, correlation IDs |
-| **Containerization** | Docker | 24.0.7 | Application packaging | Consistent deployment across environments |
-| **Orchestration** | Docker Compose | 2.23.0 | Local development | Simple multi-service orchestration |
-| **Production Orchestration** | Kubernetes | 1.28.x | Production deployment | Scalability, high availability |
-| **Testing** | pytest | 7.4.3 | Unit and integration testing | Comprehensive testing framework |
-| **API Documentation** | gRPC reflection | Built-in | Service discovery | Dynamic API documentation |
-| **Security** | TLS 1.3 | Latest | Transport encryption | Banking security standards |
-
-## Data Models
-
-The core data models represent the essential entities for session management, conversation context, and banking integration.
-
-### CallSession
-
-**Purpose:** Manages the lifecycle and metadata of individual voice calls
-
-**Key Attributes:**
-- session_id: UUID - Unique identifier for correlation across services
-- caller_phone: string - Originating phone number
-- call_start_time: timestamp - Session initiation time
-- call_end_time: timestamp - Session termination time (nullable)
-- sip_call_id: string - OpenSIPS call identifier
-- status: enum - ACTIVE, COMPLETED, FAILED, INTERRUPTED
-- ai_provider_config: JSON - Selected AI providers for this session
-
-**Relationships:**
-- One-to-many with ConversationContext
-- One-to-many with BankingTransaction
-
-### ConversationContext
-
-**Purpose:** Stores conversation memory and AI processing state for context-aware responses
-
-**Key Attributes:**
-- context_id: UUID - Unique context identifier
-- session_id: UUID - Foreign key to CallSession
-- conversation_history: JSON - Array of message exchanges
-- current_intent: string - Detected user intent (e.g., "card_delivery_inquiry")
-- customer_data: JSON - Cached customer information for session
-- last_updated: timestamp - Context modification time
-- expires_at: timestamp - TTL for context cleanup
-
-**Relationships:**
-- Many-to-one with CallSession
-- References customer data from banking systems
-
-### BankingTransaction
-
-**Purpose:** Tracks banking-specific operations and customer authentication within voice sessions
-
-**Key Attributes:**
-- transaction_id: UUID - Unique transaction identifier
-- session_id: UUID - Foreign key to CallSession
-- customer_id: string - Banking system customer identifier
-- transaction_type: enum - CARD_INQUIRY, BALANCE_CHECK, etc.
-- authentication_status: enum - PENDING, VERIFIED, FAILED
-- query_parameters: JSON - Structured query data
-- response_data: JSON - Banking system response
-- created_at: timestamp - Transaction initiation time
-
-**Relationships:**
-- Many-to-one with CallSession
-- References external banking system entities
-
-## Components
-
-The system architecture is composed of implemented microservices and planned components, each with clearly defined responsibilities and interfaces.
-
-## ✅ Implemented Components
-
-### Core Application (Port 8080)
-
-**Responsibility:** ✅ **IMPLEMENTED** - Central orchestrator that manages the overall system coordination, integrates native pipecat framework for audio processing, and coordinates with gRPC microservices.
-
-**Key Interfaces:**
-- HTTP management interface for health monitoring and system status
-- Native pipecat framework integration for audio pipeline orchestration
-- gRPC client connections to all AI microservices
-- OpenSIPS integration for SIP signaling (Phase 3 - pending refactoring)
-
-**Dependencies:** 
-- ASR, LLM, TTS gRPC services
-- Native pipecat framework components
-- Service discovery and health monitoring
-
-**Technology Stack:** Python 3.11, FastAPI, Native Pipecat Framework, gRPC clients, asyncio
-
-### ASR Service (Port 50051)
-
-**Responsibility:** ✅ **IMPLEMENTED** - Speech-to-text conversion using native Vosk integration with enhanced service base, streaming recognition, and comprehensive health monitoring.
-
-**Key Interfaces:**
-- gRPC service with streaming audio input (enhanced_asr_server.py)
-- Real-time streaming recognition output
-- Health check and service statistics endpoints
-- Native Vosk integration with session management
-
-**Dependencies:**
-- Native Vosk library and models
-- Common service base for standardized management
-- Audio format conversion utilities
-
-**Technology Stack:** Python 3.11, Native Vosk, Common Service Base, gRPC server, streaming audio
-
-### LLM Service (Port 50052)
-
-**Responsibility:** ✅ **IMPLEMENTED** - Natural language processing using LLaMA with llama-cpp-python, conversation context management, and streaming text generation.
-
-**Key Interfaces:**
-- gRPC service for text processing (enhanced_llm_server.py)
-- Streaming token output for real-time responses
-- Conversation context and memory management
-- Health monitoring and service statistics
-
-**Dependencies:**
-- llama-cpp-python for local LLM inference
-- Common service base for standardized management
-- Threading support for concurrent processing
-
-**Technology Stack:** Python 3.11, llama-cpp-python, Common Service Base, gRPC server
-
-### TTS Service (Port 50053)
-
-**Responsibility:** ✅ **IMPLEMENTED** - Text-to-speech synthesis using native Piper integration with streaming audio output and voice management capabilities.
-
-**Key Interfaces:**
-- gRPC service for text-to-audio conversion (enhanced_tts_server.py)
-- Streaming audio synthesis output
-- Voice configuration and management
-- Health monitoring and service statistics
-
-**Dependencies:**
-- Native Piper TTS library and models
-- Common service base for standardized management
-- Audio encoding and streaming utilities
-
-**Technology Stack:** Python 3.11, Native Piper TTS, Common Service Base, gRPC server
-
-### Common Service Base
-
-**Responsibility:** ✅ **IMPLEMENTED** - Standardized service management framework providing health monitoring, logging, configuration management, and graceful shutdown for all microservices.
-
-**Key Features:**
-- Standardized health check endpoints
-- Structured logging with service identification
-- Configuration management via environment variables
-- Graceful shutdown handling with signal management
-- Service statistics and monitoring
-
-**Technology Stack:** Python 3.11, asyncio, structured logging, configuration management
-
-### Docker Infrastructure
-
-**Responsibility:** ✅ **IMPLEMENTED** - Complete containerization with development and production deployment modes, service orchestration, and health monitoring.
-
-**Key Features:**
-- Production docker-compose.yml with service dependencies
-- Development docker-compose.dev.yml with live code mounting
-- Individual service Dockerfiles with health checks
-- Service networking and model volume management
-
-**Technology Stack:** Docker, Docker Compose, health probes, volume management
-
-## ⏳ Planned Components (Phase 3-4)
-
-### Session Manager
-
-**Responsibility:** ⏳ **PENDING** - Manages call session lifecycle, state persistence, and coordination between all voice processing components.
-
-**Planned Interfaces:**
-- gRPC service for session CRUD operations
-- Real-time session state updates
-- Call event notification and logging
-
-**Technology Stack:** Python 3.11, FastAPI with gRPC, PostgreSQL, Redis, SQLAlchemy
-
-### Context Store
-
-**Responsibility:** ⏳ **PENDING** - High-performance storage and retrieval of conversation context and memory management for multi-turn conversations.
-
-**Planned Interfaces:**
-- gRPC service for context operations
-- Real-time context updates and retrieval
-- TTL-based automatic cleanup
-
-**Technology Stack:** Python 3.11, Redis, gRPC, JSON serialization
-
-### Banking Service
-
-**Responsibility:** ⏳ **PENDING** - Integration layer for banking system APIs, handling customer authentication and card delivery inquiries.
-
-**Planned Interfaces:**
-- gRPC service for banking operations
-- Customer authentication and verification
-- Card delivery status queries
-
-**Technology Stack:** Python 3.11, gRPC, HTTP clients for banking APIs
-
-### Component Diagrams
-
-```mermaid
-graph TB
-    subgraph "Voice Processing Layer"
-        AVC[AI Voice Connector]
-        Pipecat[Pipecat Orchestrator]
-        OpenSIPS[OpenSIPS Proxy]
-    end
-    
-    subgraph "AI Services Layer"
-        VAD[VAD Service]
-        ASR[ASR Service]
-        LLM[LLM Service] 
-        TTS[TTS Service]
-    end
-    
-    subgraph "Data Layer"
-        Session[Session Manager]
-        Context[Context Store]
-        Banking[Banking Service]
-    end
-    
-    subgraph "Storage Layer"
-        Postgres[(PostgreSQL)]
-        Redis[(Redis)]
-        BankingAPI[Banking APIs]
-    end
-    
-    %% Voice Layer Connections
-    OpenSIPS --> AVC
-    AVC --> Pipecat
-    AVC --> Session
-    
-    %% AI Pipeline Connections
-    Pipecat --> VAD
-    VAD --> ASR
-    ASR --> LLM
-    LLM --> TTS
-    TTS --> Pipecat
-    
-    %% Cross-layer Dependencies
-    LLM --> Context
-    LLM --> Banking
-    Session --> Context
-    
-    %% Storage Connections
-    Session --> Postgres
-    Context --> Redis
-    Banking --> BankingAPI
-    
-    %% gRPC connections (thick red lines)
-    linkStyle 2 stroke:#ff6b6b,stroke-width:3px
-    linkStyle 3 stroke:#ff6b6b,stroke-width:3px
-    linkStyle 4 stroke:#ff6b6b,stroke-width:3px
-    linkStyle 5 stroke:#ff6b6b,stroke-width:3px
-    linkStyle 6 stroke:#ff6b6b,stroke-width:3px
-    linkStyle 7 stroke:#ff6b6b,stroke-width:3px
-    linkStyle 9 stroke:#ff6b6b,stroke-width:3px
-    linkStyle 10 stroke:#ff6b6b,stroke-width:3px
-    linkStyle 11 stroke:#ff6b6b,stroke-width:3px
+**Request:**
+```protobuf
+message StartTestExecutionRequest {
+    int32 scenario_id = 1;
+    map<string, string> execution_params = 2;
+    int32 timeout_override_seconds = 3;
+}
 ```
 
-## Core Workflows
-
-The following sequence diagrams illustrate critical system workflows for voice call processing and banking integration.
-
-### Card Delivery Inquiry Workflow
-
-```mermaid
-sequenceDiagram
-    participant C as Banking Customer
-    participant O as OpenSIPS
-    participant AVC as AI Voice Connector
-    participant SM as Session Manager
-    participant P as Pipecat Orchestrator
-    participant VAD as VAD Service
-    participant ASR as ASR Service
-    participant LLM as LLM Service
-    participant CS as Context Store
-    participant BS as Banking Service
-    participant TTS as TTS Service
-    participant BA as Banking APIs
-    
-    C->>O: SIP INVITE (voice call)
-    O->>AVC: Route call to AI Voice Connector
-    AVC->>SM: Create session (phone, SIP call ID)
-    SM->>CS: Initialize conversation context
-    AVC->>P: Start audio pipeline
-    
-    Note over C,TTS: Welcome message and audio processing
-    P->>TTS: Generate welcome message
-    TTS-->>P: Audio stream (PCM)
-    P-->>AVC: Audio response
-    AVC-->>O: RTP audio stream
-    O-->>C: Welcome audio
-    
-    Note over C,BS: User query processing
-    C->>O: RTP audio (user speech)
-    O->>AVC: Forward audio stream
-    AVC->>P: Process incoming audio
-    P->>VAD: Detect speech segments
-    VAD-->>P: Speech boundaries
-    P->>ASR: Convert speech to text
-    ASR-->>P: "Where is my credit card?"
-    
-    P->>LLM: Process user query + context
-    LLM->>CS: Retrieve conversation context
-    LLM->>BS: Classify intent: card_delivery_inquiry
-    BS->>BA: Authenticate customer
-    BA-->>BS: Customer verified
-    BS->>BA: Query card delivery status
-    BA-->>BS: Card shipped, tracking #12345
-    BS-->>LLM: Delivery information
-    LLM->>CS: Update conversation context
-    LLM-->>P: Response text
-    
-    P->>TTS: Generate response audio
-    TTS-->>P: Audio stream
-    P-->>AVC: Response audio
-    AVC-->>O: RTP audio
-    O-->>C: "Your card was shipped yesterday..."
-    
-    Note over C,SM: Call completion
-    C->>O: SIP BYE (end call)
-    O->>AVC: Call termination
-    AVC->>SM: End session
-    SM->>CS: Clean up context (with TTL)
+**Response:**
+```protobuf
+message StartTestExecutionResponse {
+    int32 execution_id = 1;
+    string call_id = 2;
+    TestExecutionStatus status = 3;
+    int64 start_timestamp = 4;
+}
 ```
 
-### Barge-in Interruption Workflow
+#### Intent Recognition gRPC Service
 
-```mermaid
-sequenceDiagram
-    participant C as Banking Customer
-    participant AVC as AI Voice Connector
-    participant P as Pipecat Orchestrator
-    participant VAD as VAD Service
-    participant ASR as ASR Service
-    participant TTS as TTS Service
-    
-    Note over C,TTS: System is speaking
-    TTS->>P: Streaming TTS audio
-    P->>AVC: Outbound audio stream
-    
-    parallel
-        P->>VAD: Monitor for speech during TTS
-    and
-        C->>AVC: User interruption (RTP audio)
-        AVC->>P: Incoming audio stream
-        P->>VAD: Process interruption audio
-        VAD->>P: Speech detected (confidence > threshold)
-    end
-    
-    P->>TTS: STOP current synthesis
-    TTS-->>P: Synthesis halted
-    P->>ASR: Process interruption speech
-    ASR-->>P: "Wait, I have a question"
-    
-    Note over P: Context preserved, ready for new query
-    P->>VAD: Reset for new speech detection
+##### ClassifyIntent
+- **Method:** POST
+- **Endpoint:** `IntentRecognition/ClassifyIntent`
+- **Purpose:** Classify single IVR response text into intent categories
+- **Integration:** Receives ASR transcription, returns intent classification for test validation
+
+**Request:**
+```protobuf
+message ClassifyIntentRequest {
+    string text = 1;
+    float confidence_threshold = 2;
+    repeated string candidate_intents = 3;
+}
 ```
 
-## gRPC API Specifications
-
-The system uses gRPC for all inter-service communication, providing type safety and high performance.
-
-```yaml
-# Core gRPC service definitions for the voice assistant system
-
-# AI Voice Connector Service
-service AIVoiceConnectorService:
-  rpc CreateSession(CreateSessionRequest) returns (SessionResponse)
-  rpc ProcessAudioStream(stream AudioChunk) returns (stream AudioChunk)
-  rpc EndSession(EndSessionRequest) returns (SessionResponse)
-  rpc GetSessionStatus(SessionStatusRequest) returns (SessionStatusResponse)
-
-# Session Manager Service  
-service SessionManagerService:
-  rpc CreateSession(CallSession) returns (SessionResponse)
-  rpc UpdateSession(UpdateSessionRequest) returns (SessionResponse)
-  rpc GetSession(GetSessionRequest) returns (CallSession)
-  rpc EndSession(EndSessionRequest) returns (SessionResponse)
-
-# AI Pipeline Services
-service VADService:
-  rpc ProcessAudio(stream AudioChunk) returns (stream VADResult)
-  rpc Configure(VADConfiguration) returns (ConfigurationResponse)
-
-service ASRService:
-  rpc RecognizeSpeech(stream AudioChunk) returns (stream RecognitionResult)
-  rpc SelectProvider(ProviderSelectionRequest) returns (ConfigurationResponse)
-
-service LLMService:
-  rpc ProcessText(TextProcessingRequest) returns (stream TextResponse)
-  rpc UpdateContext(ContextUpdateRequest) returns (ContextResponse)
-
-service TTSService:
-  rpc SynthesizeText(TextSynthesisRequest) returns (stream AudioChunk)
-  rpc SelectVoice(VoiceSelectionRequest) returns (ConfigurationResponse)
-
-# Context and Banking Services
-service ContextStoreService:
-  rpc GetContext(ContextRequest) returns (ConversationContext)
-  rpc UpdateContext(ContextUpdateRequest) returns (ContextResponse)
-  rpc CleanupContext(CleanupRequest) returns (CleanupResponse)
-
-service BankingService:
-  rpc AuthenticateCustomer(AuthenticationRequest) returns (AuthenticationResponse)
-  rpc QueryCardDelivery(CardDeliveryRequest) returns (CardDeliveryResponse)
-  rpc ProcessTransaction(TransactionRequest) returns (TransactionResponse)
-
-# Common message types
-message AudioChunk:
-  bytes audio_data = 1
-  int32 sample_rate = 2
-  string format = 3
-  int64 timestamp = 4
-
-message SessionResponse:
-  string session_id = 1
-  SessionStatus status = 2
-  string message = 3
-
-message TextProcessingRequest:
-  string text = 1
-  string session_id = 2
-  ConversationContext context = 3
-  string intent = 4
+**Response:**
+```protobuf
+message ClassifyIntentResponse {
+    string intent = 1;
+    float confidence = 2;
+    repeated IntentScore alternative_intents = 3;
+    bool meets_threshold = 4;
+}
 ```
 
-## Database Schema
+## Source Tree Integration
 
-The system uses PostgreSQL for persistent data and Redis for high-performance caching.
-
-### PostgreSQL Schema
-
-```sql
--- Call sessions table
-CREATE TABLE call_sessions (
-    session_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    caller_phone VARCHAR(20) NOT NULL,
-    call_start_time TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-    call_end_time TIMESTAMP WITH TIME ZONE,
-    sip_call_id VARCHAR(255) NOT NULL,
-    status VARCHAR(20) NOT NULL CHECK (status IN ('ACTIVE', 'COMPLETED', 'FAILED', 'INTERRUPTED')),
-    ai_provider_config JSONB,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-);
-
--- Conversation context history
-CREATE TABLE conversation_contexts (
-    context_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    session_id UUID NOT NULL REFERENCES call_sessions(session_id) ON DELETE CASCADE,
-    conversation_history JSONB NOT NULL DEFAULT '[]',
-    current_intent VARCHAR(100),
-    customer_data JSONB,
-    last_updated TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-    expires_at TIMESTAMP WITH TIME ZONE NOT NULL
-);
-
--- Banking transactions
-CREATE TABLE banking_transactions (
-    transaction_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    session_id UUID NOT NULL REFERENCES call_sessions(session_id) ON DELETE CASCADE,
-    customer_id VARCHAR(100),
-    transaction_type VARCHAR(50) NOT NULL,
-    authentication_status VARCHAR(20) NOT NULL CHECK (authentication_status IN ('PENDING', 'VERIFIED', 'FAILED')),
-    query_parameters JSONB,
-    response_data JSONB,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-);
-
--- Indexes for performance
-CREATE INDEX idx_call_sessions_status ON call_sessions(status);
-CREATE INDEX idx_call_sessions_start_time ON call_sessions(call_start_time);
-CREATE INDEX idx_conversation_contexts_session_id ON conversation_contexts(session_id);
-CREATE INDEX idx_conversation_contexts_expires_at ON conversation_contexts(expires_at);
-CREATE INDEX idx_banking_transactions_session_id ON banking_transactions(session_id);
-CREATE INDEX idx_banking_transactions_customer_id ON banking_transactions(customer_id);
-
--- Auto-update timestamps
-CREATE OR REPLACE FUNCTION update_updated_at_column()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = NOW();
-    RETURN NEW;
-END;
-$$ language 'plpgsql';
-
-CREATE TRIGGER update_call_sessions_updated_at 
-    BEFORE UPDATE ON call_sessions 
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
-```
-
-### Redis Cache Structure
-
-```yaml
-# Session state caching (TTL: 1 hour)
-session:{session_id}:
-  caller_phone: string
-  status: string
-  ai_providers: object
-  call_metadata: object
-
-# Conversation context (TTL: 30 minutes)
-context:{session_id}:
-  history: array
-  current_intent: string
-  customer_data: object
-  last_interaction: timestamp
-
-# Active call routing (TTL: 2 hours)
-call_routing:{sip_call_id}:
-  session_id: string
-  avc_instance: string
-  pipeline_config: object
-```
-
-## Source Tree
+### New File Organization
 
 ```plaintext
 opensips-ai-voice-connector/
-├── core/                               # ✅ Core Application (IMPLEMENTED)
-│   ├── main.py                         # Main application entry point
-│   ├── bot/                            # Pipeline management
-│   │   ├── pipeline_manager.py         # Conversation pipeline orchestration
-│   │   └── session.py                  # Session management
-│   ├── grpc_clients/                   # gRPC client implementations
-│   │   ├── asr_client.py               # ASR service client
-│   │   ├── llm_client.py               # LLM service client
-│   │   ├── tts_client.py               # TTS service client
-│   │   └── service_registry.py         # Service discovery and health monitoring
-│   ├── opensips/                       # OpenSIPS integration (Phase 3 pending)
-│   │   ├── integration.py              # SIP/RTP integration
-│   │   ├── rtp_transport.py            # RTP audio transport
-│   │   └── event_listener.py           # SIP event handling
-│   ├── pipecat/                        # ✅ Native Pipecat Integration (IMPLEMENTED)
-│   │   ├── frames/                     # Audio/text frame definitions
-│   │   │   └── frames.py               # Essential frame types
-│   │   ├── audio/                      # Audio processing utilities
-│   │   │   └── utils.py                # Audio format conversion
-│   │   └── pipeline/                   # Pipeline orchestration
-│   │       └── pipeline.py             # Pipeline management
-│   ├── config/                         # Configuration management
-│   │   └── settings.py                 # Application settings
-│   └── utils/                          # Utility modules
-│       ├── audio.py                    # Audio processing utilities
-│       ├── logging.py                  # Structured logging
-│       └── networking.py               # Network utilities
-├── services/                           # ✅ Microservices (IMPLEMENTED)
-│   ├── asr-service/                    # ✅ ASR Service (Port 50051)
+├── core/                           # Existing core - preserved
+│   ├── grpc_clients/               # Existing gRPC clients
+│   │   ├── asr_client.py          # Existing - preserved
+│   │   ├── tts_client.py          # Existing - preserved
+│   │   ├── test_controller_client.py  # NEW - Test Controller client
+│   │   └── intent_client.py       # NEW - Intent Recognition client
+│   ├── opensips/                   # Existing OpenSIPS integration
+│   │   ├── integration.py         # Existing - modified for outbound calls
+│   │   ├── outbound_call_manager.py # NEW - Outbound call management
+│   │   └── dtmf_generator.py      # NEW - DTMF tone generation
+│   ├── ivr_testing/               # NEW - IVR testing core
+│   │   ├── __init__.py
+│   │   ├── test_executor.py       # Test execution orchestration
+│   │   ├── scenario_manager.py    # Test scenario management
+│   │   └── result_processor.py    # Test result processing
+│   └── web/                       # NEW - Web interface
+│       ├── __init__.py
+│       ├── app.py                 # FastAPI web application
+│       ├── routers/               # API route handlers
+│       │   ├── scenarios.py      # Test scenario endpoints
+│       │   ├── executions.py     # Test execution endpoints
+│       │   └── monitoring.py     # Real-time monitoring
+│       └── static/                # Static web assets
+├── services/                      # Existing services directory
+│   ├── asr-service/              # Existing ASR service - preserved
+│   ├── tts-service/              # Existing TTS service - preserved
+│   ├── intent-service/           # NEW - Intent Recognition service
+│   │   ├── Dockerfile
+│   │   ├── requirements.txt
 │   │   ├── src/
-│   │   │   ├── enhanced_asr_server.py  # Main gRPC service with common base
-│   │   │   ├── asr_grpc_server.py      # Legacy server (will be removed)
-│   │   │   └── main.py                 # Service entry point
-│   │   ├── proto/                      # gRPC protocol definitions
-│   │   │   └── asr_service.proto       # ASR service protobuf
-│   │   ├── Dockerfile                  # Container configuration
-│   │   └── requirements.txt            # Python dependencies
-│   ├── llm-service/                    # ✅ LLM Service (Port 50052)
-│   │   ├── src/
-│   │   │   ├── enhanced_llm_server.py  # Main gRPC service with llama-cpp
-│   │   │   ├── llm_grpc_server.py      # Legacy server (will be removed)
-│   │   │   └── main.py                 # Service entry point
-│   │   ├── proto/                      # gRPC protocol definitions
-│   │   │   ├── llm_service.proto       # LLM service protobuf
-│   │   │   └── llm_service_simple.proto
-│   │   ├── Dockerfile                  # Container configuration
-│   │   └── requirements.txt            # Python dependencies
-│   ├── tts-service/                    # ✅ TTS Service (Port 50053)
-│   │   ├── src/
-│   │   │   ├── enhanced_tts_server.py  # Main gRPC service with Piper
-│   │   │   ├── tts_grpc_server.py      # Legacy server (will be removed)
-│   │   │   └── main.py                 # Service entry point
-│   │   ├── proto/                      # gRPC protocol definitions
-│   │   │   └── tts_service.proto       # TTS service protobuf
-│   │   ├── Dockerfile                  # Container configuration
-│   │   └── requirements.txt            # Python dependencies
-│   ├── common/                         # ✅ Common Service Base (IMPLEMENTED)
-│   │   ├── __init__.py                 # Common exports
-│   │   └── service_base.py             # Standardized service management
-│   ├── session-manager/                # ⏳ Session Manager (PENDING Phase 3)
-│   │   ├── proto/
-│   │   │   └── session_manager.proto   # Session management protobuf
-│   │   └── src/                        # Implementation pending
-│   ├── context-store/                  # ⏳ Context Store (PENDING Phase 4)
-│   │   └── src/                        # Implementation pending
-│   ├── banking-service/                # ⏳ Banking Service (PENDING Phase 4)
-│   │   └── src/                        # Implementation pending
-│   ├── ai-voice-connector/             # Legacy structure (to be removed)
-│   ├── pipecat-orchestrator/           # Legacy structure (to be removed)
-│   └── vad-service/                    # Legacy structure (to be removed)
-├── shared/                             # Shared libraries and utilities
-│   ├── proto/                          # Common gRPC definitions
-│   │   └── common.proto                # Shared protobuf messages
-│   ├── proto_generated/                # Generated protobuf code
-│   ├── models/                         # Shared data models
-│   ├── utils/                          # Common utilities
-│   └── testing/                        # Test utilities
-├── config/                             # Configuration files
-│   └── app.ini                         # Application configuration
-├── pipecat/                            # ✅ Native Pipecat Framework (FULL)
-│   └── src/pipecat/                    # Complete pipecat source code
-│       ├── frames/                     # Frame system
-│       ├── audio/                      # Audio processing (VAD, filters, etc.)
-│       ├── observers/                  # Pipeline monitoring
-│       ├── serializers/                # Audio format conversion
-│       ├── services/                   # AI service patterns
-│       └── pipeline/                   # Pipeline orchestration
-├── docs/                               # ✅ Documentation (UPDATED)
-│   ├── architecture.md                 # This document (updated)
-│   ├── prd.md                         # Product requirements (updated)
-│   ├── README.Docker.md               # Docker deployment guide
-│   └── architecture/                  # Detailed architecture docs
-├── docker-compose.yml                 # ✅ Production orchestration (IMPLEMENTED)
-├── docker-compose.dev.yml             # ✅ Development orchestration (IMPLEMENTED)
-├── Dockerfile.core                     # ✅ Core application container (IMPLEMENTED)
-├── .dockerignore                       # ✅ Docker build optimization (IMPLEMENTED)
-├── requirements.txt                    # ✅ Core dependencies (UPDATED)
-├── scripts/                            # Development and deployment scripts
-│   ├── proto-gen.sh                    # gRPC code generation
-│   └── test-microservices.py          # Service testing utilities
-├── src/                                # 🔄 Legacy code (Phase 4 cleanup)
-│   ├── opensips_bot.py                 # Legacy implementation
-│   ├── pipeline/                       # Legacy pipeline components
-│   ├── services/                       # Legacy WebSocket services
-│   └── transports/                     # Legacy transport implementations
-├── tests/                              # Testing infrastructure
-│   ├── integration/                    # Service integration tests
-│   ├── performance/                    # Load and latency tests
-│   └── e2e/                            # End-to-end scenarios
-└── infrastructure/                     # Infrastructure and deployment
-    ├── docker/                         # Docker configurations
-    ├── opensips/                       # OpenSIPS configuration
-    ├── kubernetes/                     # K8s manifests (future)
-    └── monitoring/                     # Observability (future)
+│   │   │   ├── main.py
+│   │   │   ├── intent_grpc_server.py
+│   │   │   ├── turkish_bert_engine.py
+│   │   │   └── intent_service_pb2.py
+│   │   └── tests/
+│   └── test-controller-service/  # NEW - Test Controller service
+│       ├── Dockerfile
+│       ├── requirements.txt
+│       ├── src/
+│       │   ├── main.py
+│       │   ├── test_controller_grpc_server.py
+│       │   ├── scenario_executor.py
+│       │   └── test_controller_pb2.py
+│       └── tests/
+├── shared/                       # Existing shared protobuf
+│   └── proto/                    # Protobuf definitions
+│       ├── intent_service.proto  # NEW - Intent service definitions
+│       └── test_controller.proto # NEW - Test Controller definitions
+├── config/                       # Existing configuration
+│   ├── app.ini                   # Existing - extended for IVR testing
+│   └── ivr_testing.ini          # NEW - IVR-specific configuration
+├── data/                         # NEW - Test data and databases
+│   ├── test_scenarios.db         # SQLite database for test scenarios
+│   ├── training_data/            # Intent recognition training data
+│   └── test_results/             # Test execution results
+└── docker-compose.yml           # Existing - modified for new services
 ```
 
-## Infrastructure and Deployment
+### Integration Guidelines
+**File Naming:** Maintain existing Python module naming conventions (snake_case), follow established pattern for service names with hyphen separation
 
-### Infrastructure as Code
+**Folder Organization:** Preserve existing service structure, add new services following established pattern, extend core modules without disrupting existing functionality
 
-- **Tool:** Docker Compose 2.23.0 for development, Kubernetes 1.28.x for production
-- **Location:** `infrastructure/docker/` and `infrastructure/kubernetes/`
-- **Approach:** GitOps with declarative configurations for reproducible deployments
+**Import/Export Patterns:** Maintain existing relative import patterns within core, extend service registry for new gRPC services, preserve existing protobuf generation workflow
 
-### Deployment Strategy
+## Infrastructure and Deployment Integration
 
-- **Strategy:** Blue-green deployment for zero-downtime updates
-- **CI/CD Platform:** GitHub Actions with automated testing and deployment
-- **Pipeline Configuration:** `.github/workflows/deploy.yml`
+### Existing Infrastructure
+**Current Deployment:** Docker Compose with health checks, service dependencies, and network isolation on bridge network 172.20.0.0/16
 
-### Environments
+**Infrastructure Tools:** Docker containerization, health probe monitoring, volume mounting for models and logs, environment-based configuration
 
-- **Development:** Local Docker Compose with hot-reload and debugging
-- **Staging:** Kubernetes cluster with production-like configuration for testing
-- **Production:** High-availability Kubernetes with auto-scaling and monitoring
+**Environments:** Single docker-compose.yml with dev/prod variants (docker-compose.dev.yml, docker-compose.prod.yml)
 
-### Environment Promotion Flow
+### Enhancement Deployment Strategy
+**Deployment Approach:** Extend existing Docker Compose architecture with new services, maintaining health check patterns and service dependency management
 
-```text
-Development (Docker Compose) → Staging (K8s) → Production (K8s)
-- Automated testing at each stage
-- Manual approval required for production
-- Automated rollback on health check failures
+**Infrastructure Changes:** 
+- Add Intent Recognition service container (CPU-optimized)
+- Add Test Controller service container
+- Remove LLM service container and GPU dependencies
+- Extend existing web interface or add new web management container
+- Add SQLite volume mounts for test data persistence
+
+**Pipeline Integration:** Leverage existing build scripts (build-dev.sh, build-prod.sh), extend existing validation scripts (validate-dev-setup.sh), integrate with existing test framework (pytest-based)
+
+### Updated Docker Compose Configuration
+
+```yaml
+services:
+  # Existing services - preserved
+  asr-service:          # PRESERVED - no changes
+  tts-service:          # PRESERVED - no changes
+  # llm-service:        # REMOVED - no longer needed
+
+  # New IVR testing services
+  intent-service:
+    build:
+      context: ./services/intent-service
+      dockerfile: Dockerfile
+    container_name: opensips-intent-service
+    ports:
+      - "50054:50054"
+    environment:
+      - INTENT_SERVICE_LISTEN_ADDR=[::]:50054
+      - BERT_MODEL_NAME=dbmdz/bert-base-turkish-uncased
+      - ONNX_OPTIMIZATION=true
+      - LOG_LEVEL=INFO
+      - INTENT_MAX_WORKERS=4
+    volumes:
+      - ./data/training_data:/app/training_data:rw
+    healthcheck:
+      test: ["CMD", "grpc-health-probe", "-addr=localhost:50054", "-service=IntentService"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - opensips-ai-network
+
+  test-controller:
+    build:
+      context: ./services/test-controller-service
+      dockerfile: Dockerfile
+    container_name: opensips-test-controller
+    ports:
+      - "50055:50055"
+    environment:
+      - TEST_CONTROLLER_LISTEN_ADDR=[::]:50055
+      - ASR_SERVICE_URL=asr-service:50051
+      - TTS_SERVICE_URL=tts-service:50053
+      - INTENT_SERVICE_URL=intent-service:50054
+      - OPENSIPS_MI_URL=opensips-ai-core:8080
+      - DATABASE_PATH=/app/data/test_scenarios.db
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./data:/app/data:rw
+    depends_on:
+      asr-service:
+        condition: service_healthy
+      tts-service:
+        condition: service_healthy
+      intent-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "grpc-health-probe", "-addr=localhost:50055", "-service=TestController"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - opensips-ai-network
+
+  # Modified core service
+  opensips-ai-core:
+    build:
+      context: .
+      dockerfile: Dockerfile.core
+    container_name: opensips-ai-core
+    ports:
+      - "8080:8080"  # HTTP management + web interface
+      - "5060:5060/udp"  # SIP (modified for outbound)
+      - "10000-10100:10000-10100/udp"  # RTP range
+    environment:
+      - CORE_LOG_LEVEL=INFO
+      - ASR_SERVICE_URL=asr-service:50051
+      - TTS_SERVICE_URL=tts-service:50053
+      - INTENT_SERVICE_URL=intent-service:50054
+      - TEST_CONTROLLER_URL=test-controller:50055
+      - OPENSIPS_MODE=OUTBOUND_IVR_TESTING  # NEW - IVR testing mode
+      - OPENSIPS_HOST=0.0.0.0
+      - OPENSIPS_PORT=5060
+      - RTP_PORT_RANGE_START=10000
+      - RTP_PORT_RANGE_END=10100
+    depends_on:
+      asr-service:
+        condition: service_healthy
+      tts-service:
+        condition: service_healthy
+      intent-service:
+        condition: service_healthy
+      test-controller:
+        condition: service_healthy
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/app/logs:rw
+      - ./data:/app/data:rw  # NEW - test data access
 ```
 
 ### Rollback Strategy
+**Rollback Method:** Docker Compose service rollback, maintain existing service versions in parallel during transition, database backup and restore procedures for test data
 
-- **Primary Method:** Kubernetes rolling update rollback with previous image versions
-- **Trigger Conditions:** Health check failures, latency threshold breaches, error rate spikes
-- **Recovery Time Objective:** < 5 minutes for automatic rollback
+**Risk Mitigation:** 
+- Preserve existing voice assistant functionality during transformation
+- Independent service deployment allows selective rollback
+- Test data isolation prevents impact on existing functionality
+- Health check validation ensures service stability
 
-## Error Handling Strategy
+**Monitoring:** 
+- Extend existing health check monitoring to new services
+- Add test execution monitoring and alerting
+- Maintain existing log aggregation patterns
+- Add test-specific metrics collection
 
-### General Approach
+## Coding Standards and Conventions
 
-- **Error Model:** Structured exceptions with correlation IDs for tracing
-- **Exception Hierarchy:** Custom banking exceptions, AI processing errors, network failures
-- **Error Propagation:** gRPC status codes with detailed error messages
+### Existing Standards Compliance
+**Code Style:** Follow existing Python PEP 8 style guide, maintain existing import organization patterns, preserve existing error handling patterns
 
-### Logging Standards
+**Linting Rules:** Extend existing linting configuration for new services, maintain consistency with current code quality standards
 
-- **Library:** Python stdlib logging with structured JSON format
-- **Format:** `{"timestamp": "ISO8601", "level": "INFO", "correlation_id": "uuid", "service": "service-name", "message": "log message"}`
-- **Levels:** DEBUG, INFO, WARNING, ERROR, CRITICAL with appropriate usage
-- **Required Context:**
-  - Correlation ID: UUID per request for distributed tracing
-  - Service Context: Service name, version, instance ID
-  - User Context: Session ID, call ID (no PII in logs)
+**Testing Patterns:** Follow existing pytest patterns, extend existing test organization structure, maintain existing test coverage requirements
 
-### Error Handling Patterns
+**Documentation Style:** Follow existing docstring patterns, maintain README structure for new services
 
-#### External API Errors
-- **Retry Policy:** Exponential backoff with jitter, max 3 retries
-- **Circuit Breaker:** Open after 5 consecutive failures, half-open after 30s
-- **Timeout Configuration:** 5s for banking APIs, 10s for cloud AI services
-- **Error Translation:** Map external error codes to internal error types
+### Enhancement-Specific Standards
+- **Intent Classification Standards:** Consistent confidence score handling (0.0-1.0 range), standardized intent label naming conventions
+- **Test Scenario Format Standards:** JSON schema validation for test steps, consistent timeout and retry handling
+- **API Response Standards:** Standardized error response format across all new services
 
-#### Business Logic Errors
-- **Custom Exceptions:** BankingError, AuthenticationError, IntentNotFoundError
-- **User-Facing Errors:** Friendly messages without technical details
-- **Error Codes:** Structured error codes for client error handling
+### Critical Integration Rules
+- **Existing API Compatibility:** Preserve ASR/TTS service interfaces unchanged during integration
+- **Database Integration:** Use SQLite transactions for all test data operations, maintain data consistency across service boundaries
+- **Error Handling Integration:** Implement graceful degradation when external IVR systems are unreachable, maintain existing error logging patterns
+- **Logging Consistency:** Extend existing structured logging approach to new services, maintain log level configuration patterns
 
-#### Data Consistency
-- **Transaction Strategy:** Database transactions for session state changes
-- **Compensation Logic:** Cleanup procedures for failed AI processing
-- **Idempotency:** UUID-based idempotent operations for critical flows
+## Testing Strategy
 
-## Security
+### Integration with Existing Tests
+**Existing Test Framework:** Extend pytest-based testing framework, maintain existing test organization in services/*/tests/, preserve existing test coverage requirements
 
-### Input Validation
-- **Validation Library:** Pydantic for data validation and serialization
-- **Validation Location:** At gRPC service boundaries before processing
-- **Required Rules:**
-  - All external inputs MUST be validated against schemas
-  - Audio input size limits (max 1MB per chunk)
-  - Text input sanitization for prompt injection prevention
+**Test Organization:** Follow established testing patterns for new services, integrate with existing CI/CD pipeline, maintain existing test data management approaches
 
-### Authentication & Authorization
-- **Auth Method:** TLS client certificates for inter-service communication
-- **Session Management:** JWT tokens for API access with short TTL
-- **Required Patterns:**
-  - mTLS for all gRPC communication
-  - Customer authentication through banking system integration
+**Coverage Requirements:** Maintain existing coverage thresholds for new services, extend existing test reporting, integrate with existing test automation
 
-### Secrets Management
-- **Development:** Environment variables with `.env` files (not committed)
-- **Production:** Kubernetes secrets with external secret management
-- **Code Requirements:**
-  - NEVER hardcode secrets or API keys
-  - Access via configuration service only
-  - No secrets in logs or error messages
+### New Testing Requirements
 
-### API Security
-- **Rate Limiting:** Token bucket algorithm, 100 requests/minute per client
-- **CORS Policy:** Restricted to authorized domains only
-- **Security Headers:** HSTS, CSP, X-Frame-Options for any HTTP endpoints
-- **HTTPS Enforcement:** TLS 1.3 minimum for all external communication
-
-### Data Protection
-- **Encryption at Rest:** AES-256 for database encryption
-- **Encryption in Transit:** TLS 1.3 for all network communication
-- **PII Handling:** No customer PII stored in logs or metrics
-- **Logging Restrictions:** Exclude audio data, customer details, authentication tokens
-
-## Coding Standards
-
-### Core Standards
-- **Languages & Runtimes:** Python 3.11.7 with type hints mandatory
-- **Style & Linting:** Black formatter, Ruff linter, mypy type checking
-- **Test Organization:** `tests/` directory parallel to `src/`, pytest framework
-
-### Critical Rules
-- **Logging:** Never use `print()` in production code - use structured logger
-- **gRPC Responses:** All gRPC responses must include correlation IDs
-- **Error Handling:** Catch specific exceptions, never bare `except:`
-- **Audio Processing:** Always specify audio format and sample rate explicitly
-- **Context Management:** Use async context managers for resource cleanup
-
-## Test Strategy and Standards
-
-### Testing Philosophy
-- **Approach:** Test-driven development for critical components
-- **Coverage Goals:** 90% line coverage for business logic, 80% overall
-- **Test Pyramid:** 70% unit, 20% integration, 10% end-to-end
-
-### Test Types and Organization
-
-#### Unit Tests
-- **Framework:** pytest 7.4.3 with asyncio support
-- **File Convention:** `test_*.py` files parallel to source code
-- **Location:** Each service has its own `tests/` directory
-- **Mocking Library:** pytest-mock for dependency mocking
-- **Coverage Requirement:** 90% for services, 80% for utilities
+#### Unit Tests for New Components
+- **Framework:** pytest (existing framework)
+- **Location:** services/*/tests/ (existing pattern)
+- **Coverage Target:** 85% minimum (existing standard)
+- **Integration with Existing:** Extend existing test configuration, use existing test utilities
 
 #### Integration Tests
-- **Scope:** Service-to-service communication via gRPC
-- **Location:** `tests/integration/` in project root
-- **Test Infrastructure:**
-  - **PostgreSQL:** Testcontainers for isolated database testing
-  - **Redis:** Redis container for cache testing
-  - **gRPC Services:** In-process servers for fast testing
+- **Scope:** End-to-end IVR test execution workflows, service communication validation, OpenSIPS integration testing
+- **Existing System Verification:** Ensure ASR/TTS services continue operating correctly, validate existing functionality preservation
+- **New Feature Testing:** Test scenario execution, intent recognition accuracy, DTMF generation functionality
 
-#### End-to-End Tests
-- **Framework:** pytest with custom voice assistant test utilities
-- **Scope:** Complete voice call scenarios using SIP test clients
-- **Environment:** Dedicated test environment with all services deployed
-- **Test Data:** Synthetic audio files and mock banking responses
+#### Regression Testing
+- **Existing Feature Verification:** Automated verification that voice assistant functionality remains intact
+- **Automated Regression Suite:** Extend existing automated tests to cover transformation scenarios
+- **Manual Testing Requirements:** IVR system integration testing, real phone call validation
 
-### Test Data Management
-- **Strategy:** Factory pattern for test data generation
-- **Fixtures:** Shared fixtures in `shared/testing/` for common data
-- **Factories:** Audio sample factories, session factories, banking data factories
-- **Cleanup:** Automatic cleanup after each test with proper resource disposal
+## Security Integration
+
+### Existing Security Measures
+**Authentication:** Service-to-service communication without authentication (existing pattern), container-level isolation, network security through Docker networking
+
+**Authorization:** No internal service authorization (existing pattern), environment-based configuration security
+
+**Data Protection:** Container filesystem isolation, log data protection through volume mounting, model file protection
+
+**Security Tools:** Docker container security, existing logging and monitoring security
+
+### Enhancement Security Requirements
+**New Security Measures:** 
+- Phone number validation to prevent unauthorized outbound calling
+- Test data encryption for sensitive IVR interaction recordings
+- Access control implementation for test management web interface
+
+**Integration Points:** 
+- Extend existing logging security to new services
+- Maintain existing container isolation for new services
+- Follow existing configuration security patterns
+
+**Compliance Requirements:** 
+- Telephony compliance for outbound calling
+- Data retention policies for test recordings
+- Access audit trails for test management
+
+### Security Testing
+**Existing Security Tests:** Extend existing security testing patterns to new services
+
+**New Security Test Requirements:** 
+- Phone number validation testing
+- Test data access control verification
+- Web interface security testing
+
+**Penetration Testing:** Include new services in existing security assessment processes
 
 ## Next Steps
 
-This architecture document reflects the current implementation status of the OpenSIPS AI Voice Connector. The system has successfully completed Phases 1-2 with a working microservices architecture.
+### Story Manager Handoff
+Begin implementation with Epic 1 (OpenSIPS Outbound Call Foundation) from the existing PRD. Focus on establishing basic outbound calling capability and adapting existing ASR/TTS services for IVR interaction. The first story should be OpenSIPS Outbound Configuration (Story 1.1) with clear integration checkpoints to ensure existing system integrity. This architecture document provides the technical foundation for implementing test scenarios while maintaining existing voice assistant functionality throughout the transformation process.
 
-## ✅ **Completed Implementation (Phases 1-2)**
+### Developer Handoff
+Start implementation with the Intent Recognition service development, leveraging existing gRPC patterns from ASR/TTS services. Follow the established service structure in services/ directory and maintain compatibility with existing protobuf generation workflow. Key technical decisions documented in this architecture are based on actual project analysis of your microservices patterns, Docker containerization approach, and service communication protocols. Implementation should maintain existing system compatibility throughout the transformation process with specific verification steps for ASR/TTS service functionality.
 
-**Achievements:**
-- Four working gRPC microservices (ASR, LLM, TTS, Core)
-- Complete Docker orchestration with health monitoring
-- Native pipecat framework integration
-- Common service base with standardized management
-- Comprehensive service health checks and logging
+**Implementation Priority:**
+1. Intent Recognition service (Turkish BERT integration)
+2. Test Controller service (orchestration logic)
+3. OpenSIPS outbound call configuration
+4. Web interface for test management
+5. DTMF generation integration
 
-## 🚨 **CRITICAL ARCHITECTURAL ISSUES IDENTIFIED**
+**Critical Success Factors:**
+- Maintain existing ASR/TTS service functionality
+- Preserve Docker Compose deployment patterns
+- Follow established gRPC communication protocols
+- Ensure CPU-only deployment compatibility
+- Implement comprehensive testing for new functionality
 
-**Architecture Analysis Date:** 2025-07-27  
-**Status:** IMMEDIATE ATTENTION REQUIRED
+---
 
-### **Major Issues Requiring Resolution:**
-
-1. **🔄 Legacy-New Architecture Conflict**
-   - **Issue:** Dual architecture (`src/` legacy vs `core/` new) causing confusion
-   - **Impact:** Resource waste, maintenance complexity, unclear system boundaries
-   - **Priority:** CRITICAL - Must resolve before Phase 3
-
-2. **⚠️ Incomplete Pipecat Integration** 
-   - **Issue:** Native Pipecat framework integration incomplete in `core/pipecat/`
-   - **Impact:** Core audio pipeline functionality missing
-   - **Priority:** HIGH - Required for MVP functionality
-
-3. **🔗 Service Discovery Conflicts**
-   - **Issue:** Conflicting service registry patterns between `core/grpc_clients/service_registry.py` and `services/common/service_base.py`
-   - **Impact:** Service communication instability
-   - **Priority:** HIGH - Critical for microservices coordination
-
-4. **📂 gRPC Proto Organization Issues**
-   - **Issue:** Proto definitions scattered across `services/*/proto/` and `shared/proto/`
-   - **Impact:** Code generation complexity, versioning conflicts
-   - **Priority:** MEDIUM - Affects development velocity
-
-5. **🔌 OpenSIPS Integration Incomplete**
-   - **Issue:** `core/opensips/` modules are placeholders, no real SIP/RTP implementation
-   - **Impact:** Core telephony functionality missing
-   - **Priority:** CRITICAL - MVP blocker
-
-## 🔄 **Current Phase: Phase 2.5 - ARCHITECTURAL CLEANUP (NEW)**
-
-**MANDATORY Before Phase 3:**
-1. **Architecture Consolidation:** Remove legacy `src/` directory, commit to `core/` architecture
-2. **Pipecat Implementation:** Complete native Pipecat framework integration
-3. **Service Registry Unification:** Standardize on single service discovery pattern
-4. **Proto Organization:** Centralize all proto definitions in `shared/proto/`
-5. **OpenSIPS Foundation:** Implement basic SIP signaling and RTP transport
-
-**Previous Phase 3 Now Becomes Phase 4:**
-- OpenSIPS Integration Refactoring (after cleanup)
-- RTP Transport Enhancement 
-- Pipeline Orchestration
-- End-to-End Testing
-
-## ⏳ **Planned Implementation (Phases 4-5)**
-
-**Phase 4: Banking Features & Session Management**
-- Implement Session Manager service for call lifecycle management
-- Add Context Store service for conversation memory
-- Implement Banking Service for customer authentication and queries
-- Add PostgreSQL and Redis integration
-
-**Phase 5: Production Optimization**
-- Performance optimization and latency tuning
-- Advanced monitoring and observability
-- Security hardening and compliance validation
-- Load testing and scalability validation
-
-## 🎯 **Development Guidance**
-
-**For Phase 3 Implementation:**
-- Use existing `core/opensips/` integration code as reference
-- Leverage native pipecat framework components for audio processing
-- Maintain compatibility with existing service interfaces
-- Follow established patterns from implemented services
-
-**Architecture Validation:**
-This architecture has been validated through successful implementation of core microservices and demonstrates the viability of the microservices-within-monorepo approach with native pipecat integration.
+*This architecture document serves as the comprehensive blueprint for transforming your OpenSIPS AI Voice Connector into an IVR Flow Automation System while preserving existing functionality and maintaining architectural consistency.*

@@ -1,5 +1,7 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
+*/__pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
 
@@ -50,6 +52,12 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
+
+# Additional cache directories
+*cache/
+*Cache/
+.cache/
+cache/
 
 # Translations
 *.mo
@@ -179,3 +187,5 @@ docker/data/
 core/config/app.ini
 test_*.py
 yolo_*.py
+.bmad-core
+.cursor

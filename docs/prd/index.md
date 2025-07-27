@@ -1,16 +1,14 @@
-# Pipecat IVR Voice Assistant Product Requirements Document (PRD)
+# IVR Flow Automation System Product Requirements Document (PRD)
 
 ## Table of Contents
 
-- [Pipecat IVR Voice Assistant Product Requirements Document (PRD)](#table-of-contents)
+- [IVR Flow Automation System Product Requirements Document (PRD)](#table-of-contents)
   - [Goals and Background Context](#goals-and-background-context)
   - [Requirements](#requirements)
+  - [User Interface Design Goals](#user-interface-design-goals)
   - [Technical Assumptions](#technical-assumptions)
   - [Epic List](#epic-list)
-  - [Epic 1: Foundation & Core Infrastructure](#epic-1-foundation-core-infrastructure)
-  - [Epic 2: Core AI Pipeline Integration](#epic-2-core-ai-pipeline-integration)
-  - [Epic 3: Real-time Audio Transport & SIP Integration](#epic-3-real-time-audio-transport-sip-integration)
-  - [Epic 4: Banking IVR Features & Optimization](#epic-4-banking-ivr-features-optimization)
-  - [Critical Architecture Issues](#critical-architecture-issues)
-  - [Checklist Results Report](#checklist-results-report)
+  - [Epic 1: OpenSIPS Outbound Call Foundation](#epic-1-opensips-outbound-call-foundation)
+  - [Epic 2: Simple Test Framework](#epic-2-simple-test-framework)
+  - [Epic 3: Basic Web Interface](#epic-3-basic-web-interface)
   - [Next Steps](#next-steps)
