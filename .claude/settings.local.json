@@ -22,7 +22,16 @@
       "mcp__ide__executeCode",
       "Bash(fc:*)",
       "Bash(git rm:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(pip install:*)",
+      "Bash(time docker build:*)",
+      "Bash(dir:*)",
+      "Bash(./scripts/validate-optimization.sh:*)",
+      "Bash(bash:*)",
+      "Bash(./scripts/validate-dev-setup.sh:*)",
+      "Bash(grep:*)",
+      "Bash(./scripts/dev-start.sh:*)",
+      "Bash(timeout:*)"
     ],
     "deny": []
   }

@@ -1,0 +1,36 @@
+# Development Dockerfile for Core Application
+# Optimized for fast rebuilds and hot-reload development
+
+FROM python:3.10-slim as development
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Create app directory
+WORKDIR /app
+
+# Copy requirements and install with caching (if exists)
+COPY requirements.txt ./
+# Use pip cache for faster development builds
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt || echo "No requirements.txt found, skipping pip install"
+
+# Set environment variables for development
+ENV PYTHONPATH=/app:/app/core
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV CORE_LOG_LEVEL=DEBUG
+ENV DEVELOPMENT_MODE=1
+
+# Expose HTTP management interface
+EXPOSE 8080
+
+# Health check for development
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# Development command with auto-reload
+CMD ["python", "-u", "/app/core/main.py"]

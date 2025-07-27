@@ -13,3 +13,6 @@ numpy>=1.24.0
 
 # Async support
 asyncio
+
+# Development hot-reload support
+watchdog>=3.0.0

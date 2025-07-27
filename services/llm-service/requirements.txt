@@ -17,3 +17,6 @@ asyncio
 
 # Logging and utilities
 structlog>=23.0.0
+
+# Development hot-reload support
+watchdog>=3.0.0

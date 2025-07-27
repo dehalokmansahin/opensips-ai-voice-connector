@@ -10,3 +10,6 @@ vosk>=0.3.45
 
 # Async support
 asyncio
+
+# Development hot-reload support
+watchdog>=3.0.0

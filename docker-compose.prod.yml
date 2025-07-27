@@ -1,0 +1,146 @@
+version: '3.8'
+
+# Production optimized configuration
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Key features:
+# - Multi-stage production builds
+# - Security hardening (non-root users)
+# - Resource limits and constraints
+# - Optimized health checks
+# - Production logging configuration
+
+# Production logging configuration
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # ASR Service - Production
+  asr-service:
+    build:
+      context: ./services/asr-service
+      dockerfile: Dockerfile
+      target: production
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    environment:
+      - LOG_LEVEL=INFO
+      - ASR_MAX_WORKERS=4
+      - ASR_ENABLE_METRICS=1
+    # Security: Read-only file system where possible
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=100m
+    logging: *default-logging
+
+  # LLM Service - Production
+  llm-service:
+    build:
+      context: ./services/llm-service
+      dockerfile: Dockerfile
+      target: production
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 2G
+        reservations:
+          cpus: '1.0'
+          memory: 1G
+    environment:
+      - LOG_LEVEL=INFO
+      - LLM_MAX_WORKERS=2
+      - LLM_ENABLE_METRICS=1
+      # Production PyTorch optimizations
+      - OMP_NUM_THREADS=2
+      - MKL_NUM_THREADS=2
+      - NUMEXPR_NUM_THREADS=2
+      - TORCH_NUM_THREADS=2
+    # Security: Read-only file system where possible
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=200m
+    volumes:
+      # Only mount model directories as read-only
+      - ./models/llm:/app/model:ro
+      - ./models/rag_model:/app/rag_model:ro
+    logging: *default-logging
+
+  # TTS Service - Production
+  tts-service:
+    build:
+      context: ./services/tts-service
+      dockerfile: Dockerfile
+      target: production
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    environment:
+      - LOG_LEVEL=INFO
+      - TTS_MAX_WORKERS=4
+      - TTS_ENABLE_METRICS=1
+    # Security: Read-only file system where possible
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=100m
+    logging: *default-logging
+
+  # Core Application - Production
+  opensips-ai-core:
+    build:
+      context: .
+      dockerfile: Dockerfile.core
+      target: production
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    environment:
+      - CORE_LOG_LEVEL=INFO
+      - CORE_ENABLE_METRICS=1
+    # Security: Read-only file system for application code
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=100m
+    volumes:
+      # Config as read-only, logs as writable
+      - ./config:/app/config:ro
+      - ./logs:/app/logs:rw
+    logging: *default-logging
+
+# Production network configuration
+networks:
+  opensips-ai-network:
+    driver: bridge
+    driver_opts:
+      # Production network optimizations
+      com.docker.network.bridge.enable_icc: "false"
+      com.docker.network.bridge.enable_ip_masquerade: "true"
+      com.docker.network.driver.mtu: "1450"
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
+          gateway: 172.20.0.1

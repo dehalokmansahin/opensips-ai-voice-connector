@@ -10,15 +10,20 @@ import os
 from typing import AsyncGenerator, Optional, Dict, Any, List
 from grpc import aio as aio_grpc
 
-# Import protobuf stubs (assuming they exist in services directory)
+# Import protobuf stubs (first try local grpc_clients directory)
 try:
-    # Try to import from services directory
-    sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'services', 'asr-service', 'src'))
+    # Try to import from local grpc_clients directory
     import asr_service_pb2
     import asr_service_pb2_grpc
-except ImportError as e:
-    logger = logging.getLogger(__name__)
-    logger.error(f"Failed to import ASR protobuf stubs: {e}")
+except ImportError:
+    try:
+        # Fallback: Try to import from services directory
+        sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'services', 'asr-service', 'src'))
+        import asr_service_pb2
+        import asr_service_pb2_grpc
+    except ImportError as e:
+        logger = logging.getLogger(__name__)
+        logger.error(f"Failed to import ASR protobuf stubs: {e}")
     # Create minimal stub classes for development
     class asr_service_pb2:
         class RecognizeRequest:

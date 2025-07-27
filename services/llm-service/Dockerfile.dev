@@ -1,0 +1,102 @@
+# Development Dockerfile for LLM Service
+# Optimized for fast rebuilds and hot-reload development
+
+# Stage 1: Build dependencies stage
+FROM python:3.10-slim AS build-base
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    gcc \
+    g++ \
+    cmake \
+    wget \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create wheelhouse directory for pre-built packages
+WORKDIR /wheels
+
+# Copy requirements files
+COPY services/llm-service/requirements.txt services/llm-service/requirements_simple.txt ./
+
+# Pre-build wheels for faster subsequent installs with caching
+# Use CPU-only PyTorch for development
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip wheel --wheel-dir /wheels \
+    --find-links https://download.pytorch.org/whl/cpu/torch_stable.html \
+    torch==2.1.0+cpu \
+    sentence-transformers>=2.2.0 \
+    chromadb>=0.4.0 \
+    llama-cpp-python>=0.2.0
+
+# Build wheels for all other requirements with caching
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip wheel --wheel-dir /wheels -r requirements.txt
+
+# Stage 2: Development runtime
+FROM python:3.10-slim AS development
+
+# Install minimal runtime dependencies only
+RUN apt-get update && apt-get install -y \
+    curl \
+    wget \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Install grpc-health-probe for health checks (development skip for faster startup)
+RUN echo '#!/bin/bash\nexit 0' > /bin/grpc-health-probe && chmod +x /bin/grpc-health-probe
+
+# Create app directory
+WORKDIR /app
+
+# Copy pre-built wheels and install
+COPY --from=build-base /wheels /wheels
+RUN pip install --no-index --find-links /wheels \
+    torch==2.1.0+cpu \
+    sentence-transformers>=2.2.0 \
+    chromadb>=0.4.0 \
+    llama-cpp-python>=0.2.0 \
+    grpcio>=1.60.0 \
+    grpcio-tools>=1.60.0 \
+    structlog>=23.0.0 \
+    && rm -rf /wheels
+
+# Create model and cache directories
+RUN mkdir -p /app/model /app/rag_model /app/proto
+
+# Set environment variables for offline mode and development
+ENV TRANSFORMERS_OFFLINE=1
+ENV HF_HUB_OFFLINE=1
+ENV HF_HUB_DISABLE_TELEMETRY=1
+ENV SENTENCE_TRANSFORMERS_HOME=/app/rag_model
+ENV HF_HOME=/app/rag_model
+ENV TORCH_HOME=/app/rag_model
+ENV PYTHONPATH=/app:/app/src:/app/common
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Development-specific environment
+ENV LOG_LEVEL=DEBUG
+ENV DEVELOPMENT_MODE=1
+
+# Copy proto files (these rarely change)
+COPY services/llm-service/proto/ /app/proto/
+
+# Copy source code for development
+COPY services/llm-service/src/ /app/src/
+
+# Copy common modules
+COPY services/common/ /app/common/
+
+# Expose gRPC port
+EXPOSE 50052
+
+# Health check for development
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD grpc-health-probe -addr=localhost:50052 -service=LLMService || exit 1
+
+# Development command with auto-reload
+CMD ["python", "-u", "/app/src/enhanced_llm_server.py"]

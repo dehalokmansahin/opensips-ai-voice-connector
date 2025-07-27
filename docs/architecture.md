@@ -984,13 +984,52 @@ This architecture document reflects the current implementation status of the Ope
 - Common service base with standardized management
 - Comprehensive service health checks and logging
 
-## 🔄 **Current Phase: Phase 3 - OpenSIPS Integration Refactoring**
+## 🚨 **CRITICAL ARCHITECTURAL ISSUES IDENTIFIED**
 
-**Immediate Next Steps:**
-1. **OpenSIPS Integration Update:** Refactor existing OpenSIPS integration to work with new microservices architecture
-2. **RTP Transport Enhancement:** Update RTP audio handling to communicate with gRPC services
-3. **Pipeline Orchestration:** Integrate native pipecat pipeline management with service calls
-4. **End-to-End Testing:** Validate complete audio flow through the new architecture
+**Architecture Analysis Date:** 2025-07-27  
+**Status:** IMMEDIATE ATTENTION REQUIRED
+
+### **Major Issues Requiring Resolution:**
+
+1. **🔄 Legacy-New Architecture Conflict**
+   - **Issue:** Dual architecture (`src/` legacy vs `core/` new) causing confusion
+   - **Impact:** Resource waste, maintenance complexity, unclear system boundaries
+   - **Priority:** CRITICAL - Must resolve before Phase 3
+
+2. **⚠️ Incomplete Pipecat Integration** 
+   - **Issue:** Native Pipecat framework integration incomplete in `core/pipecat/`
+   - **Impact:** Core audio pipeline functionality missing
+   - **Priority:** HIGH - Required for MVP functionality
+
+3. **🔗 Service Discovery Conflicts**
+   - **Issue:** Conflicting service registry patterns between `core/grpc_clients/service_registry.py` and `services/common/service_base.py`
+   - **Impact:** Service communication instability
+   - **Priority:** HIGH - Critical for microservices coordination
+
+4. **📂 gRPC Proto Organization Issues**
+   - **Issue:** Proto definitions scattered across `services/*/proto/` and `shared/proto/`
+   - **Impact:** Code generation complexity, versioning conflicts
+   - **Priority:** MEDIUM - Affects development velocity
+
+5. **🔌 OpenSIPS Integration Incomplete**
+   - **Issue:** `core/opensips/` modules are placeholders, no real SIP/RTP implementation
+   - **Impact:** Core telephony functionality missing
+   - **Priority:** CRITICAL - MVP blocker
+
+## 🔄 **Current Phase: Phase 2.5 - ARCHITECTURAL CLEANUP (NEW)**
+
+**MANDATORY Before Phase 3:**
+1. **Architecture Consolidation:** Remove legacy `src/` directory, commit to `core/` architecture
+2. **Pipecat Implementation:** Complete native Pipecat framework integration
+3. **Service Registry Unification:** Standardize on single service discovery pattern
+4. **Proto Organization:** Centralize all proto definitions in `shared/proto/`
+5. **OpenSIPS Foundation:** Implement basic SIP signaling and RTP transport
+
+**Previous Phase 3 Now Becomes Phase 4:**
+- OpenSIPS Integration Refactoring (after cleanup)
+- RTP Transport Enhancement 
+- Pipeline Orchestration
+- End-to-End Testing
 
 ## ⏳ **Planned Implementation (Phases 4-5)**
 

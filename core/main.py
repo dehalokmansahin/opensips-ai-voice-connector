@@ -20,7 +20,8 @@ from config.settings import Settings
 from opensips.integration import OpenSIPSIntegration
 from bot.pipeline_manager import PipelineManager
 from grpc_clients.service_registry import ServiceRegistry
-from utils.logging import setup_logging
+from utils.logging import setup_logging, get_development_logger
+from utils.file_watcher import setup_hot_reload
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,10 @@ class OpenSIPSAIVoiceConnector:
         
         # Active sessions tracking
         self.active_sessions: Dict[str, Any] = {}
+        
+        # Development features
+        self.hot_reload_watcher = None
+        self.development_mode = os.getenv('DEVELOPMENT_MODE', '0') == '1'
         
         logger.info("OpenSIPS AI Voice Connector initialized (new architecture)")
     
@@ -145,10 +150,50 @@ class OpenSIPSAIVoiceConnector:
         except Exception as e:
             logger.error(f"Error handling call end: {e}")
     
+    def _setup_hot_reload(self):
+        """Setup hot-reload for development"""
+        try:
+            app_root = Path(__file__).parent.parent
+            
+            def on_code_change(changed_file):
+                """Handle code changes"""
+                logger.info(f"Code change detected: {changed_file}")
+                logger.info("Hot-reload: Gracefully shutting down for restart...")
+                
+                # Create a restart task
+                asyncio.create_task(self._hot_reload_restart())
+            
+            self.hot_reload_watcher = setup_hot_reload(app_root, on_code_change)
+            if self.hot_reload_watcher:
+                logger.info("Hot-reload enabled for development")
+            
+        except Exception as e:
+            logger.warning(f"Failed to setup hot-reload: {e}")
+    
+    async def _hot_reload_restart(self):
+        """Graceful restart for hot-reload"""
+        try:
+            logger.info("Hot-reload: Starting graceful restart...")
+            
+            # Stop current instance
+            await self.stop()
+            
+            # Exit to trigger container restart
+            logger.info("Hot-reload: Exiting for restart")
+            os._exit(0)
+            
+        except Exception as e:
+            logger.error(f"Hot-reload restart failed: {e}")
+            os._exit(1)
+    
     async def start(self):
         """Start the application"""
         try:
             logger.info("Starting OpenSIPS AI Voice Connector (new architecture)")
+            
+            # Setup hot-reload in development mode
+            if self.development_mode:
+                self._setup_hot_reload()
             
             # Start OpenSIPS integration
             await self.opensips_integration.start()
@@ -183,6 +228,10 @@ class OpenSIPSAIVoiceConnector:
             if self.service_registry:
                 await self.service_registry.stop()
             
+            # Stop hot-reload watcher
+            if self.hot_reload_watcher:
+                self.hot_reload_watcher.stop()
+            
             logger.info("OpenSIPS AI Voice Connector stopped successfully")
             
         except Exception as e:
@@ -190,8 +239,12 @@ class OpenSIPSAIVoiceConnector:
 
 async def main():
     """Main entry point"""
-    # Setup logging
-    setup_logging()
+    # Detect development mode early
+    development_mode = os.getenv('DEVELOPMENT_MODE', '0') == '1'
+    log_level = os.getenv('CORE_LOG_LEVEL', 'DEBUG' if development_mode else 'INFO')
+    
+    # Setup enhanced logging
+    setup_logging(level=log_level, development_mode=development_mode)
     
     # Get config file from environment
     config_file = os.getenv('OAVC_CONFIG_FILE', 'config/app.ini')

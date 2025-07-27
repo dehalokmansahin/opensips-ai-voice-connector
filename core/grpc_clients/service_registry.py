@@ -9,7 +9,14 @@ import grpc
 from typing import Dict, Optional, Any
 from grpc import aio as aio_grpc
 
-from ..config.settings import ServicesConfig, ServiceConfig
+import sys
+from pathlib import Path
+
+# Add core directory to path for direct imports  
+core_path = Path(__file__).parent.parent
+sys.path.insert(0, str(core_path))
+
+from config.settings import ServicesConfig, ServiceConfig
 
 logger = logging.getLogger(__name__)
 

@@ -9,12 +9,24 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime
 from enum import Enum
 
-from ..grpc_clients import ASRClient, LLMClient, TTSClient
-from ..grpc_clients.asr_client import StreamingSession as ASRStreamingSession
-from ..grpc_clients.llm_client import ConversationManager
-from ..grpc_clients.tts_client import SentenceFlushAggregator
-from ..opensips.rtp_transport import RTPTransport
-from ..pipecat.transports import PipecatRTPTransport
+try:
+    from ..grpc_clients import ASRClient, LLMClient, TTSClient
+    from ..grpc_clients.asr_client import StreamingSession as ASRStreamingSession
+    from ..grpc_clients.llm_client import ConversationManager
+    from ..grpc_clients.tts_client import SentenceFlushAggregator
+except ImportError:
+    # Fallback for external imports
+    from core.grpc_clients import ASRClient, LLMClient, TTSClient
+    from core.grpc_clients.asr_client import StreamingSession as ASRStreamingSession
+    from core.grpc_clients.llm_client import ConversationManager
+    from core.grpc_clients.tts_client import SentenceFlushAggregator
+try:
+    from ..opensips.rtp_transport import RTPTransport
+    from ..pipecat.transports import PipecatRTPTransport
+except ImportError:
+    # Fallback for external imports
+    from core.opensips.rtp_transport import RTPTransport
+    from core.pipecat.transports import PipecatRTPTransport
 
 logger = logging.getLogger(__name__)
 

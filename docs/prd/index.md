@@ -11,5 +11,6 @@
   - [Epic 2: Core AI Pipeline Integration](#epic-2-core-ai-pipeline-integration)
   - [Epic 3: Real-time Audio Transport & SIP Integration](#epic-3-real-time-audio-transport-sip-integration)
   - [Epic 4: Banking IVR Features & Optimization](#epic-4-banking-ivr-features-optimization)
+  - [Critical Architecture Issues](#critical-architecture-issues)
   - [Checklist Results Report](#checklist-results-report)
   - [Next Steps](#next-steps)

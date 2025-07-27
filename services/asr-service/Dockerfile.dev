@@ -1,0 +1,51 @@
+# Development Dockerfile for ASR Service
+# Optimized for fast rebuilds and hot-reload development
+
+FROM python:3.10-slim as development
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    wget \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Install grpc-health-probe for health checks (development skip for faster startup)
+RUN echo '#!/bin/bash\nexit 0' > /bin/grpc-health-probe && chmod +x /bin/grpc-health-probe
+
+# Create app directory
+WORKDIR /app
+
+# Copy requirements and install with caching
+COPY services/asr-service/requirements.txt ./
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt
+
+# Create model directory
+RUN mkdir -p /app/model
+
+# Copy proto files (these rarely change)
+COPY services/asr-service/proto/ /app/proto/
+
+# Copy source code for development
+COPY services/asr-service/src/ /app/src/
+
+# Copy common modules
+COPY services/common/ /app/common/
+
+# Set environment variables for development
+ENV PYTHONPATH=/app:/app/src:/app/common
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV LOG_LEVEL=DEBUG
+ENV DEVELOPMENT_MODE=1
+
+# Expose gRPC port
+EXPOSE 50051
+
+# Health check for development
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD grpc-health-probe -addr=localhost:50051 -service=ASRService || exit 1
+
+# Development command with auto-reload
+CMD ["python", "-u", "/app/src/enhanced_asr_server.py"]

@@ -5,9 +5,7 @@ Clean microservices architecture with minimal dependencies
 Version: 2.0.0 (New Architecture)
 """
 
-from .main import OpenSIPSAIVoiceConnector
-
-# Core components
+# Core components (avoid importing main.py to prevent circular imports)
 from .config import Settings, OpenSIPSConfig, ServiceConfig, ServicesConfig, AudioConfig, LoggingConfig
 from .opensips import OpenSIPSIntegration, CallInfo, OpenSIPSEventListener, SIPBackendListener, RTPTransport
 from .grpc_clients import ServiceRegistry, ASRClient, LLMClient, TTSClient
@@ -20,9 +18,6 @@ __architecture__ = "microservices"
 __description__ = "OpenSIPS AI Voice Connector - Clean Architecture"
 
 __all__ = [
-    # Main application
-    "OpenSIPSAIVoiceConnector",
-    
     # Configuration
     "Settings",
     "OpenSIPSConfig", 
