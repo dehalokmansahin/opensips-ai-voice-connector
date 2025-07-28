@@ -13,8 +13,8 @@ from grpc import aio as aio_grpc
 # Import protobuf stubs (first try local grpc_clients directory)
 try:
     # Try to import from local grpc_clients directory
-    from . import tts_service_pb2
-    from . import tts_service_pb2_grpc
+    import tts_service_pb2
+    import tts_service_pb2_grpc
 except ImportError:
     try:
         # Fallback: Try to import from services directory

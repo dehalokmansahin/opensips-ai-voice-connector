@@ -1,0 +1,402 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1><i class="fas fa-phone-alt me-2"></i>OpenSIPS Management</h1>
+            <div class="btn-group">
+                <button type="button" class="btn btn-outline-primary" onclick="refreshStatus()">
+                    <i class="fas fa-sync-alt me-2"></i>Refresh Status
+                </button>
+                <a href="/scenarios" class="btn btn-outline-secondary">
+                    <i class="fas fa-arrow-left me-2"></i>Back to Scenarios
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Status Overview -->
+<div class="row mb-4">
+    <div class="col-lg-4">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-server me-2"></i>OpenSIPS Status
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="d-flex align-items-center mb-3">
+                    <div class="flex-grow-1">
+                        <strong>Server Status:</strong>
+                    </div>
+                    <div>
+                        {% if opensips_status.status == 'healthy' %}
+                            <span class="badge bg-success">
+                                <i class="fas fa-check-circle me-1"></i>Healthy
+                            </span>
+                        {% elif opensips_status.status == 'unhealthy' %}
+                            <span class="badge bg-warning">
+                                <i class="fas fa-exclamation-triangle me-1"></i>Unhealthy
+                            </span>
+                        {% else %}
+                            <span class="badge bg-danger">
+                                <i class="fas fa-times-circle me-1"></i>Error
+                            </span>
+                        {% endif %}
+                    </div>
+                </div>
+                
+                <div class="mb-2">
+                    <small class="text-muted">Last Updated: {{ current_time }}</small>
+                </div>
+                
+                {% if opensips_status.error %}
+                <div class="alert alert-danger mb-0">
+                    <strong>Error:</strong> {{ opensips_status.error }}
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-lg-4">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-network-wired me-2"></i>Network Configuration
+                </h5>
+            </div>
+            <div class="card-body">
+                <table class="table table-sm">
+                    <tr>
+                        <th>SIP Port (UDP):</th>
+                        <td><code>5060</code></td>
+                    </tr>
+                    <tr>
+                        <th>SIP Port (TCP):</th>
+                        <td><code>5060</code></td>
+                    </tr>
+                    <tr>
+                        <th>HTTP MI Port:</th>
+                        <td><code>8888</code></td>
+                    </tr>
+                    <tr>
+                        <th>RTP Range:</th>
+                        <td><code>10000-10100</code></td>
+                    </tr>
+                    <tr>
+                        <th>Container IP:</th>
+                        <td><code>172.20.0.10</code></td>
+                    </tr>
+                </table>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-lg-4">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-cogs me-2"></i>Quick Actions
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="d-grid gap-2">
+                    <button type="button" class="btn btn-outline-info btn-sm" onclick="getStatistics()">
+                        <i class="fas fa-chart-bar me-2"></i>Get Statistics
+                    </button>
+                    <button type="button" class="btn btn-outline-warning btn-sm" onclick="checkConnections()">
+                        <i class="fas fa-plug me-2"></i>Check Connections
+                    </button>
+                    <button type="button" class="btn btn-outline-primary btn-sm" onclick="testSipCall()">
+                        <i class="fas fa-phone me-2"></i>Test SIP Call
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" onclick="viewLogs()">
+                        <i class="fas fa-file-alt me-2"></i>View Logs
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Statistics -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-chart-line me-2"></i>OpenSIPS Statistics
+                </h5>
+                <button type="button" class="btn btn-outline-primary btn-sm" onclick="refreshStatistics()">
+                    <i class="fas fa-sync-alt me-2"></i>Refresh
+                </button>
+            </div>
+            <div class="card-body">
+                <div id="statisticsContent">
+                    {% if opensips_status.statistics %}
+                        <pre class="bg-light p-3 rounded"><code>{{ opensips_status.statistics }}</code></pre>
+                    {% else %}
+                        <div class="text-center py-4 text-muted">
+                            <i class="fas fa-chart-bar fa-2x mb-3"></i>
+                            <p>No statistics available. Click "Get Statistics" to load data.</p>
+                        </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Call Processing History -->
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-history me-2"></i>Recent Call Processing
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Call ID</th>
+                                <th>From</th>
+                                <th>To</th>
+                                <th>Status</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="callHistoryTable">
+                            <tr>
+                                <td colspan="6" class="text-center text-muted py-4">
+                                    <i class="fas fa-phone fa-2x mb-2"></i>
+                                    <p>No recent calls. Call history will appear here once SIP calls are processed.</p>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Test SIP Call Modal -->
+<div class="modal fade" id="testCallModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Test SIP Call</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="testCallForm">
+                    <div class="mb-3">
+                        <label for="fromUri" class="form-label">From URI</label>
+                        <input type="text" class="form-control" id="fromUri" value="sip:test@localhost" placeholder="sip:user@domain">
+                    </div>
+                    <div class="mb-3">
+                        <label for="toUri" class="form-label">To URI</label>
+                        <input type="text" class="form-control" id="toUri" value="sip:ivr@localhost" placeholder="sip:user@domain">
+                    </div>
+                    <div class="mb-3">
+                        <label for="testMessage" class="form-label">Test Message</label>
+                        <textarea class="form-control" id="testMessage" rows="3" placeholder="Hesap bakiyemi öğrenmek istiyorum">Hesap bakiyemi öğrenmek istiyorum</textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="executeSipTest()">
+                    <i class="fas fa-phone me-2"></i>Start Test Call
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+// Real-time status updates
+let statusInterval;
+
+document.addEventListener('DOMContentLoaded', function() {
+    // Start auto-refresh every 30 seconds
+    statusInterval = setInterval(refreshStatus, 30000);
+});
+
+function refreshStatus() {
+    fetch('/api/v1/opensips/status')
+        .then(response => response.json())
+        .then(data => {
+            updateStatusDisplay(data);
+        })
+        .catch(error => {
+            console.error('Error refreshing status:', error);
+            IVRTestManagement.showToast('Failed to refresh OpenSIPS status', 'error');
+        });
+}
+
+function updateStatusDisplay(status) {
+    // Update status badge and timestamp
+    location.reload(); // Simple refresh for now - could be more sophisticated
+}
+
+function getStatistics() {
+    IVRTestManagement.showToast('Fetching OpenSIPS statistics...', 'info');
+    
+    fetch('/api/v1/opensips/status')
+        .then(response => response.json())
+        .then(data => {
+            if (data.statistics) {
+                document.getElementById('statisticsContent').innerHTML = 
+                    '<pre class="bg-light p-3 rounded"><code>' + data.statistics + '</code></pre>';
+                IVRTestManagement.showToast('Statistics updated successfully', 'success');
+            } else {
+                IVRTestManagement.showToast('No statistics available', 'warning');
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            IVRTestManagement.showToast('Failed to fetch statistics', 'error');
+        });
+}
+
+function refreshStatistics() {
+    getStatistics();
+}
+
+function checkConnections() {
+    IVRTestManagement.showToast('Checking OpenSIPS connections...', 'info');
+    
+    // Check various service connections
+    const services = [
+        { name: 'AI Core', url: '/api/v1/system/health' },
+        { name: 'OpenSIPS Status', url: '/api/v1/opensips/status' }
+    ];
+    
+    Promise.all(services.map(service => 
+        fetch(service.url)
+            .then(response => ({ service: service.name, status: response.status }))
+            .catch(error => ({ service: service.name, status: 'error', error: error.message }))
+    )).then(results => {
+        const healthyServices = results.filter(r => r.status === 200).length;
+        const totalServices = results.length;
+        
+        if (healthyServices === totalServices) {
+            IVRTestManagement.showToast(`All ${totalServices} services are healthy`, 'success');
+        } else {
+            IVRTestManagement.showToast(`${healthyServices}/${totalServices} services are healthy`, 'warning');
+        }
+    });
+}
+
+function testSipCall() {
+    const modal = new bootstrap.Modal(document.getElementById('testCallModal'));
+    modal.show();
+}
+
+function executeSipTest() {
+    const fromUri = document.getElementById('fromUri').value;
+    const toUri = document.getElementById('toUri').value;
+    const testMessage = document.getElementById('testMessage').value;
+    
+    if (!fromUri || !toUri) {
+        IVRTestManagement.showToast('Please fill in From and To URIs', 'warning');
+        return;
+    }
+    
+    IVRTestManagement.showToast('Starting SIP test call...', 'info');
+    
+    // Mock SIP call test - in real implementation this would trigger an actual SIP call
+    const callData = {
+        caller: fromUri,
+        called: toUri,
+        call_id: 'test_' + Date.now(),
+        method: 'INVITE',
+        timestamp: new Date().toISOString(),
+        message: testMessage
+    };
+    
+    fetch('/api/v1/opensips/call/start', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(callData)
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.action === 'accept') {
+            IVRTestManagement.showToast('Test call accepted for IVR processing', 'success');
+            
+            // Add to call history table
+            addCallToHistory(callData, 'Accepted');
+        } else {
+            IVRTestManagement.showToast('Test call was rejected: ' + (data.error || 'Unknown error'), 'error');
+        }
+        
+        // Close modal
+        bootstrap.Modal.getInstance(document.getElementById('testCallModal')).hide();
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        IVRTestManagement.showToast('Failed to execute test call', 'error');
+    });
+}
+
+function addCallToHistory(callData, status) {
+    const table = document.getElementById('callHistoryTable');
+    
+    // Remove "no calls" message if it exists
+    if (table.children.length === 1 && table.children[0].children.length === 1 && table.children[0].children[0].colSpan === 6) {
+        table.innerHTML = '';
+    }
+    
+    const row = table.insertRow(0); // Add to top
+    const statusClass = status === 'Accepted' ? 'success' : status === 'Rejected' ? 'danger' : 'secondary';
+    
+    row.innerHTML = `
+        <td>${new Date(callData.timestamp).toLocaleTimeString()}</td>
+        <td><code>${callData.call_id}</code></td>
+        <td>${callData.caller}</td>
+        <td>${callData.called}</td>
+        <td><span class="badge bg-${statusClass}">${status}</span></td>
+        <td>
+            <button class="btn btn-outline-info btn-sm" onclick="viewCallDetails('${callData.call_id}')">
+                <i class="fas fa-eye"></i>
+            </button>
+        </td>
+    `;
+    
+    // Keep only last 10 calls
+    while (table.children.length > 10) {
+        table.removeChild(table.lastChild);
+    }
+}
+
+function viewCallDetails(callId) {
+    IVRTestManagement.showToast(`Viewing details for call: ${callId}`, 'info');
+    // In real implementation, would fetch and display call details
+}
+
+function viewLogs() {
+    IVRTestManagement.showToast('Log viewing feature coming soon...', 'info');
+    // In real implementation, would show OpenSIPS logs
+}
+
+// Cleanup on page unload
+window.addEventListener('beforeunload', function() {
+    if (statusInterval) {
+        clearInterval(statusInterval);
+    }
+});
+</script>
+{% endblock %}

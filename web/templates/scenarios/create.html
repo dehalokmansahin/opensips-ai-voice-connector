@@ -1,0 +1,583 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1><i class="fas fa-plus me-2"></i>Create Test Scenario</h1>
+            <a href="/scenarios" class="btn btn-outline-secondary">
+                <i class="fas fa-arrow-left me-2"></i>Back to Scenarios
+            </a>
+        </div>
+    </div>
+</div>
+
+<form method="POST" action="/scenarios/create" id="scenarioForm">
+    <div class="row">
+        <!-- Basic Information -->
+        <div class="col-lg-8">
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h5 class="card-title mb-0">
+                        <i class="fas fa-info-circle me-2"></i>Basic Information
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-8">
+                            <div class="mb-3">
+                                <label for="name" class="form-label">Scenario Name <span class="text-danger">*</span></label>
+                                <input type="text" class="form-control" id="name" name="name" required 
+                                       placeholder="e.g., Turkish Banking Balance Inquiry Test">
+                                <div class="form-text">Give your test scenario a descriptive name</div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="mb-3">
+                                <label for="timeout_seconds" class="form-label">Timeout (seconds)</label>
+                                <input type="number" class="form-control" id="timeout_seconds" name="timeout_seconds" 
+                                       value="300" min="30" max="1800">
+                                <div class="form-text">Maximum test duration</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="description" class="form-label">Description</label>
+                        <textarea class="form-control" id="description" name="description" rows="3" 
+                                  placeholder="Describe what this test scenario validates..."></textarea>
+                        <div class="form-text">Optional description of the test scenario purpose</div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="target_phone" class="form-label">Target Phone Number <span class="text-danger">*</span></label>
+                        <input type="tel" class="form-control" id="target_phone" name="target_phone" required 
+                               placeholder="+908502200200" pattern="^\+[1-9]\d{10,14}$">
+                        <div class="form-text">IVR system phone number to test (international format)</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Quick Templates -->
+        <div class="col-lg-4">
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h5 class="card-title mb-0">
+                        <i class="fas fa-magic me-2"></i>Quick Templates
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <div class="d-grid gap-2">
+                        <button type="button" class="btn btn-outline-primary" onclick="loadTemplate('balance_inquiry')">
+                            <i class="fas fa-wallet me-2"></i>Balance Inquiry
+                        </button>
+                        <button type="button" class="btn btn-outline-success" onclick="loadTemplate('credit_card')">
+                            <i class="fas fa-credit-card me-2"></i>Credit Card Info
+                        </button>
+                        <button type="button" class="btn btn-outline-info" onclick="loadTemplate('customer_service')">
+                            <i class="fas fa-headset me-2"></i>Customer Service
+                        </button>
+                        <button type="button" class="btn btn-outline-warning" onclick="loadTemplate('transfer')">
+                            <i class="fas fa-exchange-alt me-2"></i>Money Transfer
+                        </button>
+                    </div>
+                    <hr>
+                    <div class="form-text">
+                        <small><i class="fas fa-lightbulb me-1"></i>Use templates to quickly set up common Turkish banking IVR test scenarios</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Test Steps -->
+    <div class="row">
+        <div class="col-12">
+            <div class="card mb-4">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="card-title mb-0">
+                        <i class="fas fa-list-ol me-2"></i>Test Steps
+                    </h5>
+                    <button type="button" class="btn btn-primary btn-sm" onclick="addStep()">
+                        <i class="fas fa-plus me-2"></i>Add Step
+                    </button>
+                </div>
+                <div class="card-body">
+                    <div id="stepsContainer">
+                        <!-- Steps will be added here dynamically -->
+                    </div>
+                    
+                    <div id="emptyStepsMessage" class="text-center py-4 text-muted">
+                        <i class="fas fa-plus-circle fa-2x mb-2"></i>
+                        <p>No test steps added yet. Click "Add Step" to create your first test step.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Hidden input for steps data -->
+    <input type="hidden" id="steps_data" name="steps_data" value="[]">
+    
+    <!-- Submit Buttons -->
+    <div class="row">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between">
+                        <div>
+                            <button type="button" class="btn btn-outline-info" onclick="previewScenario()">
+                                <i class="fas fa-eye me-2"></i>Preview
+                            </button>
+                        </div>
+                        <div>
+                            <a href="/scenarios" class="btn btn-outline-secondary me-2">
+                                <i class="fas fa-times me-2"></i>Cancel
+                            </a>
+                            <button type="submit" class="btn btn-success">
+                                <i class="fas fa-save me-2"></i>Create Scenario
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</form>
+
+<!-- Step Type Modal -->
+<div class="modal fade" id="stepTypeModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Add Test Step</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p>Choose the type of test step to add:</p>
+                <div class="d-grid gap-2">
+                    <button type="button" class="btn btn-outline-primary" onclick="createStep('tts')">
+                        <i class="fas fa-volume-up me-2"></i><strong>Text-to-Speech (TTS)</strong>
+                        <br><small class="text-muted">Send spoken message to IVR</small>
+                    </button>
+                    <button type="button" class="btn btn-outline-success" onclick="createStep('dtmf')">
+                        <i class="fas fa-phone-square me-2"></i><strong>DTMF Tones</strong>
+                        <br><small class="text-muted">Send keypad tones (1, 2, 3, etc.)</small>
+                    </button>
+                    <button type="button" class="btn btn-outline-info" onclick="createStep('asr')">
+                        <i class="fas fa-microphone me-2"></i><strong>Speech Recognition (ASR)</strong>
+                        <br><small class="text-muted">Listen and transcribe IVR response</small>
+                    </button>
+                    <button type="button" class="btn btn-outline-warning" onclick="createStep('intent')">
+                        <i class="fas fa-brain me-2"></i><strong>Intent Validation</strong>
+                        <br><small class="text-muted">Validate expected intent from response</small>
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary" onclick="createStep('wait')">
+                        <i class="fas fa-clock me-2"></i><strong>Wait</strong>
+                        <br><small class="text-muted">Pause for specified duration</small>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Preview Modal -->
+<div class="modal fade" id="previewModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Scenario Preview</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div id="previewContent">
+                    <!-- Preview content will be loaded here -->
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                <button type="button" class="btn btn-primary" onclick="$('#previewModal').modal('hide'); $('#scenarioForm').submit();">
+                    <i class="fas fa-save me-2"></i>Create Scenario
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+let steps = [];
+let stepCounter = 0;
+
+// Template data
+const templates = {
+    balance_inquiry: {
+        name: "Turkish Banking Balance Inquiry Test",
+        description: "Tests balance inquiry flow in Turkish banking IVR system",
+        target_phone: "+908502200200",
+        steps: [
+            { type: 'wait', duration: 2, description: 'Wait for IVR greeting' },
+            { type: 'tts', text: 'hesap bakiyemi öğrenmek istiyorum', description: 'Request balance inquiry' },
+            { type: 'asr', duration: 5, description: 'Listen for IVR response' },
+            { type: 'intent', expected_intent: 'hesap_bakiye_sorgulama', threshold: 0.8, description: 'Validate balance inquiry intent' }
+        ]
+    },
+    credit_card: {
+        name: "Credit Card Information Test",
+        description: "Tests credit card information request flow",
+        target_phone: "+908502200200",
+        steps: [
+            { type: 'wait', duration: 2, description: 'Wait for IVR greeting' },
+            { type: 'tts', text: 'kredi kartı bilgilerimi almak istiyorum', description: 'Request credit card info' },
+            { type: 'asr', duration: 5, description: 'Listen for IVR response' },
+            { type: 'intent', expected_intent: 'kredi_karti_bilgi', threshold: 0.8, description: 'Validate credit card intent' }
+        ]
+    },
+    customer_service: {
+        name: "Customer Service Transfer Test",
+        description: "Tests customer service representative transfer flow",
+        target_phone: "+908502200200",
+        steps: [
+            { type: 'wait', duration: 2, description: 'Wait for IVR greeting' },
+            { type: 'tts', text: 'müşteri temsilcisi ile konuşmak istiyorum', description: 'Request customer service' },
+            { type: 'asr', duration: 5, description: 'Listen for transfer response' },
+            { type: 'intent', expected_intent: 'musteri_hizmetleri', threshold: 0.75, description: 'Validate customer service intent' }
+        ]
+    },
+    transfer: {
+        name: "Money Transfer Test",
+        description: "Tests money transfer initiation flow",
+        target_phone: "+908502200200",
+        steps: [
+            { type: 'wait', duration: 2, description: 'Wait for IVR greeting' },
+            { type: 'tts', text: 'para transferi yapmak istiyorum', description: 'Request money transfer' },
+            { type: 'asr', duration: 5, description: 'Listen for IVR response' },
+            { type: 'intent', expected_intent: 'para_transferi', threshold: 0.8, description: 'Validate transfer intent' }
+        ]
+    }
+};
+
+function loadTemplate(templateKey) {
+    const template = templates[templateKey];
+    if (!template) return;
+    
+    document.getElementById('name').value = template.name;
+    document.getElementById('description').value = template.description;
+    document.getElementById('target_phone').value = template.target_phone;
+    
+    steps = template.steps.map((step, index) => ({
+        id: ++stepCounter,
+        ...step
+    }));
+    
+    renderSteps();
+}
+
+function addStep() {
+    const modal = new bootstrap.Modal(document.getElementById('stepTypeModal'));
+    modal.show();
+}
+
+function createStep(type) {
+    const stepId = ++stepCounter;
+    let step = { id: stepId, type: type };
+    
+    switch (type) {
+        case 'tts':
+            step = { ...step, text: '', description: 'Send text message to IVR' };
+            break;
+        case 'dtmf':
+            step = { ...step, tones: '', description: 'Send DTMF tones' };
+            break;
+        case 'asr':
+            step = { ...step, duration: 5, description: 'Listen and transcribe IVR response' };
+            break;
+        case 'intent':
+            step = { ...step, expected_intent: '', threshold: 0.8, description: 'Validate expected intent' };
+            break;
+        case 'wait':
+            step = { ...step, duration: 2, description: 'Wait for specified duration' };
+            break;
+    }
+    
+    steps.push(step);
+    renderSteps();
+    
+    // Close modal
+    bootstrap.Modal.getInstance(document.getElementById('stepTypeModal')).hide();
+}
+
+function removeStep(stepId) {
+    steps = steps.filter(step => step.id !== stepId);
+    renderSteps();
+}
+
+function moveStep(stepId, direction) {
+    const index = steps.findIndex(step => step.id === stepId);
+    if (index === -1) return;
+    
+    if (direction === 'up' && index > 0) {
+        [steps[index], steps[index - 1]] = [steps[index - 1], steps[index]];
+    } else if (direction === 'down' && index < steps.length - 1) {
+        [steps[index], steps[index + 1]] = [steps[index + 1], steps[index]];
+    }
+    
+    renderSteps();
+}
+
+function renderSteps() {
+    const container = document.getElementById('stepsContainer');
+    const emptyMessage = document.getElementById('emptyStepsMessage');
+    
+    if (steps.length === 0) {
+        container.innerHTML = '';
+        emptyMessage.style.display = 'block';
+        return;
+    }
+    
+    emptyMessage.style.display = 'none';
+    
+    container.innerHTML = steps.map((step, index) => {
+        return createStepHTML(step, index);
+    }).join('');
+    
+    // Update hidden input
+    document.getElementById('steps_data').value = JSON.stringify(steps);
+}
+
+function createStepHTML(step, index) {
+    const stepNumber = index + 1;
+    let stepIcon = '';
+    let stepColor = '';
+    let stepContent = '';
+    
+    switch (step.type) {
+        case 'tts':
+            stepIcon = 'fas fa-volume-up';
+            stepColor = 'primary';
+            stepContent = `
+                <div class="row">
+                    <div class="col-md-8">
+                        <label class="form-label">Text to Speak</label>
+                        <input type="text" class="form-control" value="${step.text || ''}" 
+                               onchange="updateStep(${step.id}, 'text', this.value)" 
+                               placeholder="Enter text to convert to speech">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Description</label>
+                        <input type="text" class="form-control" value="${step.description || ''}" 
+                               onchange="updateStep(${step.id}, 'description', this.value)" 
+                               placeholder="Step description">
+                    </div>
+                </div>
+            `;
+            break;
+        case 'dtmf':
+            stepIcon = 'fas fa-phone-square';
+            stepColor = 'success';
+            stepContent = `
+                <div class="row">
+                    <div class="col-md-4">
+                        <label class="form-label">DTMF Tones</label>
+                        <input type="text" class="form-control" value="${step.tones || ''}" 
+                               onchange="updateStep(${step.id}, 'tones', this.value)" 
+                               placeholder="e.g., 1, 2, *, #" pattern="[0-9*#,\\s]+">
+                    </div>
+                    <div class="col-md-8">
+                        <label class="form-label">Description</label>
+                        <input type="text" class="form-control" value="${step.description || ''}" 
+                               onchange="updateStep(${step.id}, 'description', this.value)" 
+                               placeholder="Step description">
+                    </div>
+                </div>
+            `;
+            break;
+        case 'asr':
+            stepIcon = 'fas fa-microphone';
+            stepColor = 'info';
+            stepContent = `
+                <div class="row">
+                    <div class="col-md-4">
+                        <label class="form-label">Listen Duration (seconds)</label>
+                        <input type="number" class="form-control" value="${step.duration || 5}" 
+                               onchange="updateStep(${step.id}, 'duration', parseInt(this.value))" 
+                               min="1" max="30">
+                    </div>
+                    <div class="col-md-8">
+                        <label class="form-label">Description</label>
+                        <input type="text" class="form-control" value="${step.description || ''}" 
+                               onchange="updateStep(${step.id}, 'description', this.value)" 
+                               placeholder="Step description">
+                    </div>
+                </div>
+            `;
+            break;
+        case 'intent':
+            stepIcon = 'fas fa-brain';
+            stepColor = 'warning';
+            stepContent = `
+                <div class="row">
+                    <div class="col-md-4">
+                        <label class="form-label">Expected Intent</label>
+                        <select class="form-select" onchange="updateStep(${step.id}, 'expected_intent', this.value)">
+                            <option value="">Select Intent</option>
+                            <option value="hesap_bakiye_sorgulama" ${step.expected_intent === 'hesap_bakiye_sorgulama' ? 'selected' : ''}>Balance Inquiry</option>
+                            <option value="kredi_karti_bilgi" ${step.expected_intent === 'kredi_karti_bilgi' ? 'selected' : ''}>Credit Card Info</option>
+                            <option value="musteri_hizmetleri" ${step.expected_intent === 'musteri_hizmetleri' ? 'selected' : ''}>Customer Service</option>
+                            <option value="para_transferi" ${step.expected_intent === 'para_transferi' ? 'selected' : ''}>Money Transfer</option>
+                            <option value="bilinmeyen" ${step.expected_intent === 'bilinmeyen' ? 'selected' : ''}>Unknown</option>
+                        </select>
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label">Threshold</label>
+                        <input type="number" class="form-control" value="${step.threshold || 0.8}" 
+                               onchange="updateStep(${step.id}, 'threshold', parseFloat(this.value))" 
+                               min="0.1" max="1" step="0.1">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Description</label>
+                        <input type="text" class="form-control" value="${step.description || ''}" 
+                               onchange="updateStep(${step.id}, 'description', this.value)" 
+                               placeholder="Step description">
+                    </div>
+                </div>
+            `;
+            break;
+        case 'wait':
+            stepIcon = 'fas fa-clock';
+            stepColor = 'secondary';
+            stepContent = `
+                <div class="row">
+                    <div class="col-md-4">
+                        <label class="form-label">Wait Duration (seconds)</label>
+                        <input type="number" class="form-control" value="${step.duration || 2}" 
+                               onchange="updateStep(${step.id}, 'duration', parseInt(this.value))" 
+                               min="1" max="60">
+                    </div>
+                    <div class="col-md-8">
+                        <label class="form-label">Description</label>
+                        <input type="text" class="form-control" value="${step.description || ''}" 
+                               onchange="updateStep(${step.id}, 'description', this.value)" 
+                               placeholder="Step description">
+                    </div>
+                </div>
+            `;
+            break;
+    }
+    
+    return `
+        <div class="card mb-3" id="step-${step.id}">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <div>
+                    <span class="badge bg-${stepColor} me-2">${stepNumber}</span>
+                    <i class="${stepIcon} me-2"></i>
+                    <strong>${step.type.toUpperCase()}</strong>
+                    ${step.description ? ` - ${step.description}` : ''}
+                </div>
+                <div class="btn-group btn-group-sm">
+                    <button type="button" class="btn btn-outline-secondary" onclick="moveStep(${step.id}, 'up')" 
+                            ${index === 0 ? 'disabled' : ''} title="Move Up">
+                        <i class="fas fa-arrow-up"></i>
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary" onclick="moveStep(${step.id}, 'down')" 
+                            ${index === steps.length - 1 ? 'disabled' : ''} title="Move Down">
+                        <i class="fas fa-arrow-down"></i>
+                    </button>
+                    <button type="button" class="btn btn-outline-danger" onclick="removeStep(${step.id})" title="Remove">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="card-body">
+                ${stepContent}
+            </div>
+        </div>
+    `;
+}
+
+function updateStep(stepId, field, value) {
+    const step = steps.find(s => s.id === stepId);
+    if (step) {
+        step[field] = value;
+        document.getElementById('steps_data').value = JSON.stringify(steps);
+    }
+}
+
+function previewScenario() {
+    const formData = new FormData(document.getElementById('scenarioForm'));
+    const preview = {
+        name: formData.get('name'),
+        description: formData.get('description'),
+        target_phone: formData.get('target_phone'),
+        timeout_seconds: formData.get('timeout_seconds'),
+        steps: steps
+    };
+    
+    const previewContent = `
+        <div class="row">
+            <div class="col-md-6">
+                <h6>Basic Information</h6>
+                <table class="table table-sm">
+                    <tr><th>Name:</th><td>${preview.name}</td></tr>
+                    <tr><th>Target Phone:</th><td><code>${preview.target_phone}</code></td></tr>
+                    <tr><th>Timeout:</th><td>${preview.timeout_seconds} seconds</td></tr>
+                    <tr><th>Description:</th><td>${preview.description || '<em>No description</em>'}</td></tr>
+                </table>
+            </div>
+            <div class="col-md-6">
+                <h6>Test Steps (${steps.length})</h6>
+                <ol class="list-group list-group-numbered">
+                    ${steps.map(step => `
+                        <li class="list-group-item d-flex justify-content-between align-items-start">
+                            <div class="ms-2 me-auto">
+                                <div class="fw-bold">${step.type.toUpperCase()}</div>
+                                ${step.description || 'No description'}
+                            </div>
+                            <span class="badge bg-primary rounded-pill">${step.type}</span>
+                        </li>
+                    `).join('')}
+                </ol>
+            </div>
+        </div>
+    `;
+    
+    document.getElementById('previewContent').innerHTML = previewContent;
+    const modal = new bootstrap.Modal(document.getElementById('previewModal'));
+    modal.show();
+}
+
+// Form validation
+document.getElementById('scenarioForm').addEventListener('submit', function(e) {
+    const name = document.getElementById('name').value.trim();
+    const targetPhone = document.getElementById('target_phone').value.trim();
+    
+    if (!name) {
+        alert('Please enter a scenario name');
+        e.preventDefault();
+        return;
+    }
+    
+    if (!targetPhone) {
+        alert('Please enter a target phone number');
+        e.preventDefault();
+        return;
+    }
+    
+    if (steps.length === 0) {
+        if (!confirm('No test steps have been added. Create an empty scenario?')) {
+            e.preventDefault();
+            return;
+        }
+    }
+    
+    // Update steps data before submit
+    document.getElementById('steps_data').value = JSON.stringify(steps);
+});
+
+// Initialize empty state
+renderSteps();
+</script>
+{% endblock %}

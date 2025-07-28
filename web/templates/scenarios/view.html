@@ -1,0 +1,504 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1><i class="fas fa-eye me-2"></i>{{ scenario.name }}</h1>
+            <div class="btn-group">
+                <a href="/scenarios/{{ scenario.id }}/edit" class="btn btn-primary">
+                    <i class="fas fa-edit me-2"></i>Edit
+                </a>
+                <button class="btn btn-success" onclick="executeScenario({{ scenario.id }})">
+                    <i class="fas fa-play me-2"></i>Execute Test
+                </button>
+                <div class="btn-group">
+                    <button class="btn btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown">
+                        <i class="fas fa-ellipsis-h"></i>
+                    </button>
+                    <ul class="dropdown-menu">
+                        <li>
+                            <form method="POST" action="/scenarios/{{ scenario.id }}/duplicate" class="d-inline">
+                                <button type="submit" class="dropdown-item">
+                                    <i class="fas fa-copy me-2"></i>Duplicate
+                                </button>
+                            </form>
+                        </li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li>
+                            <button class="dropdown-item" onclick="exportScenario({{ scenario.id }})">
+                                <i class="fas fa-download me-2"></i>Export JSON
+                            </button>
+                        </li>
+                        <li>
+                            <button class="dropdown-item" onclick="copyScenarioURL()">
+                                <i class="fas fa-link me-2"></i>Copy URL
+                            </button>
+                        </li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li>
+                            <button class="dropdown-item text-danger" onclick="deleteScenario({{ scenario.id }}, '{{ scenario.name }}')">
+                                <i class="fas fa-trash me-2"></i>Delete
+                            </button>
+                        </li>
+                    </ul>
+                </div>
+                <a href="/scenarios" class="btn btn-outline-secondary">
+                    <i class="fas fa-arrow-left me-2"></i>Back to List
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Scenario Overview -->
+<div class="row mb-4">
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-info-circle me-2"></i>Scenario Details
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-sm-3"><strong>Name:</strong></div>
+                    <div class="col-sm-9">{{ scenario.name }}</div>
+                </div>
+                <hr>
+                <div class="row">
+                    <div class="col-sm-3"><strong>Description:</strong></div>
+                    <div class="col-sm-9">
+                        {% if scenario.description %}
+                            {{ scenario.description }}
+                        {% else %}
+                            <em class="text-muted">No description provided</em>
+                        {% endif %}
+                    </div>
+                </div>
+                <hr>
+                <div class="row">
+                    <div class="col-sm-3"><strong>Target Phone:</strong></div>
+                    <div class="col-sm-9">
+                        <code class="text-primary">{{ scenario.target_phone }}</code>
+                    </div>
+                </div>
+                <hr>
+                <div class="row">
+                    <div class="col-sm-3"><strong>Timeout:</strong></div>
+                    <div class="col-sm-9">{{ scenario.timeout_seconds }} seconds</div>
+                </div>
+                <hr>
+                <div class="row">
+                    <div class="col-sm-3"><strong>Status:</strong></div>
+                    <div class="col-sm-9">
+                        {% if scenario.status == 'draft' %}
+                            <span class="badge bg-secondary">Draft</span>
+                        {% elif scenario.status == 'active' %}
+                            <span class="badge bg-success">Active</span>
+                        {% elif scenario.status == 'running' %}
+                            <span class="badge bg-primary">Running</span>
+                        {% elif scenario.status == 'completed' %}
+                            <span class="badge bg-info">Completed</span>
+                        {% elif scenario.status == 'failed' %}
+                            <span class="badge bg-danger">Failed</span>
+                        {% else %}
+                            <span class="badge bg-secondary">{{ scenario.status|title }}</span>
+                        {% endif %}
+                    </div>
+                </div>
+                <hr>
+                <div class="row">
+                    <div class="col-sm-3"><strong>Created:</strong></div>
+                    <div class="col-sm-9">
+                        <small class="text-muted">{{ scenario.created_at[:16]|replace('T', ' ') }}</small>
+                    </div>
+                </div>
+                <hr>
+                <div class="row">
+                    <div class="col-sm-3"><strong>Last Updated:</strong></div>
+                    <div class="col-sm-9">
+                        <small class="text-muted">{{ scenario.updated_at[:16]|replace('T', ' ') }}</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-chart-pie me-2"></i>Quick Stats
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="row text-center">
+                    <div class="col-6">
+                        <h3 class="text-primary">{{ scenario.steps|length }}</h3>
+                        <small class="text-muted">Test Steps</small>
+                    </div>
+                    <div class="col-6">
+                        <h3 class="text-info">0</h3>
+                        <small class="text-muted">Executions</small>
+                    </div>
+                </div>
+                <hr>
+                <div class="row text-center">
+                    <div class="col-6">
+                        <h3 class="text-success">0%</h3>
+                        <small class="text-muted">Success Rate</small>
+                    </div>
+                    <div class="col-6">
+                        <h3 class="text-warning">{{ scenario.timeout_seconds }}s</h3>
+                        <small class="text-muted">Max Duration</small>
+                    </div>
+                </div>
+                <hr>
+                <div class="d-grid">
+                    <button class="btn btn-outline-primary" onclick="showExecutionHistory({{ scenario.id }})">
+                        <i class="fas fa-history me-2"></i>View History
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Test Steps -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-list-ol me-2"></i>Test Steps ({{ scenario.steps|length }})
+                </h5>
+                <div>
+                    {% if scenario.steps|length > 0 %}
+                    <button class="btn btn-outline-info btn-sm" onclick="validateSteps()">
+                        <i class="fas fa-check-double me-2"></i>Validate Steps
+                    </button>
+                    <button class="btn btn-outline-success btn-sm" onclick="executeScenario({{ scenario.id }})">
+                        <i class="fas fa-play me-2"></i>Execute All
+                    </button>
+                    {% endif %}
+                    <a href="/scenarios/{{ scenario.id }}/edit" class="btn btn-primary btn-sm">
+                        <i class="fas fa-edit me-2"></i>Edit Steps
+                    </a>
+                </div>
+            </div>
+            <div class="card-body">
+                {% if scenario.steps %}
+                <div class="steps-timeline">
+                    {% for step in scenario.steps %}
+                    <div class="step-item mb-4" data-step-index="{{ loop.index0 }}">
+                        <div class="card step-card step-{{ step.type }}">
+                            <div class="card-header d-flex justify-content-between align-items-center">
+                                <div class="d-flex align-items-center">
+                                    <span class="step-number bg-{{ 
+                                        'primary' if step.type == 'tts' else
+                                        'success' if step.type == 'dtmf' else
+                                        'info' if step.type == 'asr' else
+                                        'warning' if step.type == 'intent' else
+                                        'secondary'
+                                    }} text-white me-3">{{ loop.index }}</span>
+                                    
+                                    {% if step.type == 'tts' %}
+                                        <i class="fas fa-volume-up text-primary me-2"></i>
+                                        <strong>Text-to-Speech</strong>
+                                    {% elif step.type == 'dtmf' %}
+                                        <i class="fas fa-phone-square text-success me-2"></i>
+                                        <strong>DTMF Tones</strong>
+                                    {% elif step.type == 'asr' %}
+                                        <i class="fas fa-microphone text-info me-2"></i>
+                                        <strong>Speech Recognition</strong>
+                                    {% elif step.type == 'intent' %}
+                                        <i class="fas fa-brain text-warning me-2"></i>
+                                        <strong>Intent Validation</strong>
+                                    {% elif step.type == 'wait' %}
+                                        <i class="fas fa-clock text-secondary me-2"></i>
+                                        <strong>Wait</strong>
+                                    {% endif %}
+                                    
+                                    {% if step.description %}
+                                        <span class="text-muted ms-2">- {{ step.description }}</span>
+                                    {% endif %}
+                                </div>
+                                
+                                <div class="btn-group btn-group-sm">
+                                    <button class="btn btn-outline-primary" onclick="executeStep({{ scenario.id }}, {{ loop.index0 }})" title="Execute This Step">
+                                        <i class="fas fa-play"></i>
+                                    </button>
+                                    <button class="btn btn-outline-info" onclick="validateStep({{ loop.index0 }})" title="Validate Step">
+                                        <i class="fas fa-check"></i>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <div class="row">
+                                    {% if step.type == 'tts' %}
+                                        <div class="col-md-8">
+                                            <strong>Text to Speak:</strong>
+                                            <div class="mt-1">
+                                                <code class="text-primary">{{ step.text or 'No text specified' }}</code>
+                                                {% if step.text %}
+                                                <button class="btn btn-sm btn-outline-secondary ms-2" onclick="copyToClipboard('{{ step.text }}')">
+                                                    <i class="fas fa-copy"></i>
+                                                </button>
+                                                {% endif %}
+                                            </div>
+                                        </div>
+                                        <div class="col-md-4">
+                                            <strong>Duration:</strong>
+                                            <div class="text-muted">~{{ (step.text|length * 0.1)|round(1) if step.text else 0 }}s</div>
+                                        </div>
+                                    
+                                    {% elif step.type == 'dtmf' %}
+                                        <div class="col-md-6">
+                                            <strong>DTMF Tones:</strong>
+                                            <div class="mt-1">
+                                                <code class="text-success">{{ step.tones or 'No tones specified' }}</code>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <strong>Tone Count:</strong>
+                                            <div class="text-muted">{{ step.tones|length if step.tones else 0 }} tones</div>
+                                        </div>
+                                    
+                                    {% elif step.type == 'asr' %}
+                                        <div class="col-md-6">
+                                            <strong>Listen Duration:</strong>
+                                            <div class="mt-1">
+                                                <span class="badge bg-info">{{ step.duration or 5 }} seconds</span>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <strong>Expected Output:</strong>
+                                            <div class="text-muted">Turkish text transcription</div>
+                                        </div>
+                                    
+                                    {% elif step.type == 'intent' %}
+                                        <div class="col-md-4">
+                                            <strong>Expected Intent:</strong>
+                                            <div class="mt-1">
+                                                <span class="badge bg-warning text-dark">{{ step.expected_intent or 'Not specified' }}</span>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-4">
+                                            <strong>Confidence Threshold:</strong>
+                                            <div class="mt-1">
+                                                <span class="badge bg-secondary">{{ step.threshold or 0.8 }}</span>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-4">
+                                            <strong>Validation:</strong>
+                                            <div class="text-muted">Turkish BERT model</div>
+                                        </div>
+                                    
+                                    {% elif step.type == 'wait' %}
+                                        <div class="col-md-6">
+                                            <strong>Wait Duration:</strong>
+                                            <div class="mt-1">
+                                                <span class="badge bg-secondary">{{ step.duration or 2 }} seconds</span>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <strong>Purpose:</strong>
+                                            <div class="text-muted">Pause execution</div>
+                                        </div>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                
+                <!-- Step Summary -->
+                <div class="card bg-light mt-4">
+                    <div class="card-body">
+                        <h6 class="card-title">
+                            <i class="fas fa-chart-bar me-2"></i>Step Summary
+                        </h6>
+                        <div class="row text-center">
+                            {% set tts_steps = scenario.steps|selectattr("type", "equalto", "tts")|list %}
+                            {% set dtmf_steps = scenario.steps|selectattr("type", "equalto", "dtmf")|list %}
+                            {% set asr_steps = scenario.steps|selectattr("type", "equalto", "asr")|list %}
+                            {% set intent_steps = scenario.steps|selectattr("type", "equalto", "intent")|list %}
+                            {% set wait_steps = scenario.steps|selectattr("type", "equalto", "wait")|list %}
+                            
+                            <div class="col">
+                                <div class="text-primary"><strong>{{ tts_steps|length }}</strong></div>
+                                <small class="text-muted">TTS Steps</small>
+                            </div>
+                            <div class="col">
+                                <div class="text-success"><strong>{{ dtmf_steps|length }}</strong></div>
+                                <small class="text-muted">DTMF Steps</small>
+                            </div>
+                            <div class="col">
+                                <div class="text-info"><strong>{{ asr_steps|length }}</strong></div>
+                                <small class="text-muted">ASR Steps</small>
+                            </div>
+                            <div class="col">
+                                <div class="text-warning"><strong>{{ intent_steps|length }}</strong></div>
+                                <small class="text-muted">Intent Steps</small>
+                            </div>
+                            <div class="col">
+                                <div class="text-secondary"><strong>{{ wait_steps|length }}</strong></div>
+                                <small class="text-muted">Wait Steps</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                {% else %}
+                <!-- Empty State -->
+                <div class="text-center py-5">
+                    <i class="fas fa-list-ol fa-3x text-muted mb-3"></i>
+                    <h5 class="text-muted">No Test Steps</h5>
+                    <p class="text-muted">This scenario doesn't have any test steps yet.</p>
+                    <a href="/scenarios/{{ scenario.id }}/edit" class="btn btn-primary">
+                        <i class="fas fa-plus me-2"></i>Add Test Steps
+                    </a>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Delete Confirmation Modal -->
+<div class="modal fade" id="deleteModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Confirm Delete</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p>Are you sure you want to delete the scenario "<strong>{{ scenario.name }}</strong>"?</p>
+                <p class="text-danger"><small><i class="fas fa-exclamation-triangle me-1"></i>This action cannot be undone.</small></p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <form method="POST" action="/scenarios/{{ scenario.id }}/delete" class="d-inline">
+                    <button type="submit" class="btn btn-danger">
+                        <i class="fas fa-trash me-2"></i>Delete Scenario
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Execution History Modal -->
+<div class="modal fade" id="historyModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Execution History</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div id="historyContent">
+                    <div class="text-center py-4">
+                        <i class="fas fa-history fa-3x text-muted mb-3"></i>
+                        <h5 class="text-muted">No Execution History</h5>
+                        <p class="text-muted">This scenario hasn't been executed yet.</p>
+                        <button class="btn btn-primary" onclick="executeScenario({{ scenario.id }})">
+                            <i class="fas fa-play me-2"></i>Run First Test
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+function executeScenario(scenarioId) {
+    if (confirm('Are you sure you want to execute this test scenario?')) {
+        fetch(`/api/v1/scenarios/${scenarioId}/execute`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'started') {
+                IVRTestManagement.showToast(`Test execution started: ${data.execution_id}`, 'success');
+                // TODO: Redirect to execution monitoring page
+            } else {
+                IVRTestManagement.showToast('Failed to start test execution', 'error');
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            IVRTestManagement.showToast('Failed to execute test scenario', 'error');
+        });
+    }
+}
+
+function executeStep(scenarioId, stepIndex) {
+    IVRTestManagement.showToast(`Executing step ${stepIndex + 1}...`, 'info');
+    // TODO: Implement individual step execution
+}
+
+function validateStep(stepIndex) {
+    IVRTestManagement.showToast(`Validating step ${stepIndex + 1}...`, 'info');
+    // TODO: Implement step validation
+}
+
+function validateSteps() {
+    IVRTestManagement.showToast('Validating all steps...', 'info');
+    // TODO: Implement full step validation
+}
+
+function deleteScenario(scenarioId, scenarioName) {
+    const modal = new bootstrap.Modal(document.getElementById('deleteModal'));
+    modal.show();
+}
+
+function exportScenario(scenarioId) {
+    fetch(`/api/v1/scenarios/${scenarioId}`)
+        .then(response => response.json())
+        .then(data => {
+            const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `scenario_${scenarioId}_${data.name.replace(/[^a-zA-Z0-9]/g, '_')}.json`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+            
+            IVRTestManagement.showToast('Scenario exported successfully', 'success');
+        })
+        .catch(error => {
+            console.error('Export error:', error);
+            IVRTestManagement.showToast('Export failed', 'error');
+        });
+}
+
+function copyScenarioURL() {
+    const url = window.location.href;
+    IVRTestManagement.copyToClipboard(url);
+}
+
+function showExecutionHistory(scenarioId) {
+    const modal = new bootstrap.Modal(document.getElementById('historyModal'));
+    modal.show();
+    
+    // TODO: Load actual execution history
+    // fetch(`/api/v1/scenarios/${scenarioId}/executions`)
+    //     .then(response => response.json())
+    //     .then(data => {
+    //         // Update modal content with execution history
+    //     });
+}
+</script>
+{% endblock %}

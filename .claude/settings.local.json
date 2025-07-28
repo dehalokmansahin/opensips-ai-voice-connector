@@ -41,7 +41,10 @@
       "Bash(/dev/null)",
       "Bash(move intent_grpc_server.py intent_rest_server.py)",
       "Bash(mv:*)",
-      "Bash(PYTHONPATH=/app/core docker-compose -f docker-compose.yml up -d intent-service)"
+      "Bash(PYTHONPATH=/app/core docker-compose -f docker-compose.yml up -d intent-service)",
+      "Bash(for file in core/grpc_clients/*_pb2.py)",
+      "Bash(do sed -i 's/from google.protobuf import runtime_version.*//g' \"$file\")",
+      "Bash(done)"
     ],
     "deny": []
   }

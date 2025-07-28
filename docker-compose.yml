@@ -116,6 +116,71 @@ services:
     networks:
       - opensips-ai-network
 
+  # Web Interface - IVR Test Management Dashboard
+  web-interface:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: opensips-web-interface
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+      - INTENT_SERVICE_URL=intent-service:5000
+      - TEST_CONTROLLER_URL=test-controller-service:50055
+      - ASR_SERVICE_URL=asr-service:50051
+      - TTS_SERVICE_URL=tts-service:50053
+      - OPENSIPS_CORE_URL=http://opensips-ai-core:8080
+    volumes:
+      - ./data/test_controller:/app/data/test_controller
+      - ./logs:/app/logs:rw
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/system/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    depends_on:
+      - intent-service
+      - test-controller-service
+    networks:
+      - opensips-ai-network
+
+  # OpenSIPS SIP Server
+  opensips:
+    image: opensips/opensips:3.6
+    container_name: opensips-server
+    ports:
+      - "5060:5060/udp"    # SIP signaling
+      - "5060:5060/tcp"    # SIP over TCP
+      - "8888:8888"        # HTTP Management Interface
+      - "10000-10100:10000-10100/udp"  # RTP media range
+    environment:
+      - OPENSIPS_CLI=true
+      - OPENSIPS_GENERATE_TLS_CERT=no
+    volumes:
+      - ./config/opensips/opensips.cfg:/usr/local/etc/opensips/opensips.cfg:ro
+      - ./logs:/var/log/opensips:rw
+    depends_on:
+      asr-service:
+        condition: service_healthy
+      intent-service:
+        condition: service_healthy
+    networks:
+      opensips-ai-network:
+        ipv4_address: 172.20.0.10
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "opensipsctl", "fifo", "get_statistics", "core:"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
   # Core Application
   opensips-ai-core:
     build:
@@ -124,8 +189,6 @@ services:
     container_name: opensips-ai-core
     ports:
       - "8080:8080"  # HTTP management interface
-      - "5060:5060/udp"  # SIP
-      - "10000-10100:10000-10100/udp"  # RTP range
     environment:
       - CORE_LOG_LEVEL=INFO
       - ASR_SERVICE_URL=asr-service:50051

@@ -13,7 +13,7 @@ from grpc import aio as aio_grpc
 
 # Import generated protobuf code
 try:
-    from . import intent_service_pb2, intent_service_pb2_grpc
+    from ..grpc_clients import intent_service_pb2, intent_service_pb2_grpc
 except ImportError:
     # Fallback for testing
     import sys

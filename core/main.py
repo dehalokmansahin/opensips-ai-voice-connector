@@ -22,6 +22,8 @@ from bot.pipeline_manager import PipelineManager
 from grpc_clients.service_registry import ServiceRegistry
 from utils.logging import setup_logging, get_development_logger
 from utils.file_watcher import setup_hot_reload
+import uvicorn
+from api_server import app, set_connector
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +196,20 @@ class OpenSIPSAIVoiceConnector:
             # Setup hot-reload in development mode
             if self.development_mode:
                 self._setup_hot_reload()
+            
+            # Set connector reference for API server
+            set_connector(self)
+            
+            # Start HTTP API server in background
+            config = uvicorn.Config(
+                app,
+                host="0.0.0.0",
+                port=8080,
+                log_level="info"
+            )
+            server = uvicorn.Server(config)
+            asyncio.create_task(server.serve())
+            logger.info("HTTP API server started on port 8080")
             
             # Start OpenSIPS integration
             await self.opensips_integration.start()

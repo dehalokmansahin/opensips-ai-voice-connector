@@ -1,0 +1,287 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1><i class="fas fa-tachometer-alt me-2"></i>Dashboard</h1>
+            <div class="badge badge-lg {% if system_status.overall == 'healthy' %}bg-success{% elif system_status.overall == 'partial' %}bg-warning{% else %}bg-danger{% endif %}">
+                System: {{ system_status.overall|title }}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- System Overview Cards -->
+<div class="row mb-4">
+    <div class="col-md-3">
+        <div class="card bg-primary text-white">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h4 class="card-title">{{ total_scenarios }}</h4>
+                        <p class="card-text">Total Scenarios</p>
+                    </div>
+                    <div class="align-self-center">
+                        <i class="fas fa-list-alt fa-2x"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-3">
+        <div class="card bg-success text-white">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h4 class="card-title">{{ system_status.services|length }}</h4>
+                        <p class="card-text">Services</p>
+                    </div>
+                    <div class="align-self-center">
+                        <i class="fas fa-server fa-2x"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-3">
+        <div class="card bg-info text-white">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h4 class="card-title">0</h4>
+                        <p class="card-text">Running Tests</p>
+                    </div>
+                    <div class="align-self-center">
+                        <i class="fas fa-play fa-2x"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-3">
+        <div class="card bg-warning text-white">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h4 class="card-title">Turkish</h4>
+                        <p class="card-text">Banking IVR</p>
+                    </div>
+                    <div class="align-self-center">
+                        <i class="fas fa-phone fa-2x"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- System Status -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-heart-pulse me-2"></i>System Health
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    {% for service_name, service_info in system_status.services.items() %}
+                    <div class="col-md-4 mb-3">
+                        <div class="d-flex align-items-center">
+                            <div class="me-3">
+                                {% if service_info.status == 'healthy' %}
+                                    <i class="fas fa-check-circle text-success fa-2x"></i>
+                                {% elif service_info.status == 'unhealthy' %}
+                                    <i class="fas fa-exclamation-triangle text-warning fa-2x"></i>
+                                {% else %}
+                                    <i class="fas fa-times-circle text-danger fa-2x"></i>
+                                {% endif %}
+                            </div>
+                            <div>
+                                <h6 class="mb-1">{{ service_name|title|replace('_', ' ') }}</h6>
+                                <small class="text-muted">
+                                    Status: <span class="fw-bold">{{ service_info.status|title }}</span>
+                                    {% if service_info.response_time %}
+                                        <br>Response: {{ service_info.response_time }}
+                                    {% endif %}
+                                    {% if service_info.error %}
+                                        <br><span class="text-danger">{{ service_info.error }}</span>
+                                    {% endif %}
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Recent Scenarios -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-clock me-2"></i>Recent Test Scenarios
+                </h5>
+                <a href="/scenarios" class="btn btn-sm btn-outline-primary">View All</a>
+            </div>
+            <div class="card-body">
+                {% if recent_scenarios %}
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Target Phone</th>
+                                <th>Steps</th>
+                                <th>Status</th>
+                                <th>Updated</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for scenario in recent_scenarios %}
+                            <tr>
+                                <td>
+                                    <strong>{{ scenario.name }}</strong>
+                                    {% if scenario.description %}
+                                        <br><small class="text-muted">{{ scenario.description[:50] }}{% if scenario.description|length > 50 %}...{% endif %}</small>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    <code>{{ scenario.target_phone }}</code>
+                                </td>
+                                <td>
+                                    <span class="badge bg-secondary">{{ scenario.steps|length }} steps</span>
+                                </td>
+                                <td>
+                                    {% if scenario.status == 'draft' %}
+                                        <span class="badge bg-secondary">Draft</span>
+                                    {% elif scenario.status == 'active' %}
+                                        <span class="badge bg-success">Active</span>
+                                    {% elif scenario.status == 'running' %}
+                                        <span class="badge bg-primary">Running</span>
+                                    {% else %}
+                                        <span class="badge bg-secondary">{{ scenario.status|title }}</span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    <small class="text-muted">
+                                        {{ scenario.updated_at[:16]|replace('T', ' ') }}
+                                    </small>
+                                </td>
+                                <td>
+                                    <div class="btn-group btn-group-sm">
+                                        <a href="/scenarios/{{ scenario.id }}" class="btn btn-outline-primary" title="View">
+                                            <i class="fas fa-eye"></i>
+                                        </a>
+                                        <a href="/scenarios/{{ scenario.id }}/edit" class="btn btn-outline-secondary" title="Edit">
+                                            <i class="fas fa-edit"></i>
+                                        </a>
+                                        <button class="btn btn-outline-success" onclick="executeScenario({{ scenario.id }})" title="Run Test">
+                                            <i class="fas fa-play"></i>
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <div class="text-center py-4">
+                    <i class="fas fa-plus-circle fa-3x text-muted mb-3"></i>
+                    <h5 class="text-muted">No test scenarios yet</h5>
+                    <p class="text-muted">Create your first IVR test scenario to get started</p>
+                    <a href="/scenarios/create" class="btn btn-primary">
+                        <i class="fas fa-plus me-2"></i>Create Test Scenario
+                    </a>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Quick Actions -->
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-bolt me-2"></i>Quick Actions
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="d-grid gap-2 d-md-flex">
+                    <a href="/scenarios/create" class="btn btn-primary">
+                        <i class="fas fa-plus me-2"></i>Create New Test Scenario
+                    </a>
+                    <a href="/scenarios" class="btn btn-outline-primary">
+                        <i class="fas fa-list me-2"></i>Manage All Scenarios
+                    </a>
+                    <a href="/api/v1/system/health" target="_blank" class="btn btn-outline-info">
+                        <i class="fas fa-stethoscope me-2"></i>System Health Check
+                    </a>
+                    <button class="btn btn-outline-secondary" onclick="refreshSystemStatus()">
+                        <i class="fas fa-sync me-2"></i>Refresh Status
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+function executeScenario(scenarioId) {
+    if (confirm('Are you sure you want to execute this test scenario?')) {
+        fetch(`/api/v1/scenarios/${scenarioId}/execute`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'started') {
+                alert(`Test execution started: ${data.execution_id}`);
+                // TODO: Redirect to execution monitoring page
+            } else {
+                alert('Failed to start test execution');
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('Failed to execute test scenario');
+        });
+    }
+}
+
+function refreshSystemStatus() {
+    location.reload();
+}
+
+// Auto-refresh system status every 30 seconds
+setInterval(function() {
+    fetch('/api/v1/system/health')
+        .then(response => response.json())
+        .then(data => {
+            // Update system status badge
+            const badge = document.querySelector('.badge-lg');
+            badge.className = `badge badge-lg ${data.overall === 'healthy' ? 'bg-success' : data.overall === 'partial' ? 'bg-warning' : 'bg-danger'}`;
+            badge.textContent = `System: ${data.overall.charAt(0).toUpperCase() + data.overall.slice(1)}`;
+        })
+        .catch(error => console.error('Status refresh error:', error));
+}, 30000);
+</script>
+{% endblock %}

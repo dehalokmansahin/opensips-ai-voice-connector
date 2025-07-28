@@ -19,6 +19,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy core application
 COPY core/ /app/core/
 COPY config/ /app/config/
+# Copy protobuf files from both locations to ensure availability
+COPY shared/proto_generated/*.py /app/core/grpc_clients/
+COPY core/grpc_clients/*.py /app/core/grpc_clients/
 
 # Create logs directory
 RUN mkdir -p /app/logs

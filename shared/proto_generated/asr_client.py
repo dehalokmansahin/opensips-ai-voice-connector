@@ -12,9 +12,9 @@ from grpc import aio as aio_grpc
 
 # Import protobuf stubs (first try local grpc_clients directory)
 try:
-    # Try to import from local grpc_clients directory  
-    from . import asr_service_pb2
-    from . import asr_service_pb2_grpc
+    # Try to import from local grpc_clients directory
+    import asr_service_pb2
+    import asr_service_pb2_grpc
 except ImportError:
     try:
         # Fallback: Try to import from services directory

@@ -1,0 +1,402 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1><i class="fas fa-list-alt me-2"></i>Test Scenarios</h1>
+            <a href="/scenarios/create" class="btn btn-primary">
+                <i class="fas fa-plus me-2"></i>Create New Scenario
+            </a>
+        </div>
+    </div>
+</div>
+
+<!-- Filters and Search -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="input-group">
+                            <span class="input-group-text"><i class="fas fa-search"></i></span>
+                            <input type="text" class="form-control" id="searchInput" placeholder="Search scenarios...">
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <select class="form-select" id="statusFilter">
+                            <option value="">All Statuses</option>
+                            <option value="draft">Draft</option>
+                            <option value="active">Active</option>
+                            <option value="completed">Completed</option>
+                            <option value="failed">Failed</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <button class="btn btn-outline-secondary w-100" onclick="clearFilters()">
+                            <i class="fas fa-times me-2"></i>Clear Filters
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Scenarios Table -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-table me-2"></i>All Test Scenarios ({{ scenarios|length }})
+                </h5>
+            </div>
+            <div class="card-body">
+                {% if scenarios %}
+                <div class="table-responsive">
+                    <table class="table table-hover" id="scenariosTable">
+                        <thead class="table-light">
+                            <tr>
+                                <th>
+                                    <input type="checkbox" id="selectAll" class="form-check-input">
+                                </th>
+                                <th>Name</th>
+                                <th>Description</th>
+                                <th>Target Phone</th>
+                                <th>Steps</th>
+                                <th>Timeout</th>
+                                <th>Status</th>
+                                <th>Created</th>
+                                <th>Updated</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for scenario in scenarios %}
+                            <tr data-scenario-id="{{ scenario.id }}" data-status="{{ scenario.status }}">
+                                <td>
+                                    <input type="checkbox" class="form-check-input scenario-checkbox" value="{{ scenario.id }}">
+                                </td>
+                                <td>
+                                    <strong>{{ scenario.name }}</strong>
+                                    <br><small class="text-muted">ID: {{ scenario.id }}</small>
+                                </td>
+                                <td>
+                                    {% if scenario.description %}
+                                        {{ scenario.description[:80] }}{% if scenario.description|length > 80 %}...{% endif %}
+                                    {% else %}
+                                        <span class="text-muted">No description</span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    <code class="text-primary">{{ scenario.target_phone }}</code>
+                                </td>
+                                <td>
+                                    <span class="badge bg-info">{{ scenario.steps|length }} steps</span>
+                                </td>
+                                <td>
+                                    <span class="text-muted">{{ scenario.timeout_seconds }}s</span>
+                                </td>
+                                <td>
+                                    {% if scenario.status == 'draft' %}
+                                        <span class="badge bg-secondary">Draft</span>
+                                    {% elif scenario.status == 'active' %}
+                                        <span class="badge bg-success">Active</span>
+                                    {% elif scenario.status == 'running' %}
+                                        <span class="badge bg-primary">Running</span>
+                                    {% elif scenario.status == 'completed' %}
+                                        <span class="badge bg-info">Completed</span>
+                                    {% elif scenario.status == 'failed' %}
+                                        <span class="badge bg-danger">Failed</span>
+                                    {% else %}
+                                        <span class="badge bg-secondary">{{ scenario.status|title }}</span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    <small class="text-muted">
+                                        {{ scenario.created_at[:16]|replace('T', ' ') }}
+                                    </small>
+                                </td>
+                                <td>
+                                    <small class="text-muted">
+                                        {{ scenario.updated_at[:16]|replace('T', ' ') }}
+                                    </small>
+                                </td>
+                                <td>
+                                    <div class="btn-group btn-group-sm">
+                                        <a href="/scenarios/{{ scenario.id }}" class="btn btn-outline-primary" title="View Details">
+                                            <i class="fas fa-eye"></i>
+                                        </a>
+                                        <a href="/scenarios/{{ scenario.id }}/edit" class="btn btn-outline-secondary" title="Edit">
+                                            <i class="fas fa-edit"></i>
+                                        </a>
+                                        <button class="btn btn-outline-success" onclick="executeScenario({{ scenario.id }})" title="Execute Test">
+                                            <i class="fas fa-play"></i>
+                                        </button>
+                                        <div class="btn-group btn-group-sm">
+                                            <button class="btn btn-outline-info dropdown-toggle" data-bs-toggle="dropdown" title="More Actions">
+                                                <i class="fas fa-ellipsis-h"></i>
+                                            </button>
+                                            <ul class="dropdown-menu">
+                                                <li>
+                                                    <form method="POST" action="/scenarios/{{ scenario.id }}/duplicate" class="d-inline">
+                                                        <button type="submit" class="dropdown-item">
+                                                            <i class="fas fa-copy me-2"></i>Duplicate
+                                                        </button>
+                                                    </form>
+                                                </li>
+                                                <li><hr class="dropdown-divider"></li>
+                                                <li>
+                                                    <button class="dropdown-item text-danger" onclick="deleteScenario({{ scenario.id }}, '{{ scenario.name }}')">
+                                                        <i class="fas fa-trash me-2"></i>Delete
+                                                    </button>
+                                                </li>
+                                            </ul>
+                                        </div>
+                                    </div>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                
+                <!-- Bulk Actions -->
+                <div class="mt-3">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <button class="btn btn-outline-danger btn-sm" id="bulkDeleteBtn" onclick="bulkDelete()" disabled>
+                                <i class="fas fa-trash me-2"></i>Delete Selected
+                            </button>
+                            <button class="btn btn-outline-success btn-sm" id="bulkExecuteBtn" onclick="bulkExecute()" disabled>
+                                <i class="fas fa-play me-2"></i>Execute Selected
+                            </button>
+                        </div>
+                        <div>
+                            <span id="selectedCount" class="text-muted">0 selected</span>
+                        </div>
+                    </div>
+                </div>
+                
+                {% else %}
+                <!-- Empty State -->
+                <div class="text-center py-5">
+                    <i class="fas fa-plus-circle fa-4x text-muted mb-4"></i>
+                    <h4 class="text-muted">No Test Scenarios</h4>
+                    <p class="text-muted mb-4">You haven't created any IVR test scenarios yet. Get started by creating your first test scenario.</p>
+                    <a href="/scenarios/create" class="btn btn-primary btn-lg">
+                        <i class="fas fa-plus me-2"></i>Create Your First Test Scenario
+                    </a>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Delete Confirmation Modal -->
+<div class="modal fade" id="deleteModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Confirm Delete</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p>Are you sure you want to delete the scenario "<strong id="deleteScenarioName"></strong>"?</p>
+                <p class="text-danger"><small><i class="fas fa-exclamation-triangle me-1"></i>This action cannot be undone.</small></p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <form method="POST" id="deleteForm" class="d-inline">
+                    <button type="submit" class="btn btn-danger">
+                        <i class="fas fa-trash me-2"></i>Delete Scenario
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+// Search functionality
+document.getElementById('searchInput').addEventListener('input', function() {
+    const searchTerm = this.value.toLowerCase();
+    const rows = document.querySelectorAll('#scenariosTable tbody tr');
+    
+    rows.forEach(row => {
+        const name = row.cells[1].textContent.toLowerCase();
+        const description = row.cells[2].textContent.toLowerCase();
+        const phone = row.cells[3].textContent.toLowerCase();
+        
+        if (name.includes(searchTerm) || description.includes(searchTerm) || phone.includes(searchTerm)) {
+            row.style.display = '';
+        } else {
+            row.style.display = 'none';
+        }
+    });
+});
+
+// Status filter
+document.getElementById('statusFilter').addEventListener('change', function() {
+    const filterStatus = this.value;
+    const rows = document.querySelectorAll('#scenariosTable tbody tr');
+    
+    rows.forEach(row => {
+        const status = row.getAttribute('data-status');
+        
+        if (!filterStatus || status === filterStatus) {
+            row.style.display = '';
+        } else {
+            row.style.display = 'none';
+        }
+    });
+});
+
+// Clear filters
+function clearFilters() {
+    document.getElementById('searchInput').value = '';
+    document.getElementById('statusFilter').value = '';
+    
+    const rows = document.querySelectorAll('#scenariosTable tbody tr');
+    rows.forEach(row => {
+        row.style.display = '';
+    });
+}
+
+// Select all functionality
+document.getElementById('selectAll').addEventListener('change', function() {
+    const checkboxes = document.querySelectorAll('.scenario-checkbox');
+    checkboxes.forEach(checkbox => {
+        checkbox.checked = this.checked;
+    });
+    updateBulkActions();
+});
+
+// Individual checkbox change
+document.addEventListener('change', function(e) {
+    if (e.target.classList.contains('scenario-checkbox')) {
+        updateBulkActions();
+    }
+});
+
+function updateBulkActions() {
+    const checkedBoxes = document.querySelectorAll('.scenario-checkbox:checked');
+    const count = checkedBoxes.length;
+    
+    document.getElementById('selectedCount').textContent = `${count} selected`;
+    document.getElementById('bulkDeleteBtn').disabled = count === 0;
+    document.getElementById('bulkExecuteBtn').disabled = count === 0;
+    
+    // Update select all checkbox state
+    const allCheckboxes = document.querySelectorAll('.scenario-checkbox');
+    const selectAllCheckbox = document.getElementById('selectAll');
+    
+    if (count === 0) {
+        selectAllCheckbox.indeterminate = false;
+        selectAllCheckbox.checked = false;
+    } else if (count === allCheckboxes.length) {
+        selectAllCheckbox.indeterminate = false;
+        selectAllCheckbox.checked = true;
+    } else {
+        selectAllCheckbox.indeterminate = true;
+    }
+}
+
+// Execute scenario
+function executeScenario(scenarioId) {
+    if (confirm('Are you sure you want to execute this test scenario?')) {
+        fetch(`/api/v1/scenarios/${scenarioId}/execute`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'started') {
+                alert(`Test execution started: ${data.execution_id}`);
+                // TODO: Redirect to execution monitoring page
+                location.reload();
+            } else {
+                alert('Failed to start test execution');
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('Failed to execute test scenario');
+        });
+    }
+}
+
+// Delete scenario
+function deleteScenario(scenarioId, scenarioName) {
+    document.getElementById('deleteScenarioName').textContent = scenarioName;
+    document.getElementById('deleteForm').action = `/scenarios/${scenarioId}/delete`;
+    
+    const modal = new bootstrap.Modal(document.getElementById('deleteModal'));
+    modal.show();
+}
+
+// Bulk delete
+function bulkDelete() {
+    const checkedBoxes = document.querySelectorAll('.scenario-checkbox:checked');
+    const count = checkedBoxes.length;
+    
+    if (count === 0) return;
+    
+    if (confirm(`Are you sure you want to delete ${count} selected scenario(s)? This action cannot be undone.`)) {
+        const deletePromises = Array.from(checkedBoxes).map(checkbox => {
+            const scenarioId = checkbox.value;
+            return fetch(`/scenarios/${scenarioId}/delete`, {
+                method: 'POST'
+            });
+        });
+        
+        Promise.all(deletePromises)
+            .then(() => {
+                location.reload();
+            })
+            .catch(error => {
+                console.error('Bulk delete error:', error);
+                alert('Some scenarios could not be deleted');
+                location.reload();
+            });
+    }
+}
+
+// Bulk execute
+function bulkExecute() {
+    const checkedBoxes = document.querySelectorAll('.scenario-checkbox:checked');
+    const count = checkedBoxes.length;
+    
+    if (count === 0) return;
+    
+    if (confirm(`Are you sure you want to execute ${count} selected scenario(s)?`)) {
+        const executePromises = Array.from(checkedBoxes).map(checkbox => {
+            const scenarioId = checkbox.value;
+            return fetch(`/api/v1/scenarios/${scenarioId}/execute`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            });
+        });
+        
+        Promise.all(executePromises)
+            .then(() => {
+                alert(`Started execution of ${count} test scenario(s)`);
+                location.reload();
+            })
+            .catch(error => {
+                console.error('Bulk execute error:', error);
+                alert('Some scenarios could not be executed');
+            });
+    }
+}
+</script>
+{% endblock %}
