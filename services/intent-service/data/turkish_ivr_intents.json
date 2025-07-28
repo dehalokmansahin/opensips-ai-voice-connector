@@ -1,0 +1,182 @@
+{
+  "hesap_bakiye": {
+    "display_name": "Hesap Bakiye Sorgulama",
+    "description": "Müşterinin hesap bakiyesini öğrenmek istemesi",
+    "examples": [
+      "hesap bakiyemi öğrenmek istiyorum",
+      "bakiyemi kontrol etmek istiyorum",
+      "hesabımda ne kadar param var",
+      "para durumum nasıl",
+      "hesapta kaç lira var",
+      "bakiye sorgulama yapmak istiyorum",
+      "hesap durumum nedir",
+      "param ne kadar kaldı",
+      "mevcut bakiyem nedir",
+      "hesabımda kaç para var",
+      "para durumunu öğrenmek istiyorum",
+      "bakiye bilgisi almak istiyorum"
+    ]
+  },
+  "kart_islemleri": {
+    "display_name": "Kart İşlemleri",
+    "description": "Kredi kartı veya banka kartı ile ilgili işlemler",
+    "examples": [
+      "kartımı kaybettim",
+      "kart bloke etmek istiyorum",
+      "kart şifremi unuttum",
+      "yeni kart talep etmek istiyorum",
+      "kart limiti öğrenmek istiyorum",
+      "kart işlemlerim hakkında bilgi",
+      "kartım çalındı",
+      "kart iptal etmek istiyorum",
+      "kartımla ilgili sorun var",
+      "kart aktivasyonu yapmak istiyorum",
+      "kart değiştirme işlemi",
+      "kartım çalışmıyor"
+    ]
+  },
+  "kredi_bilgi": {
+    "display_name": "Kredi Bilgileri",
+    "description": "Kredi başvurusu, faiz oranları ve kredi bilgileri",
+    "examples": [
+      "kredi başvurusu yapmak istiyorum",
+      "kredi faiz oranları nedir",
+      "kredi borcum ne kadar",
+      "kredi taksit bilgisi",
+      "konut kredisi hakkında bilgi",
+      "ihtiyaç kredisi başvurusu",
+      "kredi limiti öğrenmek istiyorum",
+      "kredi ödemem ne zaman",
+      "taşıt kredisi almak istiyorum",
+      "kredi faiz hesaplama",
+      "erken ödeme yapmak istiyorum",
+      "kredim kaldı mı"
+    ]
+  },
+  "para_transferi": {
+    "display_name": "Para Transferi",
+    "description": "Havale, EFT ve para transfer işlemleri",
+    "examples": [
+      "para transferi yapmak istiyorum",
+      "havale göndermek istiyorum",
+      "EFT işlemi yapmak istiyorum",
+      "başka hesaba para göndermek",
+      "transfer limiti öğrenmek",
+      "havale ücreti ne kadar",
+      "yurt dışına para göndermek",
+      "fast havale yapmak istiyorum",
+      "para gönderme işlemi",
+      "transfer yapmak istiyorum",
+      "başka bankaya para aktarımı",
+      "havale işlemi nasıl yapılır"
+    ]
+  },
+  "musteri_hizmetleri": {
+    "display_name": "Müşteri Hizmetleri",
+    "description": "Müşteri temsilcisi ile görüşme talebi",
+    "examples": [
+      "müşteri temsilcisi ile görüşmek istiyorum",
+      "canlı destek",
+      "operatör bağlamak",
+      "temsilci ile konuşmak",
+      "müşteri hizmetleri",
+      "insan ile konuşmak istiyorum",
+      "yetkili birisiyle görüşmek",
+      "danışman ile konuşmak",
+      "müşteri danışmanı",
+      "birisiyle konuşmak istiyorum",
+      "yardım almak istiyorum",
+      "destek ekibi"
+    ]
+  },
+  "sikayet": {
+    "display_name": "Şikayet",
+    "description": "Şikayet ve sorun bildirme",
+    "examples": [
+      "şikayet etmek istiyorum",
+      "sorun yaşıyorum",
+      "memnun değilim",
+      "şikayetim var",
+      "problem bildirmek istiyorum",
+      "hizmetinizden şikayetçiyim",
+      "sorunumu çözmek istiyorum",
+      "rahatsızlığımı bildirmek",
+      "hatalı işlem yapıldı",
+      "yanlış bilgilendirme",
+      "kötü hizmet aldım",
+      "çözüm istiyorum"
+    ]
+  },
+  "genel_bilgi": {
+    "display_name": "Genel Bilgi",
+    "description": "Çalışma saatleri, şube bilgisi ve genel sorular",
+    "examples": [
+      "çalışma saatleri nedir",
+      "şube bilgisi",
+      "ATM nerede",
+      "faiz oranları",
+      "ürün bilgisi",
+      "hizmet bilgisi almak istiyorum",
+      "şube adresi nedir",
+      "çalışma günleri",
+      "tatil günleri çalışıyor musunuz",
+      "telefon numaranız nedir",
+      "internet şubesi nasıl kullanılır",
+      "mobil uygulama hakkında bilgi"
+    ]
+  },
+  "yatirim": {
+    "display_name": "Yatırım İşlemleri",
+    "description": "Yatırım araçları ve portföy yönetimi",
+    "examples": [
+      "yatırım yapmak istiyorum",
+      "hisse senedi almak",
+      "altın hesabı açmak",
+      "döviz alım satım",
+      "fon yatırımı",
+      "portföy durumum",
+      "yatırım danışmanlığı",
+      "borsa işlemleri",
+      "vadeli hesap açmak",
+      "hazine bonosu almak",
+      "repo işlemi",
+      "yatırım fonu önerisi"
+    ]
+  },
+  "hesap_islemleri": {
+    "display_name": "Hesap İşlemleri",
+    "description": "Hesap açma, kapatma ve hesap yönetimi",
+    "examples": [
+      "yeni hesap açmak istiyorum",
+      "hesap kapatmak istiyorum",
+      "hesap türü değiştirmek",
+      "ek hesap açmak",
+      "hesap bilgilerimi güncellemek",
+      "hesap adresimi değiştirmek",
+      "hesap sahibi değişikliği",
+      "hesap işletim ücreti",
+      "hesap ekstresini görmek",
+      "hesap hareketleri",
+      "ortak hesap açmak",
+      "tasarruf hesabı açmak"
+    ]
+  },
+  "diger": {
+    "display_name": "Diğer",
+    "description": "Sınıflandırılamayan veya belirsiz talepler",
+    "examples": [
+      "yardım",
+      "bilgi",
+      "ne yapabilirim",
+      "seçenekler neler",
+      "başka ne var",
+      "farklı işlem",
+      "değişik bir şey",
+      "başka konu",
+      "açıklama istiyorum",
+      "detay verir misiniz",
+      "nasıl çalışıyor",
+      "anlamadım"
+    ]
+  }
+}

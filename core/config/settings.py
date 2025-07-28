@@ -125,9 +125,9 @@ class Settings:
         tts_port = self._get_config_value('tts', 'port', '50053', int)
         tts_timeout = self._get_config_value('tts', 'timeout', '30.0', float)
         
-        # Intent Recognition Service
+        # Intent Recognition Service (REST)
         intent_host = self._get_config_value('intent', 'host', 'localhost')
-        intent_port = self._get_config_value('intent', 'port', '50054', int)
+        intent_port = self._get_config_value('intent', 'port', '5000', int)
         intent_timeout = self._get_config_value('intent', 'timeout', '30.0', float)
         
         self.services = ServicesConfig(
@@ -202,7 +202,7 @@ class Settings:
             ),
             intent_recognition=ServiceConfig(
                 host=os.getenv('INTENT_SERVICE_HOST', 'localhost'),
-                port=int(os.getenv('INTENT_SERVICE_PORT', '50054'))
+                port=int(os.getenv('INTENT_SERVICE_PORT', '5000'))
             )
         )
         

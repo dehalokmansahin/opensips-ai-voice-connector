@@ -38,7 +38,10 @@
       "Bash(.bmad-core/tasks/execute-checklist:*)",
       "Bash(sed:*)",
       "Bash(echo)",
-      "Bash(/dev/null)"
+      "Bash(/dev/null)",
+      "Bash(move intent_grpc_server.py intent_rest_server.py)",
+      "Bash(mv:*)",
+      "Bash(PYTHONPATH=/app/core docker-compose -f docker-compose.yml up -d intent-service)"
     ],
     "deny": []
   }

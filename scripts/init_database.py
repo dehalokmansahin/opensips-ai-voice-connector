@@ -13,7 +13,7 @@ core_path = Path(__file__).parent.parent / "core"
 sys.path.insert(0, str(core_path))
 
 from utils.database import (
-    DatabaseManager, TestScenario, TestExecution, IntentTrainingData,
+    DatabaseManager, DatabaseTestScenario, DatabaseTestExecution, DatabaseIntentTrainingData,
     initialize_database, get_database_manager
 )
 
@@ -26,7 +26,7 @@ def create_sample_scenarios():
     db = get_database_manager()
     
     # Sample scenario 1: Banking IVR main menu test
-    banking_scenario = TestScenario(
+    banking_scenario = DatabaseTestScenario(
         name="Banking IVR Main Menu Test",
         description="Test navigation through main banking IVR menu options",
         target_phone="+1234567890",
@@ -64,7 +64,7 @@ def create_sample_scenarios():
         logger.info(f"Created banking scenario with ID: {scenario_id}")
     
     # Sample scenario 2: Customer service routing test
-    customer_service_scenario = TestScenario(
+    customer_service_scenario = DatabaseTestScenario(
         name="Customer Service Routing Test",
         description="Test routing to customer service representative",
         target_phone="+1234567891",
@@ -116,7 +116,7 @@ def create_sample_training_data():
     ]
     
     for sample in balance_samples:
-        training_data = IntentTrainingData(
+        training_data = DatabaseIntentTrainingData(
             text_sample=sample,
             intent_label="account_balance_inquiry",
             confidence_threshold=0.85,
@@ -138,7 +138,7 @@ def create_sample_training_data():
     ]
     
     for sample in service_samples:
-        training_data = IntentTrainingData(
+        training_data = DatabaseIntentTrainingData(
             text_sample=sample,
             intent_label="customer_service_request",
             confidence_threshold=0.80,
@@ -159,7 +159,7 @@ def create_sample_training_data():
     ]
     
     for sample in balance_menu_samples:
-        training_data = IntentTrainingData(
+        training_data = DatabaseIntentTrainingData(
             text_sample=sample,
             intent_label="balance_menu",
             confidence_threshold=0.90,

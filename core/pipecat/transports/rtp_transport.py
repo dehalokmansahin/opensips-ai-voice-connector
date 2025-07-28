@@ -11,11 +11,11 @@ from ..processors.grpc_processors import (
     RTPInputProcessor,
     RTPOutputProcessor,
     ASRProcessor,
-    LLMProcessor,
+    IntentProcessor,
     TTSProcessor
 )
 from ...opensips.rtp_transport import RTPTransport
-from ...grpc_clients import ASRClient, LLMClient, TTSClient
+from ...grpc_clients import ASRClient, IntentClient, TTSClient
 
 logger = logging.getLogger(__name__)
 
@@ -29,14 +29,14 @@ class PipecatRTPTransport:
         self,
         rtp_transport: RTPTransport,
         asr_client: ASRClient,
-        llm_client: LLMClient,
+        intent_client: IntentClient,
         tts_client: TTSClient,
         session_config: Dict[str, Any],
         call_id: str
     ):
         self.rtp_transport = rtp_transport
         self.asr_client = asr_client
-        self.llm_client = llm_client
+        self.intent_client = intent_client
         self.tts_client = tts_client
         self.session_config = session_config
         self.call_id = call_id
@@ -114,16 +114,15 @@ class PipecatRTPTransport:
             processors.append(asr_processor)
             self.processors['asr'] = asr_processor
             
-            # 3. LLM Processor (Text -> Text)
-            llm_processor = LLMProcessor(
-                llm_client=self.llm_client,
-                conversation_id=self.call_id,
-                system_prompt=self.session_config.get('system_prompt', ''),
-                config=self.session_config.get('llm_config', {}),
-                name=f"LLM_{self.call_id}"
+            # 3. Intent Processor (Text -> Text)
+            intent_processor = IntentProcessor(
+                intent_client=self.intent_client,
+                session_id=self.call_id,
+                config=self.session_config.get('intent_config', {}),
+                name=f"Intent_{self.call_id}"
             )
-            processors.append(llm_processor)
-            self.processors['llm'] = llm_processor
+            processors.append(intent_processor)
+            self.processors['intent'] = intent_processor
             
             # 4. TTS Processor (Text -> Audio)
             tts_processor = TTSProcessor(

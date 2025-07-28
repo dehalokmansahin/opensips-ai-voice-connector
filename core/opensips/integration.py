@@ -12,7 +12,8 @@ from dataclasses import dataclass
 from .event_listener import OpenSIPSEventListener
 from .sip_backend import SIPBackendListener
 from .rtp_transport import RTPTransport
-from ..config.settings import OpenSIPSConfig
+from .outbound_call_manager import OutboundCallManager, CallState
+from core.config.settings import OpenSIPSConfig
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ class OpenSIPSIntegration:
         # Components
         self.event_listener: Optional[OpenSIPSEventListener] = None
         self.sip_backend: Optional[SIPBackendListener] = None
+        self.outbound_call_manager: Optional[OutboundCallManager] = None
         self.active_calls: Dict[str, CallInfo] = {}
         self.rtp_transports: Dict[str, RTPTransport] = {}
         
@@ -76,6 +78,18 @@ class OpenSIPSIntegration:
                 on_bye=self._on_sip_bye,
                 on_ack=self._on_sip_ack
             )
+            
+            # Initialize outbound call manager
+            self.outbound_call_manager = OutboundCallManager(
+                mi_host="127.0.0.1",
+                mi_port=8080
+            )
+            
+            # Set up outbound call callbacks
+            self.outbound_call_manager.on_call_state_change = self._on_outbound_call_state_change
+            self.outbound_call_manager.on_call_connected = self._on_outbound_call_connected
+            self.outbound_call_manager.on_call_failed = self._on_outbound_call_failed
+            self.outbound_call_manager.on_call_completed = self._on_outbound_call_completed
             
             logger.info("OpenSIPS integration initialized successfully")
             
@@ -347,3 +361,120 @@ class OpenSIPSIntegration:
                 'error': str(e),
                 'active_calls': 0
             }
+    
+    # Outbound call methods
+    async def initiate_outbound_call(self, target_number: str, caller_id: str = "IVR_TEST") -> str:
+        """
+        Initiate an outbound call for IVR testing
+        
+        Args:
+            target_number: Phone number to call
+            caller_id: Caller ID to display
+            
+        Returns:
+            Call ID for tracking
+        """
+        if not self.outbound_call_manager:
+            raise RuntimeError("Outbound call manager not initialized")
+        
+        return await self.outbound_call_manager.initiate_call(target_number, caller_id)
+    
+    async def terminate_outbound_call(self, call_id: str, reason: str = "Test completed") -> bool:
+        """
+        Terminate an outbound call
+        
+        Args:
+            call_id: Call ID to terminate
+            reason: Termination reason
+            
+        Returns:
+            True if successful
+        """
+        if not self.outbound_call_manager:
+            return False
+        
+        return await self.outbound_call_manager.terminate_call(call_id, reason)
+    
+    async def get_outbound_call_status(self, call_id: str) -> Optional[Dict[str, Any]]:
+        """Get status of an outbound call"""
+        if not self.outbound_call_manager:
+            return None
+        
+        return await self.outbound_call_manager.get_call_status(call_id)
+    
+    async def get_active_outbound_calls(self) -> Dict[str, Dict[str, Any]]:
+        """Get all active outbound calls"""
+        if not self.outbound_call_manager:
+            return {}
+        
+        return await self.outbound_call_manager.get_active_calls()
+    
+    # Outbound call event callbacks
+    async def _on_outbound_call_state_change(self, call_id: str, state: CallState, call_data: Dict[str, Any]):
+        """Handle outbound call state change"""
+        logger.info(f"Outbound call {call_id} state changed to {state.value}")
+        
+        # Forward to OpenSIPS event handler if needed
+        if self.outbound_call_manager:
+            await self.outbound_call_manager.handle_call_event({
+                "callid": call_id,
+                "event": state.value,
+                **call_data
+            })
+    
+    async def _on_outbound_call_connected(self, call_id: str, call_data: Dict[str, Any]):
+        """Handle outbound call connection"""
+        logger.info(f"Outbound call {call_id} connected")
+        
+        # Set up RTP transport for the connected call
+        try:
+            rtp_local_port = call_data.get('rtp_local_port')
+            rtp_remote_ip = call_data.get('rtp_remote_ip')
+            rtp_remote_port = call_data.get('rtp_remote_port')
+            
+            if rtp_local_port and rtp_remote_ip and rtp_remote_port:
+                # Create CallInfo for RTP setup
+                call_info = CallInfo(
+                    call_id=call_id,
+                    client_ip=rtp_remote_ip,
+                    client_port=rtp_remote_port,
+                    bind_ip="0.0.0.0",
+                    bind_port=rtp_local_port
+                )
+                
+                # Set up RTP transport
+                await self._setup_rtp_transport(call_info)
+                
+                logger.info(f"RTP transport set up for outbound call {call_id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to set up RTP for outbound call {call_id}: {e}")
+    
+    async def _on_outbound_call_failed(self, call_id: str, failure_reason: str, call_data: Dict[str, Any]):
+        """Handle outbound call failure"""
+        logger.warning(f"Outbound call {call_id} failed: {failure_reason}")
+        
+        # Clean up any resources
+        if call_id in self.rtp_transports:
+            try:
+                await self.rtp_transports[call_id].stop()
+                del self.rtp_transports[call_id]
+            except Exception as e:
+                logger.error(f"Error cleaning up RTP for failed call {call_id}: {e}")
+    
+    async def _on_outbound_call_completed(self, call_id: str, call_data: Dict[str, Any]):
+        """Handle outbound call completion"""
+        logger.info(f"Outbound call {call_id} completed")
+        
+        # Clean up RTP transport
+        if call_id in self.rtp_transports:
+            try:
+                await self.rtp_transports[call_id].stop()
+                del self.rtp_transports[call_id]
+                logger.debug(f"RTP transport cleaned up for call {call_id}")
+            except Exception as e:
+                logger.error(f"Error cleaning up RTP for completed call {call_id}: {e}")
+        
+        # Remove from active calls
+        if call_id in self.active_calls:
+            del self.active_calls[call_id]

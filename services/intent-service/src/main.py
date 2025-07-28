@@ -1,39 +1,25 @@
+#!/usr/bin/env python3
 """
-Intent Recognition Service - Main Entry Point
-Foundation service for Turkish BERT intent classification
+Turkish Bank Intent Recognition Service - Main Entry Point
+Mock REST API service for Turkish banking IVR automation testing
 """
 
-import asyncio
-import logging
 import os
 import sys
+import logging
 
-# Setup basic logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Add paths for imports
+sys.path.insert(0, os.path.dirname(__file__))
 
-logger = logging.getLogger(__name__)
+# Use mock implementation for development/testing
+from intent_rest_server import app, run_server
 
 def main():
-    """Main entry point for Intent Recognition Service"""
-    try:
-        logger.info("Starting Intent Recognition Service...")
-        logger.info("Environment: %s", os.environ.get('ENVIRONMENT', 'development'))
-        logger.info("Port: 50054")
-        logger.info("Model: Foundation Mock (Turkish BERT in Epic 2.1)")
-        
-        # Import and run the server
-        from intent_grpc_server import serve
-        asyncio.run(serve())
-        
-    except KeyboardInterrupt:
-        logger.info("Service interrupted by user")
-        sys.exit(0)
-    except Exception as e:
-        logger.error("Service failed to start: %s", str(e))
-        sys.exit(1)
+    """Main entry point for Turkish Bank Intent Recognition Service"""
+    print("Starting Turkish Bank Intent Recognition Service (Mock Implementation)")
+    
+    # Start the mock REST server
+    run_server()
 
 if __name__ == '__main__':
     main()

@@ -20,8 +20,7 @@ sys.path.insert(0, str(core_path))
 # Direct imports
 from grpc_clients.service_registry import ServiceRegistry
 from grpc_clients.asr_client import ASRClient, StreamingSession as ASRStreamingSession
-# LLM client removed for IVR testing transformation
-# from grpc_clients.llm_client import LLMClient, ConversationManager
+from grpc_clients.intent_rest_client import IntentClient
 from grpc_clients.tts_client import TTSClient, SentenceFlushAggregator
 from opensips.rtp_transport import RTPTransport
 from config.settings import Settings
@@ -32,10 +31,8 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SessionConfig:
     """Configuration for conversation session"""
-    system_prompt: str = "Sen Türkçe konuşan bir yapay zeka asistanısın. Kısa ve net cevaplar ver."
     asr_config: Dict[str, Any] = None
-    # LLM config removed - will be replaced by intent recognition in Epic 2
-    # llm_config: Dict[str, Any] = None
+    intent_config: Dict[str, Any] = None
     tts_config: Dict[str, Any] = None
     
     def __post_init__(self):
@@ -46,8 +43,11 @@ class SessionConfig:
                 'max_alternatives': 0
             }
         
-        # LLM config initialization removed
-        # Will be replaced by intent recognition configuration in Epic 2
+        if self.intent_config is None:
+            self.intent_config = {
+                'language': 'tr',
+                'confidence_threshold': 0.5
+            }
         
         if self.tts_config is None:
             self.tts_config = {
@@ -68,8 +68,7 @@ class PipelineManager:
         
         # Service clients
         self.asr_client: Optional[ASRClient] = None
-        # LLM client removed for IVR testing transformation
-        # self.llm_client: Optional[LLMClient] = None
+        self.intent_client: Optional[IntentClient] = None
         self.tts_client: Optional[TTSClient] = None
         
         # Active sessions
@@ -83,8 +82,7 @@ class PipelineManager:
         try:
             # Create service clients
             self.asr_client = ASRClient(self.service_registry)
-            # LLM client initialization removed
-            # self.llm_client = LLMClient(self.service_registry)
+            self.intent_client = IntentClient(self.service_registry)
             self.tts_client = TTSClient(self.service_registry)
             
             # Wait for services to be ready
@@ -130,7 +128,7 @@ class PipelineManager:
             session = ConversationSession(
                 call_id=call_id,
                 asr_client=self.asr_client,
-                # llm_client removed
+                intent_client=self.intent_client,
                 tts_client=self.tts_client,
                 rtp_transport=rtp_transport,
                 config=config,

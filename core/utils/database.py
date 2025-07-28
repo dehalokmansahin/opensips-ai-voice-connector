@@ -19,7 +19,7 @@ DATABASE_DIR = Path(__file__).parent.parent.parent / "data" / "databases"
 TEST_DB_PATH = DATABASE_DIR / "test_scenarios.db"
 
 @dataclass
-class TestScenario:
+class DatabaseTestScenario:
     """Data model for test scenarios."""
     scenario_id: Optional[int] = None
     name: str = ""
@@ -35,7 +35,7 @@ class TestScenario:
             self.steps = []
 
 @dataclass
-class TestExecution:
+class DatabaseTestExecution:
     """Data model for test executions."""
     execution_id: Optional[int] = None
     scenario_id: int = 0
@@ -47,7 +47,7 @@ class TestExecution:
     error_message: Optional[str] = None
 
 @dataclass
-class StepExecution:
+class DatabaseStepExecution:
     """Data model for individual step executions."""
     step_id: Optional[int] = None
     execution_id: int = 0
@@ -63,7 +63,7 @@ class StepExecution:
     error_message: Optional[str] = None
 
 @dataclass
-class IntentTrainingData:
+class DatabaseIntentTrainingData:
     """Data model for intent training data."""
     training_id: Optional[int] = None
     text_sample: str = ""
@@ -170,6 +170,9 @@ class DatabaseManager:
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_execution_id ON step_executions(execution_id)")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_call_id ON test_executions(call_id)")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_intent_label ON intent_training_data(intent_label)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_execution_status ON test_executions(status)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_step_status ON step_executions(status)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_validation_status ON intent_training_data(validation_status)")
                 
                 # Create trigger to update updated_at timestamp
                 cursor.execute("""
@@ -188,7 +191,7 @@ class DatabaseManager:
             logger.error(f"Failed to initialize database: {e}")
             return False
     
-    def create_scenario(self, scenario: TestScenario) -> Optional[int]:
+    def create_scenario(self, scenario: DatabaseTestScenario) -> Optional[int]:
         """Create a new test scenario and return its ID."""
         try:
             with self.get_connection() as conn:
@@ -214,7 +217,7 @@ class DatabaseManager:
             logger.error(f"Failed to create scenario: {e}")
             return None
     
-    def get_scenario(self, scenario_id: int) -> Optional[TestScenario]:
+    def get_scenario(self, scenario_id: int) -> Optional[DatabaseTestScenario]:
         """Retrieve a test scenario by ID."""
         try:
             with self.get_connection() as conn:
@@ -223,7 +226,7 @@ class DatabaseManager:
                 row = cursor.fetchone()
                 
                 if row:
-                    return TestScenario(
+                    return DatabaseTestScenario(
                         scenario_id=row['scenario_id'],
                         name=row['name'],
                         description=row['description'],
@@ -239,7 +242,7 @@ class DatabaseManager:
             logger.error(f"Failed to get scenario {scenario_id}: {e}")
             return None
     
-    def list_scenarios(self) -> List[TestScenario]:
+    def list_scenarios(self) -> List[DatabaseTestScenario]:
         """List all test scenarios."""
         try:
             scenarios = []
@@ -249,7 +252,7 @@ class DatabaseManager:
                 rows = cursor.fetchall()
                 
                 for row in rows:
-                    scenarios.append(TestScenario(
+                    scenarios.append(DatabaseTestScenario(
                         scenario_id=row['scenario_id'],
                         name=row['name'],
                         description=row['description'],
@@ -266,7 +269,7 @@ class DatabaseManager:
             logger.error(f"Failed to list scenarios: {e}")
             return []
     
-    def create_execution(self, execution: TestExecution) -> Optional[int]:
+    def create_execution(self, execution: DatabaseTestExecution) -> Optional[int]:
         """Create a new test execution and return its ID."""
         try:
             with self.get_connection() as conn:
@@ -319,7 +322,7 @@ class DatabaseManager:
             logger.error(f"Failed to update execution {execution_id}: {e}")
             return False
     
-    def add_training_data(self, training_data: IntentTrainingData) -> Optional[int]:
+    def add_training_data(self, training_data: DatabaseIntentTrainingData) -> Optional[int]:
         """Add intent training data and return its ID."""
         try:
             with self.get_connection() as conn:
@@ -346,7 +349,7 @@ class DatabaseManager:
             logger.error(f"Failed to add training data: {e}")
             return None
     
-    def get_training_data_by_intent(self, intent_label: str) -> List[IntentTrainingData]:
+    def get_training_data_by_intent(self, intent_label: str) -> List[DatabaseIntentTrainingData]:
         """Get all training data for a specific intent."""
         try:
             training_data = []
@@ -360,7 +363,7 @@ class DatabaseManager:
                 rows = cursor.fetchall()
                 
                 for row in rows:
-                    training_data.append(IntentTrainingData(
+                    training_data.append(DatabaseIntentTrainingData(
                         training_id=row['training_id'],
                         text_sample=row['text_sample'],
                         intent_label=row['intent_label'],
@@ -375,6 +378,89 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to get training data for intent {intent_label}: {e}")
             return []
+    
+    def validate_database_integrity(self) -> Dict[str, Any]:
+        """Validate database integrity and return status report."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Check table existence
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                tables = [row[0] for row in cursor.fetchall()]
+                
+                required_tables = ['test_scenarios', 'test_executions', 'step_executions', 'intent_training_data']
+                missing_tables = [table for table in required_tables if table not in tables]
+                
+                # Check record counts
+                record_counts = {}
+                for table in required_tables:
+                    if table in tables:
+                        cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                        record_counts[table] = cursor.fetchone()[0]
+                
+                # Check foreign key integrity
+                cursor.execute("""
+                    SELECT COUNT(*) FROM test_executions 
+                    WHERE scenario_id NOT IN (SELECT scenario_id FROM test_scenarios)
+                """)
+                orphaned_executions = cursor.fetchone()[0]
+                
+                cursor.execute("""
+                    SELECT COUNT(*) FROM step_executions 
+                    WHERE execution_id NOT IN (SELECT execution_id FROM test_executions)
+                """)
+                orphaned_steps = cursor.fetchone()[0]
+                
+                return {
+                    "database_exists": True,
+                    "missing_tables": missing_tables,
+                    "record_counts": record_counts,
+                    "integrity_issues": {
+                        "orphaned_executions": orphaned_executions,
+                        "orphaned_steps": orphaned_steps
+                    },
+                    "healthy": len(missing_tables) == 0 and orphaned_executions == 0 and orphaned_steps == 0
+                }
+                
+        except Exception as e:
+            logger.error(f"Database integrity validation failed: {e}")
+            return {
+                "database_exists": False,
+                "error": str(e),
+                "healthy": False
+            }
+    
+    def cleanup_orphaned_records(self) -> bool:
+        """Clean up orphaned records to maintain referential integrity."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Remove orphaned step executions
+                cursor.execute("""
+                    DELETE FROM step_executions 
+                    WHERE execution_id NOT IN (SELECT execution_id FROM test_executions)
+                """)
+                orphaned_steps_removed = cursor.rowcount
+                
+                # Remove orphaned test executions
+                cursor.execute("""
+                    DELETE FROM test_executions 
+                    WHERE scenario_id NOT IN (SELECT scenario_id FROM test_scenarios)
+                """)
+                orphaned_executions_removed = cursor.rowcount
+                
+                conn.commit()
+                
+                if orphaned_steps_removed > 0 or orphaned_executions_removed > 0:
+                    logger.info(f"Cleaned up {orphaned_steps_removed} orphaned steps and {orphaned_executions_removed} orphaned executions")
+                
+                return True
+                
+        except Exception as e:
+            logger.error(f"Failed to cleanup orphaned records: {e}")
+            return False
 
 # Singleton database manager instance
 _db_manager = None

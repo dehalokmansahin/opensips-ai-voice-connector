@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # ASR Service
   asr-service:
@@ -17,7 +15,7 @@ services:
       - LOG_LEVEL=INFO
       - ASR_MAX_WORKERS=10
     volumes:
-      - ./models/vosk:/app/model:ro
+      - ./models/vosk/tr:/app/model:ro
     healthcheck:
       test: ["CMD", "grpc-health-probe", "-addr=localhost:50051", "-service=ASRService"]
       interval: 30s
@@ -57,30 +55,64 @@ services:
     networks:
       - opensips-ai-network
 
-  # Intent Recognition Service
+  # Turkish Bank Intent Recognition Service
   intent-service:
     build:
       context: ./services/intent-service
       dockerfile: Dockerfile
     container_name: opensips-intent-service
     ports:
-      - "50054:50054"
+      - "5000:5000"
     environment:
-      - INTENT_SERVICE_PORT=50054
-      - INTENT_MODEL_PATH=/app/models
+      - FLASK_ENV=production
+      - FLASK_PORT=5000
+      - FLASK_HOST=0.0.0.0
       - LOG_LEVEL=INFO
-      - INTENT_MAX_WORKERS=10
-      - CUDA_VISIBLE_DEVICES=""  # CPU-only deployment
     volumes:
-      - ./models/intent:/app/models:ro
-      - ./data/training_data:/app/data/training_data:ro
+      - ./logs:/app/logs:rw
+      - ./data/intent:/app/data:rw
     healthcheck:
-      test: ["CMD", "python", "-c", "import grpc; import sys; sys.path.append('./src'); import intent_service_pb2_grpc; import intent_service_pb2; from google.protobuf.empty_pb2 import Empty; channel = grpc.insecure_channel('localhost:50054'); stub = intent_service_pb2_grpc.IntentRecognitionStub(channel); stub.HealthCheck(Empty(), timeout=5); print('OK')"]
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 10s
     restart: unless-stopped
+    networks:
+      - opensips-ai-network
+
+  # Test Controller Service - IVR Test Orchestration
+  test-controller-service:
+    build:
+      context: .
+      dockerfile: ./services/test-controller-service/Dockerfile
+    container_name: opensips-test-controller
+    ports:
+      - "50055:50055"
+    environment:
+      - TEST_CONTROLLER_HOST=0.0.0.0
+      - TEST_CONTROLLER_PORT=50055
+      - LOG_LEVEL=INFO
+      - ASR_SERVICE_URL=asr-service:50051
+      - TTS_SERVICE_URL=tts-service:50053
+      - INTENT_SERVICE_URL=intent-service:5000
+      - OPENSIPS_MI_HOST=host.docker.internal
+      - OPENSIPS_MI_PORT=8080
+      - DATABASE_PATH=/app/data/test_scenarios.db
+    volumes:
+      - ./data/test_controller:/app/data
+      - ./logs:/app/logs:rw
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:50055/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      - asr-service
+      - tts-service
+      - intent-service
     networks:
       - opensips-ai-network
 
@@ -98,7 +130,7 @@ services:
       - CORE_LOG_LEVEL=INFO
       - ASR_SERVICE_URL=asr-service:50051
       - TTS_SERVICE_URL=tts-service:50053
-      - INTENT_SERVICE_URL=intent-service:50054
+      - INTENT_SERVICE_URL=intent-service:5000
       - OPENSIPS_HOST=0.0.0.0
       - OPENSIPS_PORT=5060
       - RTP_PORT_RANGE_START=10000

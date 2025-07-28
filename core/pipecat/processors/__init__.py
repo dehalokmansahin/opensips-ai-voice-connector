@@ -5,7 +5,7 @@ Contains processors for integrating with gRPC services
 
 from .grpc_processors import (
     ASRProcessor,
-    LLMProcessor,
+    IntentProcessor,
     TTSProcessor,
     RTPInputProcessor,
     RTPOutputProcessor
@@ -13,7 +13,7 @@ from .grpc_processors import (
 
 __all__ = [
     "ASRProcessor",
-    "LLMProcessor", 
+    "IntentProcessor", 
     "TTSProcessor",
     "RTPInputProcessor",
     "RTPOutputProcessor"

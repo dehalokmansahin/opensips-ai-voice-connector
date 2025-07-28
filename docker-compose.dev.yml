@@ -1,5 +1,3 @@
-version: '3.8'
-
 # Development override for docker-compose.yml
 # Usage: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
 # 
@@ -38,36 +36,6 @@ services:
       retries: 2
       start_period: 20s
 
-  # LLM Service - Development  
-  llm-service:
-    build:
-      context: .
-      dockerfile: services/llm-service/Dockerfile.dev
-      target: development
-    volumes:
-      # Hot-reload: mount source code for live development
-      - ./services/llm-service/src:/app/src:rw
-      - ./services/common:/app/common:ro
-      - ./shared/proto_generated:/app/shared:ro
-      - ./models/llm:/app/model:ro
-      - ./models/rag_model:/app/rag_model:rw
-    environment:
-      - LOG_LEVEL=DEBUG
-      - PYTHONPATH=/app:/app/src:/app/common
-      - DEVELOPMENT_MODE=1
-      - LLM_ENABLE_DEBUG=1
-      - PYTHONUNBUFFERED=1
-      - PYTHONDONTWRITEBYTECODE=1
-      - LLM_HOT_RELOAD=1
-      # CPU-only PyTorch for faster development startup
-      - TORCH_FORCE_CPU=1
-    command: ["python", "-u", "/app/src/enhanced_llm_server.py"]
-    # Override health check for faster development cycles
-    healthcheck:
-      interval: 15s
-      timeout: 5s
-      retries: 2
-      start_period: 30s
 
   # TTS Service - Development
   tts-service:

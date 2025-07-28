@@ -12,6 +12,7 @@ from .threading import (
     MultiThreadedRTPProcessor, AudioThreadPool, LockFreeQueue, 
     ThreadMetrics, ThreadPriority
 )
+from .test_audio import TestAudioProcessor, TestAudioConfig, IVRPromptGenerator
 
 __all__ = [
     'RTPAudioStreamer',
@@ -30,5 +31,8 @@ __all__ = [
     'AudioThreadPool',
     'LockFreeQueue',
     'ThreadMetrics',
-    'ThreadPriority'
+    'ThreadPriority',
+    'TestAudioProcessor',
+    'TestAudioConfig',
+    'IVRPromptGenerator'
 ]

@@ -10,19 +10,13 @@ from datetime import datetime
 from enum import Enum
 
 try:
-    from ..grpc_clients import ASRClient, TTSClient
-    # LLMClient removed for IVR testing transformation
+    from ..grpc_clients import ASRClient, TTSClient, IntentClient
     from ..grpc_clients.asr_client import StreamingSession as ASRStreamingSession
-    # ConversationManager removed for IVR testing transformation
-    # from ..grpc_clients.llm_client import ConversationManager
     from ..grpc_clients.tts_client import SentenceFlushAggregator
 except ImportError:
     # Fallback for external imports
-    from core.grpc_clients import ASRClient, TTSClient
-    # LLMClient removed for IVR testing transformation
+    from core.grpc_clients import ASRClient, TTSClient, IntentClient
     from core.grpc_clients.asr_client import StreamingSession as ASRStreamingSession
-    # ConversationManager removed for IVR testing transformation
-    # from core.grpc_clients.llm_client import ConversationManager
     from core.grpc_clients.tts_client import SentenceFlushAggregator
 try:
     from ..opensips.rtp_transport import RTPTransport
@@ -55,7 +49,7 @@ class ConversationSession:
         self,
         call_id: str,
         asr_client: ASRClient,
-        # llm_client: LLMClient,  # Removed for IVR testing
+        intent_client: IntentClient,
         tts_client: TTSClient,
         rtp_transport: Optional[RTPTransport] = None,
         config: Any = None,
@@ -63,7 +57,7 @@ class ConversationSession:
     ):
         self.call_id = call_id
         self.asr_client = asr_client
-        self.llm_client = llm_client
+        self.intent_client = intent_client
         self.tts_client = tts_client
         self.rtp_transport = rtp_transport
         self.config = config
@@ -128,9 +122,8 @@ class ConversationSession:
             
             # Create session configuration for pipecat
             session_config = {
-                'system_prompt': self.config.system_prompt if self.config else "Sen Türkçe konuşan bir yapay zeka asistanısın. Kısa ve net cevaplar ver.",
                 'asr_config': self.config.asr_config if self.config else {},
-                'llm_config': self.config.llm_config if self.config else {},
+                'intent_config': self.config.intent_config if self.config else {},
                 'tts_config': self.config.tts_config if self.config else {}
             }
             
@@ -138,7 +131,7 @@ class ConversationSession:
             self.pipecat_transport = PipecatRTPTransport(
                 rtp_transport=self.rtp_transport,
                 asr_client=self.asr_client,
-                llm_client=self.llm_client,
+                intent_client=self.intent_client,
                 tts_client=self.tts_client,
                 session_config=session_config,
                 call_id=self.call_id
@@ -154,16 +147,9 @@ class ConversationSession:
             raise
     
     async def _initialize_legacy_components(self):
-        """Initialize legacy conversation components"""
+        """Initialize intent-based conversation components"""
         try:
-            logger.info(f"Initializing legacy components: {self.call_id}")
-            
-            # Initialize conversation manager
-            system_prompt = self.config.system_prompt if self.config else ""
-            self.conversation_manager = ConversationManager(
-                llm_client=self.llm_client,
-                system_prompt=system_prompt
-            )
+            logger.info(f"Initializing intent-based components: {self.call_id}")
             
             # Initialize TTS aggregator
             self.tts_aggregator = SentenceFlushAggregator(
@@ -178,10 +164,10 @@ class ConversationSession:
             # Initialize ASR streaming session
             await self._initialize_asr_session()
             
-            logger.info(f"Legacy components initialized: {self.call_id}")
+            logger.info(f"Intent-based components initialized: {self.call_id}")
             
         except Exception as e:
-            logger.error(f"Failed to initialize legacy components: {e}")
+            logger.error(f"Failed to initialize intent-based components: {e}")
             raise
     
     async def _initialize_asr_session(self):

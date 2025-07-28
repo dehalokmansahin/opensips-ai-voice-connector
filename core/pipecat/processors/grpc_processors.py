@@ -8,7 +8,7 @@ import logging
 from typing import Optional, Callable, Any, Dict
 from ..pipeline.pipeline import FrameProcessor, AsyncFrameProcessor, AudioFrameProcessor, TextFrameProcessor
 from ..frames.frames import Frame, AudioFrame, TextFrame, ErrorFrame, StartFrame, EndFrame
-from ...grpc_clients import ASRClient, LLMClient, TTSClient
+from ...grpc_clients import ASRClient, TTSClient, IntentClient
 
 logger = logging.getLogger(__name__)
 
@@ -120,37 +120,35 @@ class ASRProcessor(AudioFrameProcessor):
         except Exception as e:
             logger.error(f"Error handling final transcript: {e}")
 
-class LLMProcessor(TextFrameProcessor):
-    """LLM processor using gRPC LLM service"""
+class IntentProcessor(TextFrameProcessor):
+    """Intent recognition processor using REST intent service"""
     
     def __init__(
         self,
-        llm_client: LLMClient,
-        conversation_id: str,
-        system_prompt: str = "",
+        intent_client: IntentClient,
+        session_id: str,
         config: Optional[Dict[str, Any]] = None,
-        name: str = "LLMProcessor"
+        name: str = "IntentProcessor"
     ):
         super().__init__(name=name)
-        self.llm_client = llm_client
-        self.conversation_id = conversation_id
-        self.system_prompt = system_prompt
+        self.intent_client = intent_client
+        self.session_id = session_id
         self.config = config or {}
-        self.conversation_manager = None
         
     async def process_frame(self, frame: Frame) -> Optional[Frame]:
-        """Process text frames through LLM"""
+        """Process text frames through intent recognition"""
         try:
             if isinstance(frame, StartFrame):
-                await self._initialize_conversation()
+                logger.info(f"Intent processor started: {self.name}")
                 return frame
                 
             elif isinstance(frame, EndFrame):
+                logger.info(f"Intent processor ended: {self.name}")
                 return frame
                 
             elif isinstance(frame, TextFrame):
-                # Process user input through LLM
-                response = await self._get_llm_response(frame.text)
+                # Process user input through intent recognition
+                response = await self._get_intent_response(frame.text)
                 if response:
                     # Create response text frame
                     response_frame = TextFrame(text=response)
@@ -162,47 +160,29 @@ class LLMProcessor(TextFrameProcessor):
                 return frame
                 
         except Exception as e:
-            logger.error(f"LLM processor error: {e}")
+            logger.error(f"Intent processor error: {e}")
             return ErrorFrame(error=str(e))
     
-    async def _initialize_conversation(self):
-        """Initialize conversation manager"""
+    async def _get_intent_response(self, user_text: str) -> Optional[str]:
+        """Get response from intent recognition service"""
         try:
-            from ...grpc_clients.llm_client import ConversationManager
-            
-            self.conversation_manager = ConversationManager(
-                llm_client=self.llm_client,
-                system_prompt=self.system_prompt
+            # Recognize intent from user text
+            intent_result = await self.intent_client.recognize_intent(
+                text=user_text,
+                session_id=self.session_id
             )
             
-            logger.info(f"LLM conversation initialized: {self.name}")
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize LLM conversation: {e}")
-            raise
-    
-    async def _get_llm_response(self, user_text: str) -> Optional[str]:
-        """Get response from LLM"""
-        try:
-            if not self.conversation_manager:
-                logger.warning("Conversation manager not initialized")
-                return None
-            
-            response = await self.conversation_manager.send_message(
-                user_text=user_text,
-                **self.config
-            )
-            
-            if response:
-                logger.info(f"LLM response: {response}")
+            if intent_result and 'response' in intent_result:
+                response = intent_result['response']
+                logger.info(f"Intent response: {response}")
                 return response
             else:
-                logger.warning("No response from LLM")
-                return None
+                logger.warning("No response from intent service")
+                return "Üzgünüm, anlayamadım. Tekrar söyler misiniz?"
                 
         except Exception as e:
-            logger.error(f"Error getting LLM response: {e}")
-            return None
+            logger.error(f"Error getting intent response: {e}")
+            return "Bir hata oluştu. Lütfen tekrar deneyin."
 
 class TTSProcessor(TextFrameProcessor):
     """TTS processor using gRPC TTS service"""

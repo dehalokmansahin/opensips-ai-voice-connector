@@ -41,4 +41,4 @@ EXPOSE 50053
 #     CMD grpc-health-probe -addr=localhost:50053 -service=TTSService
 
 # Run the service (use gRPC server for production)
-CMD ["python", "/app/src/tts_grpc_server.py"]
+CMD ["python", "-m", "src.tts_grpc_server"]

@@ -39,10 +39,10 @@ from .networking import (
 
 from .database import (
     DatabaseManager,
-    TestScenario,
-    TestExecution,
-    StepExecution,
-    IntentTrainingData,
+    DatabaseTestScenario,
+    DatabaseTestExecution,
+    DatabaseStepExecution,
+    DatabaseIntentTrainingData,
     get_database_manager,
     initialize_database
 )
@@ -84,10 +84,10 @@ __all__ = [
     
     # Database
     "DatabaseManager",
-    "TestScenario",
-    "TestExecution",
-    "StepExecution",
-    "IntentTrainingData",
+    "DatabaseTestScenario",
+    "DatabaseTestExecution",
+    "DatabaseStepExecution",
+    "DatabaseIntentTrainingData",
     "get_database_manager",
     "initialize_database",
 ]

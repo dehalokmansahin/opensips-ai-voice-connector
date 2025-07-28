@@ -132,6 +132,8 @@ class ServiceRegistry:
             return self.config.asr.endpoint
         elif service_name == 'tts':
             return self.config.tts.endpoint
+        elif service_name == 'intent' and hasattr(self.config, 'intent_recognition') and self.config.intent_recognition:
+            return self.config.intent_recognition.endpoint
         elif service_name == 'vad' and self.config.vad:
             return self.config.vad.endpoint
         return None
@@ -185,7 +187,7 @@ class ServiceRegistry:
                     'healthy': self._service_status.get(name, False),
                     'endpoint': self.get_service_endpoint(name)
                 }
-                for name in ['asr', 'tts', 'vad']
+                for name in ['asr', 'tts', 'intent', 'vad']
                 if self.get_service_endpoint(name) is not None
             },
             'total_services': len(self._channels),

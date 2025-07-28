@@ -1,0 +1,158 @@
+{
+  "turkish_bank_call_center_scenarios": {
+    "model_version": "turkish-bank-mock-v1.0",
+    "description": "Mock scenarios for Turkish bank call center IVR testing",
+    "scenarios": [
+      {
+        "scenario_id": "balance_inquiry_1",
+        "intent": "hesap_bakiye_sorgulama",
+        "customer_input": "Merhaba, hesap bakiyemi öğrenmek istiyorum",
+        "expected_response": {
+          "intent": "hesap_bakiye_sorgulama",
+          "confidence": 0.92,
+          "meets_threshold": true
+        },
+        "test_variations": [
+          "bakiyemi kontrol etmek istiyorum",
+          "hesabımda ne kadar param var",
+          "para durumum nasıl",
+          "hesapta kaç lira var"
+        ]
+      },
+      {
+        "scenario_id": "credit_card_info_1", 
+        "intent": "kredi_karti_bilgi",
+        "customer_input": "Kredi kartım ne zaman gelir?",
+        "expected_response": {
+          "intent": "kredi_karti_bilgi",
+          "confidence": 0.88,
+          "meets_threshold": true
+        },
+        "test_variations": [
+          "kartımın limiti nedir",
+          "kredi kartı başvurusu yapmak istiyorum",
+          "kart borcum ne kadar",
+          "son kullanma tarihi nedir"
+        ]
+      },
+      {
+        "scenario_id": "customer_service_1",
+        "intent": "musteri_hizmetleri",
+        "customer_input": "Müşteri hizmetleriyle konuşmak istiyorum",
+        "expected_response": {
+          "intent": "musteri_hizmetleri", 
+          "confidence": 0.85,
+          "meets_threshold": true
+        },
+        "test_variations": [
+          "temsilciyle görüşmek istiyorum",
+          "operatöre bağlanmak istiyorum",
+          "insan operatör istiyorum",
+          "canlı destek lazım"
+        ]
+      },
+      {
+        "scenario_id": "money_transfer_1",
+        "intent": "havale_eft",
+        "customer_input": "Para göndermek istiyorum",
+        "expected_response": {
+          "intent": "havale_eft",
+          "confidence": 0.87,
+          "meets_threshold": true
+        },
+        "test_variations": [
+          "havale yapmak istiyorum",
+          "eft işlemi yapmak istiyorum", 
+          "başka hesaba para transferi",
+          "para yatırmak istiyorum"
+        ]
+      },
+      {
+        "scenario_id": "password_reset_1",
+        "intent": "sifre_unutma",
+        "customer_input": "Şifremi unuttum, yardım edin",
+        "expected_response": {
+          "intent": "sifre_unutma",
+          "confidence": 0.93,
+          "meets_threshold": true
+        },
+        "test_variations": [
+          "internet bankacılığı şifremi unutdum",
+          "kart şifremi unuttum",
+          "yeni şifre almak istiyorum",
+          "şifre sıfırlama istiyorum"
+        ]
+      },
+      {
+        "scenario_id": "account_opening_1",
+        "intent": "hesap_acma",
+        "customer_input": "Yeni hesap açmak istiyorum",
+        "expected_response": {
+          "intent": "hesap_acma",
+          "confidence": 0.90,
+          "meets_threshold": true
+        },
+        "test_variations": [
+          "banka hesabı açtırmak istiyorum",
+          "vadesiz hesap açmak istiyorum",
+          "mevduat hesabı istiyorum",
+          "tasarruf hesabı açtırmak istiyorum"
+        ]
+      },
+      {
+        "scenario_id": "complaint_1",
+        "intent": "sikayet",
+        "customer_input": "Şikayet etmek istiyorum",
+        "expected_response": {
+          "intent": "sikayet",
+          "confidence": 0.82,
+          "meets_threshold": true
+        },
+        "test_variations": [
+          "memnun değilim hizmetinizden",
+          "sorun yaşıyorum hesabımla",
+          "hatalı işlem yapılmış",
+          "problem var kartımda"
+        ]
+      },
+      {
+        "scenario_id": "unknown_intent_1",
+        "intent": "bilinmeyen",
+        "customer_input": "Bugün hava çok güzel",
+        "expected_response": {
+          "intent": "bilinmeyen",
+          "confidence": 0.30,
+          "meets_threshold": false
+        },
+        "test_variations": [
+          "nasılsınız",
+          "teşekkür ederim",
+          "merhaba arkadaşım",
+          "görüşürüz"
+        ]
+      }
+    ],
+    "testing_instructions": {
+      "confidence_thresholds": {
+        "hesap_bakiye_sorgulama": 0.85,
+        "kredi_karti_bilgi": 0.80,
+        "musteri_hizmetleri": 0.75,
+        "havale_eft": 0.82,
+        "sifre_unutma": 0.88,
+        "hesap_acma": 0.85,
+        "sikayet": 0.70,
+        "bilinmeyen": 0.50
+      },
+      "batch_testing": {
+        "description": "Test multiple scenarios in batch for performance testing",
+        "recommended_batch_size": 10,
+        "expected_processing_time_per_item": "< 50ms"
+      },
+      "performance_expectations": {
+        "response_time": "< 100ms per classification",
+        "accuracy": "> 85% for known intents",
+        "availability": "99% uptime expected"
+      }
+    }
+  }
+}
