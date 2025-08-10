@@ -1,45 +1,45 @@
-# Core dependencies
-deepgram-sdk
-aiortc
-openai
-opensips==0.1.5
-sipmessage==0.5.0
-requests==2.32.3
-websockets==15.0.1
-
-# Audio processing
-numpy==2.2.5
-soundfile==0.12.1
-scipy==1.15.2
-torch==2.7.0
-torchaudio==2.7.0
-silero-vad==5.1.2
-
-# ✅ Native Pipecat VAD dependencies
-onnxruntime==1.19.2 
-
-
-# HTTP client
-aiohttp==3.9.1
-
-# Configuration validation
-validators==0.34.0
-pydantic==2.10.4
-
-# Logging
-structlog==24.1.0
-loguru==0.7.2
-pyloudnorm==0.1.1
-
-# Audio resampling (with NumPy 2.x compatibility stub)
-# soxr==0.3.7  # Commented out due to NumPy 2.x compatibility issues
-
-# Testing
-pytest==8.2.1
-pytest-asyncio==0.23.6
-
-# Additional dependencies for our services
+# Essential dependencies for OpenSIPS AI Voice Connector with local pipecat
+# Application-specific dependencies
 asyncio-mqtt==0.16.2
-python-multipart==0.0.9
-uvicorn==0.27.0
-fastapi==0.108.0
+websockets==15.0.1
+requests==2.32.3
+validators==0.34.0
+structlog==24.1.0
+soundfile==0.12.1
+
+# VAD (Voice Activity Detection) - Required for SileroVADAnalyzer
+#torch==2.7.0
+#torchaudio==2.7.0  
+silero-vad==5.1.2
+onnxruntime==1.22.1
+ 
+# Pipecat core dependencies (Python 3.11 compatible versions)
+aiohttp>=3.11.12,<4
+docstring_parser>=0.16
+loguru>=0.7.3
+Markdown>=3.7,<4
+nltk>=3.9.1,<4
+numpy>=1.26.4,<3
+Pillow>=11.1.0,<12
+audioop-lts; python_version>='3.13'
+protobuf>=5.29.3
+pydantic>=2.10.6,<3
+pyloudnorm>=0.1.1
+resampy>=0.4.3
+soxr>=0.5.0
+openai>=1.74.0,<=1.99.1
+# Pinning numba to resolve package dependencies (may need newer version for Python 3.13)
+numba>=0.61.2
+
+# Additional dependencies
+cffi==1.17.1
+typing-extensions==4.12.2
+
+# REMOVED UNUSED DEPENDENCIES:
+# scipy==1.15.2              # Not imported in source code
+# pyloudnorm==0.1.1           # Not imported in source code
+# pytest==8.2.1              # Testing only, not needed in production
+# pytest-asyncio==0.23.6     # Testing only, not needed in production  
+# python-multipart==0.0.9    # Not imported in source code
+# uvicorn==0.27.0            # Not imported in source code
+# fastapi==0.108.0           # Not imported in source code

@@ -183,7 +183,8 @@ class OpenSIPSAIVoiceConnector:
                 config_dict = {
                     'stt': dict(get_config_section('stt') or {}),
                     'llm': dict(get_config_section('llm') or {}),
-                    'tts': dict(get_config_section('tts') or {})
+                    'tts': dict(get_config_section('tts') or {}),
+                    'openai': dict(get_config_section('openai') or {})
                 }
                 
                 # Start bot using Twilio/Telnyx pattern - single function call!

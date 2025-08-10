@@ -1,0 +1,93 @@
+# Exclude large and unnecessary files from Docker build context
+
+# Pipecat examples and documentation (LARGEST FILES - 3GB+)
+pipecat/examples/
+pipecat/docs/
+pipecat/tests/
+pipecat/scripts/
+
+# Development and git files
+.git/
+.gitignore
+*.md
+README.md
+LICENSE
+
+# Docker and compose files
+docker-compose*.yml
+Dockerfile*
+*.dockerfile
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python cache and build files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Log files
+logs/
+*.log
+
+# Temporary files
+temp/
+tmp/
+*.tmp
+
+# Audio/media files (if any)
+*.wav
+*.mp3
+*.mp4
+*.avi
+
+# Model files (should be mounted externally)
+models/
+*.gguf
+*.bin
+*.onnx
+
+# Test files
+test*/
+*test*
+*.test
+
+# Documentation images
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+# Environment files
+.env*
+docker.env*

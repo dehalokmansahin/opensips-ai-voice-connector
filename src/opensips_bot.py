@@ -60,8 +60,9 @@ from rate_limited_observer import RateLimitedObserver
 
 # Import our services
 from services.vosk_websocket import VoskWebsocketSTTService
-from services.llama_websocket import LlamaWebsocketLLMService  
 from services.piper_websocket import PiperWebsocketTTSService
+from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.services.openai.base_llm import BaseOpenAILLMService
 
 # Import our transport
 from transports.opensips_transport import create_opensips_transport
@@ -167,12 +168,20 @@ async def run_opensips_bot(
                    sample_rate=pipeline_sample_rate,
                    note="Vosk STT always uses 16kHz regardless of RTP input rate")
         
-        llm_config = config.get('llm', {}) if config else {}
-        llm = LlamaWebsocketLLMService(
-            url=llm_config.get('url', 'ws://llm-turkish-server:8765'),
-            model=llm_config.get('model', 'llama3.2:3b-instruct-turkish'),
-            temperature=float(llm_config.get('temperature', '0.2')),
-            max_tokens=int(llm_config.get('max_tokens', '80'))
+        openai_config = config.get('openai', {}) if config else {}
+        openai_model = openai_config.get('model', 'gpt-4o')
+        openai_temperature = float(openai_config.get('temperature', '0.2'))
+        openai_top_p = float(openai_config.get('top_p', '0.7'))
+        openai_max_tokens = int(openai_config.get('max_tokens', '80'))
+
+        llm = OpenAILLMService(
+            api_key=os.getenv('OPENAI_API_KEY'),
+            model=openai_model,
+            params=BaseOpenAILLMService.InputParams(
+                temperature=openai_temperature,
+                top_p=openai_top_p,
+                max_completion_tokens=openai_max_tokens,
+            ),
         )
         
         tts_config = config.get('tts', {}) if config else {}
@@ -190,7 +199,8 @@ async def run_opensips_bot(
                 "role": "system",
                 "content": (
                     "Sen bir banka müşteri hizmetleri sanal asistanısın. Kullanıcıya para transferi, fatura ödeme, yatırım işlemleri gibi "
-                    "bankacılık konularında yardımcı olursun. Cevapların kısa, net ve anlaşılır olmalıdır."
+                    "bankacılık konularında yardımcı olursun. Cevapların kısa, net ve anlaşılır olmalıdır. "
+                    "Her zaman kesinlikle Türkçe yanıt ver."
                 ),
             }
         ]
@@ -203,7 +213,7 @@ async def run_opensips_bot(
             transport.input(),              # OpenSIPS input
             stt,                            # Speech-To-Text (Vosk)
             context_aggregator.user(),      # User context
-            llm,                            # LLM (Llama) – streams tokens
+            llm,                            # LLM (OpenAI) – streams tokens
             SentenceAggregator(),      # Buffer until sentence or LLM end
             tts,                            # Text-To-Speech (Piper) – receives sentence text
             transport.output(),             # RTP output to OpenSIPS
