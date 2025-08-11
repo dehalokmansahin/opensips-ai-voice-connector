@@ -19,18 +19,18 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && rm -rf /var/cache/apt/archives/*
 
 # Copy cleaned requirements (without pipecat-ai since we'll use local)
-COPY requirements.txt .
+COPY opensips-ai-voice-connector/requirements.txt .
 
 # Install Python dependencies and clean up
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt
 
-# Copy local pipecat source (with fixed __init__.py)
-COPY pipecat/ /app/pipecat/
+# Copy voice-ai-core source (our custom voice processing framework)
+COPY voice_ai_core/ /app/voice_ai_core/
 
 # Copy only essential application files
-COPY src/ /app/src/
-COPY cfg/ /app/cfg/
+COPY opensips-ai-voice-connector/src/ /app/src/
+COPY opensips-ai-voice-connector/cfg/ /app/cfg/
 
 # Create minimal startup script
 RUN echo '#!/bin/bash\ncd /app\npython src/main.py' > /app/startup.sh \

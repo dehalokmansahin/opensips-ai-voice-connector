@@ -45,15 +45,27 @@ import structlog
 
 structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
 
-from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineParams, PipelineTask
-from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
-from pipecat.frames.frames import TextFrame
-from pipecat.observers.loggers.debug_log_observer import DebugLogObserver
-from pipecat.frames.frames import TTSStartedFrame, TTSStoppedFrame
+# COMPLETE MIGRATION: Now using voice-ai-core exclusively - NO Pipecat dependencies!
+import sys
+import os
+
+# Add parent directory to path so voice_ai_core can be imported
+parent_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
+if parent_path not in sys.path:
+    sys.path.insert(0, parent_path)
+
+# Add current src directory to Python path for local imports
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+
+from voice_ai_core.pipeline import Pipeline, PipelineRunner, PipelineTask, PipelineParams
+from voice_ai_core.frames import TextFrame, TTSStartedFrame, TTSStoppedFrame
+
+# Now using voice-ai-core for ALL components - complete migration!
+from voice_ai_core.audio import VADParams, SileroVADAnalyzer
+from voice_ai_core.processors import OpenAILLMContext
+from voice_ai_core.observers import DebugLogObserver
 
 # Custom rate-limited wrapper to avoid log floods
 from rate_limited_observer import RateLimitedObserver
@@ -61,18 +73,15 @@ from rate_limited_observer import RateLimitedObserver
 # Import our services
 from services.vosk_websocket import VoskWebsocketSTTService
 from services.piper_websocket import PiperWebsocketTTSService
-from pipecat.services.openai.llm import OpenAILLMService
-from pipecat.services.openai.base_llm import BaseOpenAILLMService
+from voice_ai_core.services import OpenAILLMService, BaseOpenAILLMService
 
 # Import our transport
 from transports.opensips_transport import create_opensips_transport
 
-# Pipecat observers for higher-level insights (no low-level RTP spam)
-from pipecat.observers.loggers.llm_log_observer import LLMLogObserver
-from pipecat.observers.loggers.transcription_log_observer import TranscriptionLogObserver
-from pipecat.observers.loggers.user_bot_latency_log_observer import UserBotLatencyLogObserver
+# Now using voice-ai-core observers
+from voice_ai_core.observers import LLMLogObserver, TranscriptionLogObserver, UserBotLatencyLogObserver
 
-from pipecat.processors.aggregators.sentence import SentenceAggregator
+from voice_ai_core.processors import SentenceAggregator
 
 logger = structlog.get_logger()
 
@@ -107,7 +116,6 @@ async def run_opensips_bot(
         
         # 🔧 TEST: Use more sensitive VAD params for better Turkish speech detection
         # Default Twilio params might be too conservative
-        from pipecat.audio.vad.vad_analyzer import VADParams
         
         vad_analyzer = SileroVADAnalyzer(
             params=VADParams(
@@ -174,10 +182,12 @@ async def run_opensips_bot(
         openai_top_p = float(openai_config.get('top_p', '0.7'))
         openai_max_tokens = int(openai_config.get('max_tokens', '80'))
 
+        from voice_ai_core.services import OpenAILLMInputParams
+        
         llm = OpenAILLMService(
             api_key=os.getenv('OPENAI_API_KEY'),
             model=openai_model,
-            params=BaseOpenAILLMService.InputParams(
+            params=OpenAILLMInputParams(
                 temperature=openai_temperature,
                 top_p=openai_top_p,
                 max_completion_tokens=openai_max_tokens,

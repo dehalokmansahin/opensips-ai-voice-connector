@@ -11,17 +11,31 @@ import structlog
 import random
 from transports.rtp_utils import generate_rtp_packet
 
-from pipecat.frames.frames import (
+# Updated to use voice-ai-core instead of full Pipecat
+import sys
+import os
+
+# Add parent directory to path so voice_ai_core can be imported
+parent_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..'))
+if parent_path not in sys.path:
+    sys.path.insert(0, parent_path)
+
+# Add parent src directory to Python path for local imports
+src_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
+
+from voice_ai_core.frames import (
     Frame, InputAudioRawFrame, OutputAudioRawFrame, StartFrame, EndFrame,
     CancelFrame, UserStartedSpeakingFrame, UserStoppedSpeakingFrame,
     VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame
 )
-from pipecat.transports.base_input import BaseInputTransport
-from pipecat.transports.base_output import BaseOutputTransport  
-from pipecat.transports.base_transport import BaseTransport, TransportParams
+from voice_ai_core.transports import BaseInputTransport, BaseOutputTransport, BaseTransport, TransportParams
+from voice_ai_core.pipeline import FrameDirection
+
+# Keep Pipecat components that are not yet migrated
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADState
-from pipecat.processors.frame_processor import FrameDirection
 
 # Import our new serializer
 from serializers.opensips import OpenSIPSFrameSerializer

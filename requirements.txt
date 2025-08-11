@@ -1,4 +1,4 @@
-# Essential dependencies for OpenSIPS AI Voice Connector with local pipecat
+# Essential dependencies for OpenSIPS AI Voice Connector with voice-ai-core
 # Application-specific dependencies
 asyncio-mqtt==0.16.2
 websockets==15.0.1
@@ -7,13 +7,13 @@ validators==0.34.0
 structlog==24.1.0
 soundfile==0.12.1
 
-# VAD (Voice Activity Detection) - Required for SileroVADAnalyzer
-#torch==2.7.0
-#torchaudio==2.7.0  
-silero-vad==5.1.2
+# VAD (Voice Activity Detection) - Silero VAD with ONNX Runtime (no PyTorch!)
+# Using ONNX runtime for Silero model - much lighter than PyTorch
 onnxruntime==1.22.1
+# Note: We'll use our own Silero ONNX implementation without silero-vad package
+# to avoid PyTorch dependency while still getting the actual Silero model
  
-# Pipecat core dependencies (Python 3.11 compatible versions)
+# Voice-AI-Core dependencies (Python 3.13 compatible versions)
 aiohttp>=3.11.12,<4
 docstring_parser>=0.16
 loguru>=0.7.3
