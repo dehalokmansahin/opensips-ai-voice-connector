@@ -10,15 +10,15 @@ import asyncio
 import structlog
 import numpy as np
 
-# Pipecat imports
-from pipecat.frames.frames import (
+# Voice-AI-Core imports
+from voice_ai_core.frames import (
     Frame,
     StartFrame, 
     InputAudioRawFrame,
     AudioRawFrame
 )
-from pipecat.serializers.base_serializer import FrameSerializer, FrameSerializerType
-from pipecat.audio.utils import create_default_resampler, pcm_to_ulaw, ulaw_to_pcm
+from voice_ai_core.compat import FrameSerializer, FrameSerializerType
+from voice_ai_core.audio import create_default_resampler, pcm_to_ulaw, ulaw_to_pcm
 from transports.rtp_utils import decode_rtp_packet
 
 logger = structlog.get_logger()

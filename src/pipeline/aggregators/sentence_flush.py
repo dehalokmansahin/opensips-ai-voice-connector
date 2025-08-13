@@ -12,14 +12,14 @@ Usage:
 
 from typing import Optional
 
-from pipecat.frames.frames import (
+from voice_ai_core.frames import (
     Frame,
     TextFrame,
     EndFrame,
     LLMFullResponseEndFrame,
 )
-from pipecat.processors.frame_processor import FrameDirection
-from pipecat.processors.aggregators.sentence import SentenceAggregator
+from voice_ai_core.processors import FrameDirection
+from voice_ai_core.processors import SentenceAggregator
 
 
 class SentenceFlushAggregator(SentenceAggregator):

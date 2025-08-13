@@ -10,14 +10,14 @@ from typing import AsyncGenerator, Optional
 import structlog
 import numpy as np
 
-from pipecat.frames.frames import (
+from voice_ai_core.frames import (
     Frame, AudioRawFrame, EndFrame, ErrorFrame, 
     InterimTranscriptionFrame, StartFrame, TranscriptionFrame,
     UserStartedSpeakingFrame, UserStoppedSpeakingFrame,
     VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame
 )
-from pipecat.services.stt_service import STTService
-from pipecat.processors.frame_processor import FrameDirection
+from voice_ai_core.services import STTService
+from voice_ai_core.processors import FrameDirection
 
 logger = structlog.get_logger()
 

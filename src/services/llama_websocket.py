@@ -9,15 +9,15 @@ import websockets
 from typing import AsyncGenerator, Optional, List, Dict, Any
 import structlog
 
-from pipecat.frames.frames import (
+from voice_ai_core.frames import (
     Frame, TextFrame, EndFrame, ErrorFrame, StartFrame,
     LLMFullResponseStartFrame, LLMFullResponseEndFrame, LLMTextFrame,
     LLMMessagesFrame
 )
-from pipecat.services.llm_service import LLMService
-from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext, OpenAILLMContextFrame
-from pipecat.processors.aggregators.llm_response import (
+from voice_ai_core.services import LLMService
+from voice_ai_core.processors import FrameDirection, FrameProcessor
+from voice_ai_core.processors import OpenAILLMContext, OpenAILLMContextFrame
+from voice_ai_core.processors import (
     LLMUserContextAggregator,
     LLMAssistantContextAggregator,
 )

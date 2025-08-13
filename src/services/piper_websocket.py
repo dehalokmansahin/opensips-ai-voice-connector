@@ -9,12 +9,12 @@ import websockets
 from typing import AsyncGenerator, Optional
 import structlog
 
-from pipecat.frames.frames import (
+from voice_ai_core.frames import (
     Frame, TextFrame, EndFrame, ErrorFrame, StartFrame,
     TTSAudioRawFrame, TTSStartedFrame, TTSStoppedFrame
 )
-from pipecat.services.tts_service import TTSService
-from pipecat.processors.frame_processor import FrameDirection
+from voice_ai_core.services import TTSService
+from voice_ai_core.processors import FrameDirection
 
 logger = structlog.get_logger()
 

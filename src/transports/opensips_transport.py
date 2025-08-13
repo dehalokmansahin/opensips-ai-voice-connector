@@ -33,9 +33,8 @@ from voice_ai_core.frames import (
 from voice_ai_core.transports import BaseInputTransport, BaseOutputTransport, BaseTransport, TransportParams
 from voice_ai_core.pipeline import FrameDirection
 
-# Keep Pipecat components that are not yet migrated
-from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.audio.vad.vad_analyzer import VADState
+# Use voice-ai-core VAD components  
+from voice_ai_core.audio import SileroVADAnalyzer, VADState
 
 # Import our new serializer
 from serializers.opensips import OpenSIPSFrameSerializer
@@ -99,25 +98,56 @@ class VADObserver:
 class OpenSIPSTransportParams(TransportParams):
     """OpenSIPS Transport Parameters - Following Pydantic BaseModel pattern"""
     
-    # OpenSIPS specific fields
-    bind_ip: str = "0.0.0.0"
-    bind_port: int = 0
-    call_id: Optional[str] = None
-    serializer: Optional[OpenSIPSFrameSerializer] = None
-    
-    # 🔧 TWILIO PATTERN: Add fields like FastAPIWebsocketParams
-    add_wav_header: bool = False  # Like Twilio example
-    
-    # 🔧 CRITICAL FIX: Inherit ALL base TransportParams fields including vad_analyzer
-    # Override only the specific audio settings we need for RTP
-    audio_in_enabled: bool = True
-    audio_out_enabled: bool = True
-    audio_in_sample_rate: int = 8000   # RTP is 8kHz input
-    audio_out_sample_rate: int = 8000  # RTP is 8kHz output
-    audio_in_passthrough: bool = True  # Must be True for audio to reach STT
-    
-    # 🔧 Note: vad_analyzer field is inherited from TransportParams
-    # This was the critical missing piece for VAD to work!
+    def __init__(self, bind_ip: str = "0.0.0.0", bind_port: int = 0, 
+                 call_id: Optional[str] = None, 
+                 serializer: Optional[OpenSIPSFrameSerializer] = None,
+                 add_wav_header: bool = False,
+                 audio_in_sample_rate: int = 8000,
+                 audio_out_sample_rate: int = 8000,
+                 audio_in_passthrough: bool = True,
+                 **kwargs):
+        # Store OpenSIPS specific fields first
+        self.bind_ip = bind_ip
+        self.bind_port = bind_port
+        self.call_id = call_id
+        self.serializer = serializer
+        self.add_wav_header = add_wav_header
+        self.audio_in_sample_rate = audio_in_sample_rate
+        self.audio_out_sample_rate = audio_out_sample_rate
+        self.audio_in_passthrough = audio_in_passthrough
+        
+        # Extract parent class parameters from kwargs
+        parent_kwargs = {}
+        if 'audio_in_enabled' in kwargs:
+            parent_kwargs['audio_in_enabled'] = kwargs.pop('audio_in_enabled')
+        else:
+            parent_kwargs['audio_in_enabled'] = True
+            
+        if 'audio_out_enabled' in kwargs:
+            parent_kwargs['audio_out_enabled'] = kwargs.pop('audio_out_enabled')
+        else:
+            parent_kwargs['audio_out_enabled'] = True
+            
+        if 'vad_enabled' in kwargs:
+            parent_kwargs['vad_enabled'] = kwargs.pop('vad_enabled')
+        else:
+            parent_kwargs['vad_enabled'] = True
+            
+        if 'vad_analyzer' in kwargs:
+            parent_kwargs['vad_analyzer'] = kwargs.pop('vad_analyzer')
+            
+        if 'sample_rate' in kwargs:
+            parent_kwargs['sample_rate'] = kwargs.pop('sample_rate')
+        else:
+            parent_kwargs['sample_rate'] = 16000
+            
+        if 'channels' in kwargs:
+            parent_kwargs['channels'] = kwargs.pop('channels')
+        else:
+            parent_kwargs['channels'] = 1
+        
+        # Pass only valid parent parameters
+        super().__init__(**parent_kwargs)
 
 
 class OpenSIPSInputTransport(BaseInputTransport):
@@ -140,7 +170,6 @@ class OpenSIPSInputTransport(BaseInputTransport):
     
     async def _vad_analyze(self, audio_frame: InputAudioRawFrame) -> VADState:
         """🔧 OVERRIDE: Add debug logging to VAD analysis"""
-        from pipecat.audio.vad.vad_analyzer import VADState
         
         state = VADState.QUIET
         if self.vad_analyzer:
@@ -468,7 +497,7 @@ class OpenSIPSTransport(BaseTransport):
     """
     
     def __init__(self, params: OpenSIPSTransportParams):
-        super().__init__()
+        super().__init__(params)
         self._params = params
         self._input_transport = OpenSIPSInputTransport(self, params)
         self._output_transport = OpenSIPSOutputTransport(self, params)
@@ -530,6 +559,20 @@ class OpenSIPSTransport(BaseTransport):
         """Get SDP information for 200 OK response"""
         if self._params.serializer:
             return self._params.serializer.get_sdp_info()
+        
+    async def start(self):
+        """Start the transport"""
+        await super().start()
+        await self._input_transport.start()
+        await self._output_transport.start()
+        logger.info("OpenSIPS Transport started", call_id=self._params.call_id)
+    
+    async def stop(self):
+        """Stop the transport"""
+        await self._input_transport.stop()
+        await self._output_transport.stop()
+        await super().stop()
+        logger.info("OpenSIPS Transport stopped", call_id=self._params.call_id)
         
         # Fallback SDP info
         media_ip = self._params.bind_ip

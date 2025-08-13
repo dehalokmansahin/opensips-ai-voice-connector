@@ -13,7 +13,7 @@ Example
 >>> task.add_observer(rate_limited)
 """
 
-from pipecat.observers.base_observer import BaseObserver, FramePushed
+from voice_ai_core.observers import BaseObserver, FramePushed
 
 
 class RateLimitedObserver(BaseObserver):
