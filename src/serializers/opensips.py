@@ -114,7 +114,7 @@ class OpenSIPSFrameSerializer(FrameSerializer):
         
         try:
             # Decode the full RTP packet to extract the payload
-            logger.debug("🔍 Decoding RTP packet", call_id=self.call_id, 
+            logger.info("🔍 DECODING RTP PACKET", call_id=self.call_id, 
                         packet_size=len(data), packet_hex=data[:20].hex())
             rtp_info = decode_rtp_packet(data)
             ulaw_payload = rtp_info.get("payload")

@@ -6,11 +6,11 @@ Simplified implementation aligned with document specifications
 import asyncio
 import json
 import websockets
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, Optional, AsyncIterator
 import structlog
 
 from voice_ai_core.frames import (
-    Frame, TextFrame, EndFrame, ErrorFrame, StartFrame,
+    Frame, AudioFrame, TextFrame, EndFrame, ErrorFrame, StartFrame,
     TTSAudioRawFrame, TTSStartedFrame, TTSStoppedFrame
 )
 from voice_ai_core.services import TTSService
@@ -32,9 +32,10 @@ class PiperWebsocketTTSService(TTSService):
         sample_rate: int = 22050,
         **kwargs
     ):
-        super().__init__(sample_rate=sample_rate, **kwargs)
+        super().__init__(**kwargs)
         self._url = url
         self._voice = voice
+        self.sample_rate = sample_rate
         self._websocket: Optional = None
         self._listener_task: Optional[asyncio.Task] = None
         self._is_connected = False
@@ -45,20 +46,21 @@ class PiperWebsocketTTSService(TTSService):
                    sample_rate=sample_rate,
                    pattern="document_compliant")
 
-    async def start(self, frame: StartFrame):
+    async def start(self, frame: StartFrame = None):
         """Start the TTS service and WebSocket connection"""
-        await super().start(frame)
+        await super().start()
         await self._start_websocket_connection()
 
-    async def stop(self, frame: EndFrame):
+    async def stop(self, frame: EndFrame = None):
         """Stop the TTS service and WebSocket connection"""
         await self._stop_websocket_connection()
-        await super().stop(frame)
+        await super().stop()
 
-    async def cancel(self, frame: EndFrame):
+    async def cancel(self, frame: EndFrame = None):
         """Cancel the TTS service and WebSocket connection"""
         await self._stop_websocket_connection()
-        await super().cancel(frame)
+        # Note: FrameProcessor doesn't have a cancel method, so we just stop
+        await super().stop()
 
     async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
         """
@@ -92,6 +94,33 @@ class PiperWebsocketTTSService(TTSService):
         except Exception as e:
             logger.error("Error sending text to Piper", error=str(e))
             yield ErrorFrame(error=f"Piper synthesis error: {e}")
+
+    async def synthesize(self, text: str) -> AsyncIterator[AudioFrame]:
+        """
+        Required abstract method implementation for TTSService
+        Synthesize text to audio - processes via WebSocket
+        """
+        # This method is required by the base class but our implementation
+        # works through run_tts method which handles the actual synthesis
+        # For compatibility, we'll delegate to run_tts and filter for audio frames
+        async for frame in self.run_tts(text):
+            if isinstance(frame, TTSAudioRawFrame):
+                yield frame
+
+    async def say(self, text: str):
+        """
+        Compatibility method for Pipecat-style TTS usage
+        Queue text for synthesis and push frames to pipeline
+        """
+        if not text or not text.strip():
+            logger.debug("Empty text provided to say method")
+            return
+        
+        logger.info("📢 TTS say() called", text_preview=text[:50])
+        
+        # Process the text through run_tts and push frames to pipeline
+        async for frame in self.run_tts(text):
+            await self.push_frame(frame)
 
     async def _start_websocket_connection(self):
         """Start WebSocket connection following document pattern"""

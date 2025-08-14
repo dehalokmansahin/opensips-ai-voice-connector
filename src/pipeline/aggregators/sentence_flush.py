@@ -28,16 +28,18 @@ class SentenceFlushAggregator(SentenceAggregator):
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         # Let the parent class handle TextFrame accumulation and EndFrame logic.
         if isinstance(frame, TextFrame):
-            await super().process_frame(frame, direction)
+            async for processed_frame in super().process_frame(frame, direction):
+                yield processed_frame
             return
 
         # If the LLM signals its response end, flush any buffered text first.
         if isinstance(frame, LLMFullResponseEndFrame):
             if self._aggregation:
-                await self.push_frame(TextFrame(self._aggregation))
+                yield TextFrame(self._aggregation)
                 self._aggregation = ""
-            await self.push_frame(frame, direction)
+            yield frame
             return
 
         # Delegate EndFrame and other frame types to the parent implementation.
-        await super().process_frame(frame, direction) 
+        async for processed_frame in super().process_frame(frame, direction):
+            yield processed_frame 

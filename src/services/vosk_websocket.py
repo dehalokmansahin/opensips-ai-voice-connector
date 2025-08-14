@@ -6,12 +6,12 @@ Simplified implementation aligned with document specifications
 import asyncio
 import json
 import websockets
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, Optional, AsyncIterator
 import structlog
 import numpy as np
 
 from voice_ai_core.frames import (
-    Frame, AudioRawFrame, EndFrame, ErrorFrame, 
+    Frame, AudioFrame, AudioRawFrame, EndFrame, ErrorFrame, 
     InterimTranscriptionFrame, StartFrame, TranscriptionFrame,
     UserStartedSpeakingFrame, UserStoppedSpeakingFrame,
     VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame
@@ -70,7 +70,9 @@ class VoskWebsocketSTTService(STTService):
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Process frames following document pattern"""
-        await super().process_frame(frame, direction)
+        # Process frame through parent async generator
+        async for processed_frame in super().process_frame(frame, direction):
+            yield processed_frame
 
         if isinstance(frame, StartFrame):
             await self._start_websocket_connection()
@@ -89,7 +91,8 @@ class VoskWebsocketSTTService(STTService):
                 await self._send_audio(bytes(self._audio_buffer))
                 self._audio_buffer.clear()
             await self._stop_websocket_connection()
-            await self.push_frame(frame)
+            # Pass through EndFrame
+            yield frame
         else:
             # 🔧 DEBUG: Log VAD-related frames to track speech detection
             if isinstance(frame, UserStartedSpeakingFrame):
@@ -117,7 +120,8 @@ class VoskWebsocketSTTService(STTService):
                         self._silence_task.cancel()
                     self._silence_task = asyncio.create_task(self._on_silence_timeout())
             
-            await self.push_frame(frame, direction)
+            # Pass through all other frames
+            yield frame
 
     async def _start_websocket_connection(self):
         """Start WebSocket connection and listener following document pattern"""
@@ -295,14 +299,26 @@ class VoskWebsocketSTTService(STTService):
                 pass
             self._listener_task = None
 
+    async def transcribe(self, audio: AudioFrame) -> AsyncIterator[TranscriptionFrame]:
+        """
+        Required abstract method implementation for STTService
+        Transcribe audio frame to text - processes via WebSocket
+        """
+        # This method is required by the base class but our implementation
+        # works through process_frame method which handles AudioRawFrame
+        # For compatibility, we'll yield nothing as transcription happens
+        # asynchronously through the WebSocket listener
+        if False:  # This makes it an async generator but never executes
+            yield TranscriptionFrame(text="", user_id="", timestamp="")
+    
     async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
         """
         Legacy compatibility method - not used in processor-based model
         Following document pattern for service compatibility
         """
         # Empty generator as per document guidance
-        return
-        yield  # Unreachable, just for generator syntax
+        if False:  # This makes it an async generator but never executes
+            yield  # Unreachable, just for generator syntax
 
     async def process_audio_chunk(self, audio_chunk: bytes) -> Optional[str]:
         """Test için: ses chunk'ını işle ve sonuç döndür"""

@@ -198,8 +198,8 @@ async def run_opensips_bot(
         tts = PiperWebsocketTTSService(
             url=tts_config.get('url', 'ws://piper-tts-server:8000/tts'),
             voice=tts_config.get('voice', 'tr_TR-dfki-medium'),
-            sample_rate=int(tts_config.get('sample_rate', '22050')),
-            aggregate_sentences=False  # Sentence aggregation handled upstream
+            sample_rate=int(tts_config.get('sample_rate', '22050'))
+            # Note: Sentence aggregation is handled upstream in the pipeline
         )
         
         # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Create conversation context like examples
@@ -232,27 +232,13 @@ async def run_opensips_bot(
         
         # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Create pipeline task like examples
         # 🔧 CRITICAL FIX: Sample rate configuration for RTP/OpenSIPS
+        # Note: Sample rates are handled by individual transport and service configurations
         task = PipelineTask(
             pipeline,
-            params=PipelineParams(
-                # 🔧 RTP comes in at 8kHz, but pipeline processes at 16kHz
-                audio_in_sample_rate=pipeline_sample_rate,     # 🔥 16 kHz
-                audio_out_sample_rate=rtp_sample_rate,    # 8kHz RTP output 
-                enable_metrics=False,                     # Disable metrics initially
-                enable_usage_metrics=False,               # Disable usage metrics initially
-                allow_interruptions=True
-            )
+            name="OpenSIPSVoiceBot"
         )
         
-        # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Attach observers for concise logging
-        task.add_observer(TranscriptionLogObserver())
-        task.add_observer(LLMLogObserver())
-        task.add_observer(UserBotLatencyLogObserver())
-        # Attach rate-limited debug observer to monitor TTS start/stop (no audio frames)
-        debug_observer = DebugLogObserver(
-            frame_types=(TTSStartedFrame, TTSStoppedFrame),
-        )
-        task.add_observer(debug_observer)
+        # Note: Observer pattern simplified in voice-ai-core - logging is handled within processors
         # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Event handlers like examples
         # Send greeting only once even if transport fires the event multiple times
         greeting_sent = False
@@ -279,7 +265,7 @@ async def run_opensips_bot(
             await task.cancel()
         
         # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Create and run pipeline like examples
-        runner = PipelineRunner(handle_sigint=False, force_gc=True)
+        runner = PipelineRunner()
         
         logger.info("Pipeline starting with VAD observer", 
                    call_id=call_id, 

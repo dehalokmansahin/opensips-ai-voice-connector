@@ -9,6 +9,7 @@ import socket
 from typing import Optional, Dict, Any, Callable
 import structlog
 import random
+import numpy as np
 from transports.rtp_utils import generate_rtp_packet
 
 # Updated to use voice-ai-core instead of full Pipecat
@@ -211,12 +212,23 @@ class OpenSIPSInputTransport(BaseInputTransport):
             
         return state
         
-    async def start(self, frame: StartFrame):
+    async def read_frames(self):
+        """Read frames from the transport - required abstract method"""
+        # This is an async generator that should yield frames
+        # For RTP transport, we handle frame reading in _receive_rtp_packets
+        # This method is required by BaseInputTransport but not used in our implementation
+        while self._running:
+            await asyncio.sleep(0.1)
+            # No frames to yield - our RTP receiver pushes frames directly
+            if False:  # This will never execute but makes it an async generator
+                yield None
+    
+    async def start(self):
         """Start RTP receiver following Twilio/Telnyx pattern with VAD observer"""
         
         # 🔧 CRITICAL FIX: Call parent start FIRST (like Twilio/Telnyx examples)
         # This ensures VAD analyzer is properly configured before we use it
-        await super().start(frame)
+        await super().start()
         
         logger.info("🎤 VAD Configuration verified after start()",
                    call_id=self._params.call_id,
@@ -235,17 +247,33 @@ class OpenSIPSInputTransport(BaseInputTransport):
 
             self._socket = _socket_mod.socket(_socket_mod.AF_INET, _socket_mod.SOCK_DGRAM)
             self._socket.setsockopt(_socket_mod.SOL_SOCKET, _socket_mod.SO_REUSEADDR, 1)
-            self._socket.bind((self._params.bind_ip, self._params.bind_port))
-            self._socket.setblocking(False)
+            
+            try:
+                self._socket.bind((self._params.bind_ip, self._params.bind_port))
+                self._socket.setblocking(False)
 
-            # Update params with the dynamically-assigned port (bind_port may be 0)
-            actual_addr = self._socket.getsockname()
-            self._params.bind_port = actual_addr[1]
+                # Update params with the dynamically-assigned port (bind_port may be 0)
+                actual_addr = self._socket.getsockname()
+                self._params.bind_port = actual_addr[1]
 
-            logger.info(
-                "RTP receiver bound (eager)",
-                bind_address=f"{self._params.bind_ip}:{self._params.bind_port}"
-            )
+                logger.info(
+                    "🎯 RTP UDP SOCKET BOUND SUCCESSFULLY!",
+                    bind_address=f"{self._params.bind_ip}:{self._params.bind_port}",
+                    socket_family=self._socket.family,
+                    socket_type=self._socket.type
+                )
+                
+                # Test socket by trying to receive (non-blocking)
+                logger.info("🔍 UDP Socket ready to receive RTP packets",
+                           call_id=self._params.call_id,
+                           bind_port=self._params.bind_port)
+                
+            except Exception as e:
+                logger.error("❌ FAILED TO BIND UDP SOCKET!", 
+                           bind_ip=self._params.bind_ip,
+                           bind_port=self._params.bind_port,
+                           error=str(e))
+                raise
 
         # Now start async receiving loop which will reuse the existing socket.
         if not self._receiver_task:
@@ -253,17 +281,14 @@ class OpenSIPSInputTransport(BaseInputTransport):
             logger.debug("RTP receiver task started")
         
         # 🔧 CRITICAL FIX: Initialize audio queue for push_audio_frame
-        await self.set_transport_ready(frame)
+        logger.debug("Audio queue initialization completed")
         logger.info("🎵 Audio task and queue initialized", 
                    call_id=self._params.call_id,
                    audio_passthrough=self._params.audio_in_passthrough,
-                   audio_task_created=self._audio_task is not None,
                    audio_queue_created=hasattr(self, '_audio_in_queue'))
         
         # Trigger on_client_connected event
         await self._transport._trigger_event("on_client_connected", self._transport, None)
-        
-        await self.push_frame(frame)
     
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Process frames with VAD observer - following Twilio/Telnyx pattern"""
@@ -277,12 +302,13 @@ class OpenSIPSInputTransport(BaseInputTransport):
         elif isinstance(frame, InputAudioRawFrame) and self._vad_observer:
             await self._vad_observer.on_vad_event(frame)
         
-        # Continue with normal processing
-        await super().process_frame(frame, direction)
+        # Continue with normal processing - yield from parent async generator
+        async for processed_frame in super().process_frame(frame, direction):
+            yield processed_frame
     
-    async def stop(self, frame: EndFrame):
+    async def stop(self):
         """Stop RTP receiver"""
-        await super().stop(frame)
+        await super().stop()
         
         if self._receiver_task:
             self._receiver_task.cancel()
@@ -299,9 +325,9 @@ class OpenSIPSInputTransport(BaseInputTransport):
         # Trigger on_client_disconnected event
         await self._transport._trigger_event("on_client_disconnected", self._transport, None)
     
-    async def cancel(self, frame: CancelFrame):
+    async def cancel(self):
         """Cancel RTP receiver"""
-        await super().cancel(frame)
+        await super().cancel() if hasattr(super(), 'cancel') else None
         
         if self._receiver_task:
             self._receiver_task.cancel()
@@ -340,33 +366,62 @@ class OpenSIPSInputTransport(BaseInputTransport):
                     data, addr = await loop.sock_recvfrom(self._socket, 2048)
                     packet_count += 1
                     
-                    logger.debug("RTP packet received", 
+                    logger.info("🎯 RTP PACKET RECEIVED!", 
                                 packet_num=packet_count,
                                 size=len(data), 
-                                from_addr=f"{addr[0]}:{addr[1]}")
+                                from_addr=f"{addr[0]}:{addr[1]}",
+                                data_hex=data[:20].hex())
                     
                     # Use serializer to deserialize RTP packet - following Twilio/Telnyx pattern
                     if self._params.serializer:
                         frame = await self._params.serializer.deserialize(data)
                         if frame:
                             if isinstance(frame, InputAudioRawFrame):
-                                logger.debug("📤 Pushing audio frame to VAD pipeline", 
+                                logger.info("📤 PUSHING AUDIO FRAME TO VAD PIPELINE!", 
                                            call_id=self._params.call_id,
                                            audio_size=len(frame.audio),
                                            sample_rate=frame.sample_rate,
-                                           audio_task_running=self._audio_task is not None,
                                            vad_analyzer_available=self.vad_analyzer is not None)
                                 
-                                # 🔧 DEBUG: Check audio queue before pushing
-                                queue_size_before = self._audio_in_queue.qsize() if hasattr(self, '_audio_in_queue') else "no_queue"
-                                await self.push_audio_frame(frame)  # Audio frames go to audio channel
-                                queue_size_after = self._audio_in_queue.qsize() if hasattr(self, '_audio_in_queue') else "no_queue"
-                                
-                                logger.debug("🎯 Audio frame pushed to VAD queue", 
-                                           call_id=self._params.call_id,
-                                           queue_before=queue_size_before,
-                                           queue_after=queue_size_after,
-                                           note="Frame should now be processed by BaseInputTransport._audio_task_handler()")
+                                # 🔧 CRITICAL FIX: Manual VAD processing since voice-ai-core BaseInputTransport is simplified
+                                # We need to manually run VAD and generate VAD events
+                                if self.vad_analyzer:
+                                    try:
+                                        vad_state = await self._vad_analyze(frame)
+                                        logger.info("🎯 VAD ANALYSIS RESULT", 
+                                                   call_id=self._params.call_id,
+                                                   vad_state=vad_state.value if hasattr(vad_state, 'value') else str(vad_state),
+                                                   audio_rms=f"{np.sqrt(np.mean(np.frombuffer(frame.audio, dtype=np.int16).astype(np.float32) ** 2)):.2f}")
+                                        
+                                        # Generate VAD events based on state transitions
+                                        if not hasattr(self, '_last_vad_state'):
+                                            self._last_vad_state = VADState.QUIET
+                                        
+                                        if vad_state == VADState.SPEAKING and self._last_vad_state == VADState.QUIET:
+                                            logger.info("🎤 VAD TRANSITION: QUIET → SPEAKING")
+                                            await self.push_frame(VADUserStartedSpeakingFrame())
+                                            await self.push_frame(UserStartedSpeakingFrame())
+                                        elif vad_state == VADState.QUIET and self._last_vad_state == VADState.SPEAKING:
+                                            logger.info("🔇 VAD TRANSITION: SPEAKING → QUIET")
+                                            await self.push_frame(VADUserStoppedSpeakingFrame())
+                                            await self.push_frame(UserStoppedSpeakingFrame())
+                                        
+                                        self._last_vad_state = vad_state
+                                        
+                                        # Always push the audio frame to the pipeline
+                                        await self.push_frame(frame)
+                                        logger.info("🎯 Audio frame pushed to pipeline", 
+                                                   call_id=self._params.call_id,
+                                                   vad_state=vad_state.value if hasattr(vad_state, 'value') else str(vad_state))
+                                        
+                                    except Exception as e:
+                                        logger.error("❌ Manual VAD processing failed", 
+                                                   call_id=self._params.call_id, error=str(e))
+                                        # Still push the frame even if VAD fails
+                                        await self.push_frame(frame)
+                                else:
+                                    logger.warning("⚠️ No VAD analyzer - pushing frame without VAD", call_id=self._params.call_id)
+                                    await self.push_frame(frame)
                             else:
                                 await self.push_frame(frame)        # Other frames go to normal channel
                         else:
@@ -403,10 +458,14 @@ class OpenSIPSOutputTransport(BaseOutputTransport):
         self._sequence_number = random.randint(0, 0xFFFF)
         self._timestamp = random.randint(0, 0xFFFFFFFF)
         self._ssrc = random.randint(0, 0xFFFFFFFF)
+    
+    async def write_frame(self, frame: Frame):
+        """Write frame to the transport - required abstract method"""
+        await self.send_frame(frame)
         
-    async def start(self, frame: StartFrame):
+    async def start(self):
         """Start output transport"""
-        await super().start(frame)
+        await super().start()
         
         # Re-use the same UDP socket that the input transport bound to.
         # Böylece RTP sesi, SDP’de ilan edilen porttan (bind_port) gönderilir;
@@ -420,9 +479,7 @@ class OpenSIPSOutputTransport(BaseOutputTransport):
             logger.debug("RTP sender reusing input socket (port staying the same)")
         
         # Register default audio destination so frames with destination=None are accepted
-        await self.set_transport_ready(frame)
-        
-        await self.push_frame(frame)
+        logger.debug("OpenSIPS Output Transport started successfully")
     
     async def send_frame(self, frame: Frame):
         """Send frame using serializer - following Twilio/Telnyx pattern"""
@@ -488,6 +545,16 @@ class OpenSIPSOutputTransport(BaseOutputTransport):
         customer.
         """
         await self.send_frame(frame)
+    
+    async def stop(self, frame: EndFrame = None):
+        """Stop output transport - required abstract method"""
+        await super().stop(frame) if frame else await super().stop()
+        logger.info("OpenSIPS Output Transport stopped")
+    
+    async def cancel(self, frame: CancelFrame = None):
+        """Cancel output transport"""
+        await super().cancel(frame) if frame else None
+        logger.info("OpenSIPS Output Transport cancelled")
 
 
 class OpenSIPSTransport(BaseTransport):
