@@ -8,6 +8,7 @@ import sys
 import os
 import asyncio
 import signal
+import argparse
 from pathlib import Path
 from typing import Dict, Any, Optional
 import structlog
@@ -39,15 +40,26 @@ from opensips_bot import run_opensips_bot, get_bot_sdp_info
 from opensips_event_listener import OpenSIPSEventListener
 
 
+def parse_arguments():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(description='OpenSIPS AI Voice Connector')
+    parser.add_argument('--rtvi-enabled', action='store_true',
+                        help='Enable RTVI protocol support')
+    parser.add_argument('--rtvi-port', type=int, default=8080,
+                        help='RTVI WebSocket port')
+    return parser.parse_args()
+
+
 class OpenSIPSAIVoiceConnector:
     """
     Simplified OpenSIPS AI Voice Connector
     Following Twilio/Telnyx pattern - much cleaner!
     """
     
-    def __init__(self, config_file: str = None):
+    def __init__(self, config_file: str = None, rtvi_enabled: bool = False):
         """Initialize the connector following simplified pattern"""
         self.config_file = config_file or "cfg/opensips-ai-voice-connector.ini"
+        self.rtvi_enabled = rtvi_enabled
         
         # Core components
         self.config = None
@@ -59,7 +71,8 @@ class OpenSIPSAIVoiceConnector:
         
         logger.info("OpenSIPS AI Voice Connector initialized (simplified)",
                    config_file=self.config_file,
-                   pattern="twilio_telnyx_compliant")
+                   pattern="twilio_telnyx_compliant",
+                   rtvi_enabled=self.rtvi_enabled)
     
     async def initialize(self):
         """Initialize all components - much simpler now!"""
@@ -194,7 +207,8 @@ class OpenSIPSAIVoiceConnector:
                         client_port=client_port,
                         bind_ip=bind_ip,
                         bind_port=bind_port,
-                        config=config_dict
+                        config=config_dict,
+                        rtvi_enabled=self.rtvi_enabled
                     )
                 )
                 
@@ -301,11 +315,15 @@ class OpenSIPSAIVoiceConnector:
 
 async def main():
     """Main entry point - much simpler!"""
+    args = parse_arguments()
     config_file = os.getenv('OAVC_CONFIG_FILE', 'cfg/opensips-ai-voice-connector.ini')
     
     try:
         # Initialize connector
-        connector = OpenSIPSAIVoiceConnector(config_file)
+        connector = OpenSIPSAIVoiceConnector(
+            config_file=config_file,
+            rtvi_enabled=args.rtvi_enabled
+        )
         await connector.initialize()
         
         # Setup signal handlers

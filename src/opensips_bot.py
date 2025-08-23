@@ -60,11 +60,16 @@ from rate_limited_observer import RateLimitedObserver
 
 # Import our services
 from services.vosk_websocket import VoskWebsocketSTTService
-from services.llama_websocket import LlamaWebsocketLLMService  
+from services.llama_websocket import LlamaWebsocketLLMService
 from services.piper_websocket import PiperWebsocketTTSService
+from services.rtvi_service_manager import RTVIServiceManager
 
 # Import our transport
 from transports.opensips_transport import create_opensips_transport
+from transports.rtvi.rtvi_opensips_transport import (
+    RTVIOpenSIPSTransport,
+    RTVIOpenSIPSTransportParams
+)
 
 # Pipecat observers for higher-level insights (no low-level RTP spam)
 from pipecat.observers.loggers.llm_log_observer import LLMLogObserver
@@ -80,9 +85,10 @@ async def run_opensips_bot(
     call_id: str,
     client_ip: str,
     client_port: int,
-    bind_ip: str = "0.0.0.0", 
+    bind_ip: str = "0.0.0.0",
     bind_port: int = 0,
-    config: Dict[str, Any] = None
+    config: Dict[str, Any] = None,
+    rtvi_enabled: bool = False
 ):
     """
     Run OpenSIPS bot following Twilio/Telnyx pattern with VAD Observer
@@ -129,14 +135,33 @@ async def run_opensips_bot(
                    pipeline_sample_rate=pipeline_sample_rate,
                    note="VAD processes 8kHz RTP, pipeline upsamples to 16kHz")
         
-        # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Create transport like examples
-        # Create transport with serializer and VAD analyzer in params
-        transport = create_opensips_transport(
-            bind_ip=bind_ip,
-            bind_port=bind_port,
-            call_id=call_id,
-            vad_analyzer=vad_analyzer  # VAD analyzer passed to transport params
-        )
+        if rtvi_enabled:
+            logger.info("RTVI mode enabled, creating RTVI transport")
+            transport = RTVIOpenSIPSTransport(
+                RTVIOpenSIPSTransportParams(
+                    bind_ip=bind_ip,
+                    bind_port=bind_port,
+                    client_ip=client_ip,
+                    client_port=client_port,
+                    enable_rtvi_observer=True,
+                    vad_analyzer=vad_analyzer,
+                    call_id=call_id
+                )
+            )
+            rtvi_service_manager = RTVIServiceManager(
+                transport.rtvi_processor,
+                call_manager=None
+            )
+        else:
+            logger.info("Standard mode enabled, creating standard transport")
+            # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Create transport like examples
+            # Create transport with serializer and VAD analyzer in params
+            transport = create_opensips_transport(
+                bind_ip=bind_ip,
+                bind_port=bind_port,
+                call_id=call_id,
+                vad_analyzer=vad_analyzer  # VAD analyzer passed to transport params
+            )
         
         # 🔧 DEBUG: Verify VAD analyzer is properly configured (following examples)
         if hasattr(transport._params, 'vad_analyzer') and transport._params.vad_analyzer:
@@ -199,7 +224,7 @@ async def run_opensips_bot(
         context_aggregator = llm.create_context_aggregator(context)
         
         # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Create pipeline like examples
-        pipeline = Pipeline([
+        pipeline_elements = [
             transport.input(),              # OpenSIPS input
             stt,                            # Speech-To-Text (Vosk)
             context_aggregator.user(),      # User context
@@ -208,7 +233,13 @@ async def run_opensips_bot(
             tts,                            # Text-To-Speech (Piper) – receives sentence text
             transport.output(),             # RTP output to OpenSIPS
             context_aggregator.assistant()  # Assistant context
-        ])
+        ]
+
+        if rtvi_enabled:
+            # Insert RTVI processor after transport input
+            pipeline_elements.insert(1, transport.rtvi_processor)
+
+        pipeline = Pipeline(pipeline_elements)
         
         # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Create pipeline task like examples
         # 🔧 CRITICAL FIX: Sample rate configuration for RTP/OpenSIPS
@@ -223,16 +254,20 @@ async def run_opensips_bot(
                 allow_interruptions=True
             )
         )
-        
-        # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Attach observers for concise logging
-        task.add_observer(TranscriptionLogObserver())
-        task.add_observer(LLMLogObserver())
-        task.add_observer(UserBotLatencyLogObserver())
-        # Attach rate-limited debug observer to monitor TTS start/stop (no audio frames)
-        debug_observer = DebugLogObserver(
-            frame_types=(TTSStartedFrame, TTSStoppedFrame),
-        )
-        task.add_observer(debug_observer)
+
+        if rtvi_enabled:
+            if transport.rtvi_observer:
+                task.add_observer(transport.rtvi_observer)
+        else:
+            # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Attach observers for concise logging
+            task.add_observer(TranscriptionLogObserver())
+            task.add_observer(LLMLogObserver())
+            task.add_observer(UserBotLatencyLogObserver())
+            # Attach rate-limited debug observer to monitor TTS start/stop (no audio frames)
+            debug_observer = DebugLogObserver(
+                frame_types=(TTSStartedFrame, TTSStoppedFrame),
+            )
+            task.add_observer(debug_observer)
         # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Event handlers like examples
         # Send greeting only once even if transport fires the event multiple times
         greeting_sent = False
