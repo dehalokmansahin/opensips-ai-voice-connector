@@ -16,19 +16,19 @@ torchaudio==2.7.0
 silero-vad==5.1.2
 
 # ✅ Native Pipecat VAD dependencies
-onnxruntime==1.19.2 
-
+onnxruntime==1.20.1 
+pipecat-ai==0.0.80
 
 # HTTP client
-aiohttp==3.9.1
+aiohttp>=3.11.12
 
 # Configuration validation
 validators==0.34.0
-pydantic==2.10.4
+pydantic>=2.10.6
 
 # Logging
 structlog==24.1.0
-loguru==0.7.2
+loguru~=0.7.3
 pyloudnorm==0.1.1
 
 # Audio resampling (with NumPy 2.x compatibility stub)
