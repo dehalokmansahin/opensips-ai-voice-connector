@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 import structlog
 import random
-import string
 
 # Setup Python paths
 current_dir = Path(__file__).parent
@@ -37,6 +36,8 @@ from opensips_bot import run_opensips_bot, get_bot_sdp_info
 
 # OpenSIPS Event Integration
 from opensips_event_listener import OpenSIPSEventListener
+from call_manager import CallManager
+from port_utils import find_available_port
 
 
 class OpenSIPSAIVoiceConnector:
@@ -54,8 +55,8 @@ class OpenSIPSAIVoiceConnector:
         self.event_listener = None
         self.sip_listener = None
         
-        # Active calls tracking - following Twilio/Telnyx pattern
-        self.active_calls: Dict[str, asyncio.Task] = {}
+        # Active calls tracking handled by CallManager
+        self.call_manager = CallManager()
         
         logger.info("OpenSIPS AI Voice Connector initialized (simplified)",
                    config_file=self.config_file,
@@ -141,11 +142,7 @@ class OpenSIPSAIVoiceConnector:
             logger.info("Call ended", call_info=call_info, call_id=call_id)
             
             # Cancel running bot if exists
-            if call_id in self.active_calls:
-                task = self.active_calls[call_id]
-                task.cancel()
-                del self.active_calls[call_id]
-                logger.info("Bot task cancelled", call_id=call_id)
+            self.call_manager.end_call(call_id)
             
         except Exception as e:
             logger.error("Error handling call end", call_id=call_id, error=str(e))
@@ -177,7 +174,7 @@ class OpenSIPSAIVoiceConnector:
                 # Find available port
                 min_port = int(rtp_config.get('min_port', '35000'))
                 max_port = int(rtp_config.get('max_port', '35100'))
-                bind_port = self._find_available_port(bind_ip, min_port, max_port)
+                bind_port = find_available_port(bind_ip, min_port, max_port)
                 
                 # Get configuration for services
                 config_dict = {
@@ -188,7 +185,8 @@ class OpenSIPSAIVoiceConnector:
                 }
                 
                 # Start bot using Twilio/Telnyx pattern - single function call!
-                bot_task = asyncio.create_task(
+                self.call_manager.start_call(
+                    call_id,
                     run_opensips_bot(
                         call_id=call_id,
                         client_ip=client_ip,
@@ -196,13 +194,9 @@ class OpenSIPSAIVoiceConnector:
                         bind_ip=bind_ip,
                         bind_port=bind_port,
                         config=config_dict
-                    )
+                    ),
+                    pattern="twilio_telnyx_compliant"
                 )
-                
-                # Track active call
-                self.active_calls[call_id] = bot_task
-                
-                logger.info("Bot started for call", call_id=call_id, pattern="twilio_telnyx_compliant")
                 
                 # Send 200 OK using bot's SDP info
                 try:
@@ -225,9 +219,7 @@ class OpenSIPSAIVoiceConnector:
                     await self.sip_listener.send_500_internal_error(invite_data)
                     
                     # Cancel bot task if 200 OK failed
-                    bot_task.cancel()
-                    if call_id in self.active_calls:
-                        del self.active_calls[call_id]
+                    self.call_manager.end_call(call_id)
 
             else:
                 logger.error("Invalid SDP info in INVITE request", 
@@ -242,22 +234,6 @@ class OpenSIPSAIVoiceConnector:
             except:
                 pass
     
-    def _find_available_port(self, bind_ip: str, min_port: int, max_port: int) -> int:
-        """Find available port in range"""
-        import socket
-        
-        for port in range(min_port, max_port + 1):
-            try:
-                test_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                test_sock.bind((bind_ip, port))
-                test_sock.close()
-                logger.info("Found available RTP port", port=port)
-                return port
-            except OSError:
-                continue
-        
-        logger.warning("No available ports in range, using auto-assign")
-        return 0
     
     async def start(self):
         """Start the application - much simpler!"""
@@ -281,12 +257,8 @@ class OpenSIPSAIVoiceConnector:
             logger.info("Stopping OpenSIPS AI Voice Connector")
             
             # Cancel all active bot tasks
-            for call_id, task in self.active_calls.items():
-                logger.info("Cancelling bot task", call_id=call_id)
-                task.cancel()
-            
-            self.active_calls.clear()
-            
+            self.call_manager.end_all()
+
             # Stop listeners
             if self.event_listener:
                 await self.event_listener.stop()
