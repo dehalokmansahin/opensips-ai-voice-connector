@@ -11,11 +11,22 @@ from pipecat.processors.frameworks.rtvi import (
 logger = structlog.get_logger()
 
 class RTVIServiceManager:
-    """Manages RTVI service registration and actions for OpenSIPS"""
+    """Manages RTVI service registration and actions for OpenSIPS
 
-    def __init__(self, rtvi_processor, call_manager):
+    services: optional mapping of live service instances for this call, e.g. {
+        "stt": VoskWebsocketSTTService,
+        "llm": LlamaWebsocketLLMService,
+        "tts": PiperWebsocketTTSService,
+        "transport": OpenSIPSTransport | RTVIOpenSIPSTransport
+    }
+    """
+
+    def __init__(self, rtvi_processor, call_manager=None, services: Dict[str, Any] | None = None):
         self.rtvi = rtvi_processor
         self.call_manager = call_manager
+        self.services: Dict[str, Any] = services or {}
+        self._volume: float = 1.0
+        self._muted: bool = False
         self._register_opensips_services()
         self._register_opensips_actions()
 
@@ -125,33 +136,65 @@ class RTVIServiceManager:
     # Event Handlers
     async def _handle_volume_change(self, rtvi, service, config):
         """Handle volume change via RTVI"""
-        volume = config.value
-        logger.info("🔊 RTVI volume change", volume=volume)
-        # Volume control implementation here
+        try:
+            volume = float(config.value)
+        except Exception:
+            volume = 1.0
+        self._volume = max(0.0, min(2.0, volume))
+        logger.info("🔊 RTVI volume change", volume=self._volume)
+        # Optional: propagate to TTS service if available
+        tts = self.services.get("tts")
+        if tts and hasattr(tts, "set_volume"):
+            try:
+                await tts.set_volume(self._volume)
+            except Exception:
+                pass
 
     async def _handle_mute_toggle(self, rtvi, service, config):
         """Handle mute toggle via RTVI"""
-        mute_enabled = config.value
+        mute_enabled = bool(config.value)
+        self._muted = mute_enabled
         logger.info("🔇 RTVI mute toggle", mute_enabled=mute_enabled)
-        # Mute control implementation here
+        # Optional: propagate to transport/output path
+        transport = self.services.get("transport")
+        if transport and hasattr(transport, "set_muted"):
+            try:
+                await transport.set_muted(mute_enabled)
+            except Exception:
+                pass
 
     async def _handle_stt_language_change(self, rtvi, service, config):
         """Handle STT language change"""
         language = config.value
         logger.info("🗣️ RTVI STT language change", language=language)
-        # STT language change implementation here
+        stt = self.services.get("stt")
+        if stt and hasattr(stt, "set_language"):
+            try:
+                await stt.set_language(language)
+            except Exception:
+                pass
 
     async def _handle_llm_temperature_change(self, rtvi, service, config):
         """Handle LLM temperature change"""
         temperature = config.value
         logger.info("🌡️ RTVI LLM temperature change", temperature=temperature)
-        # LLM temperature change implementation here
+        llm = self.services.get("llm")
+        if llm and hasattr(llm, "set_temperature"):
+            try:
+                await llm.set_temperature(temperature)
+            except Exception:
+                pass
 
     async def _handle_llm_max_tokens_change(self, rtvi, service, config):
         """Handle LLM max tokens change"""
         max_tokens = config.value
         logger.info("📝 RTVI LLM max tokens change", max_tokens=max_tokens)
-        # LLM max tokens change implementation here
+        llm = self.services.get("llm")
+        if llm and hasattr(llm, "set_max_tokens"):
+            try:
+                await llm.set_max_tokens(int(max_tokens))
+            except Exception:
+                pass
 
     # Action Handlers
     async def _handle_call_transfer(self, rtvi, action_id, args):
@@ -159,7 +202,7 @@ class RTVIServiceManager:
         destination = args.get("destination")
         logger.info("📞 RTVI call transfer", destination=destination)
 
-        # OpenSIPS transfer implementation
+        # OpenSIPS transfer implementation would be integrated here.
         return {
             "success": True,
             "destination": destination,
@@ -170,7 +213,7 @@ class RTVIServiceManager:
         """Handle call hangup action"""
         logger.info("📴 RTVI call hangup")
 
-        # OpenSIPS hangup implementation
+        # OpenSIPS hangup implementation would be integrated here.
         return True
 
     async def _handle_mute_action(self, rtvi, action_id, args):
@@ -178,5 +221,5 @@ class RTVIServiceManager:
         enabled = args.get("enabled", True)
         logger.info("🔇 RTVI mute action", enabled=enabled)
 
-        # Mute implementation
+        # Mute implementation already tracked; return current state
         return enabled

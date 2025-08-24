@@ -14,12 +14,13 @@ from pipecat.frames.frames import (
     TTSAudioRawFrame, TTSStartedFrame, TTSStoppedFrame
 )
 from pipecat.services.tts_service import TTSService
+from .websocket_base import WebsocketClientMixin
 from pipecat.processors.frame_processor import FrameDirection
 
 logger = structlog.get_logger()
 
 
-class PiperWebsocketTTSService(TTSService):
+class PiperWebsocketTTSService(TTSService, WebsocketClientMixin):
     """
     Piper TTS service following document specifications
     Streams text → 22.05 kHz PCM audio as per implementation guide
@@ -32,7 +33,8 @@ class PiperWebsocketTTSService(TTSService):
         sample_rate: int = 22050,
         **kwargs
     ):
-        super().__init__(sample_rate=sample_rate, **kwargs)
+        TTSService.__init__(self, sample_rate=sample_rate, **kwargs)
+        WebsocketClientMixin.__init__(self)
         self._url = url
         self._voice = voice
         self._websocket: Optional = None

@@ -25,6 +25,12 @@ from pipecat.processors.frame_processor import FrameDirection
 
 # Import our new serializer
 from serializers.opensips import OpenSIPSFrameSerializer
+from monitoring.metrics import (
+    RTP_PACKETS_RECEIVED,
+    RTP_FRAMES_ENQUEUED,
+    RTP_FRAMES_PROCESSED,
+    RTP_INPUT_QUEUE_DEPTH,
+)
 
 logger = structlog.get_logger()
 
@@ -115,6 +121,7 @@ class OpenSIPSInputTransport(BaseInputTransport):
         self._params = params
         self._receiver_task: Optional[asyncio.Task] = None
         self._socket: Optional[socket.socket] = None
+        self._audio_queue: Optional[asyncio.Queue] = None
         
         # 🔧 VAD Observer - Following Twilio/Telnyx Pattern
         self._vad_observer = VADObserver(params.call_id or "unknown_call")
@@ -205,9 +212,15 @@ class OpenSIPSInputTransport(BaseInputTransport):
             )
 
         # Now start async receiving loop which will reuse the existing socket.
+        # Initialize bounded queue and background tasks
+        if self._audio_queue is None:
+            self._audio_queue = asyncio.Queue(maxsize=100)
         if not self._receiver_task:
             self._receiver_task = asyncio.create_task(self._receive_rtp_packets())
             logger.debug("RTP receiver task started")
+        if not hasattr(self, "_consumer_task") or self._consumer_task is None:
+            self._consumer_task = asyncio.create_task(self._consume_audio_queue())
+            logger.debug("RTP consumer task started")
         
         # 🔧 CRITICAL FIX: Initialize audio queue for push_audio_frame
         await self.set_transport_ready(frame)
@@ -248,6 +261,13 @@ class OpenSIPSInputTransport(BaseInputTransport):
             except asyncio.CancelledError:
                 pass
             self._receiver_task = None
+        if hasattr(self, "_consumer_task") and self._consumer_task:
+            self._consumer_task.cancel()
+            try:
+                await self._consumer_task
+            except asyncio.CancelledError:
+                pass
+            self._consumer_task = None
         
         if self._socket:
             self._socket.close()
@@ -296,6 +316,7 @@ class OpenSIPSInputTransport(BaseInputTransport):
                 try:
                     data, addr = await loop.sock_recvfrom(self._socket, 2048)
                     packet_count += 1
+                    RTP_PACKETS_RECEIVED.labels(self._params.call_id or "unknown").inc()
                     
                     logger.debug("RTP packet received", 
                                 packet_num=packet_count,
@@ -307,25 +328,22 @@ class OpenSIPSInputTransport(BaseInputTransport):
                         frame = await self._params.serializer.deserialize(data)
                         if frame:
                             if isinstance(frame, InputAudioRawFrame):
-                                logger.debug("📤 Pushing audio frame to VAD pipeline", 
-                                           call_id=self._params.call_id,
-                                           audio_size=len(frame.audio),
-                                           sample_rate=frame.sample_rate,
-                                           audio_task_running=self._audio_task is not None,
-                                           vad_analyzer_available=self.vad_analyzer is not None)
-                                
-                                # 🔧 DEBUG: Check audio queue before pushing
-                                queue_size_before = self._audio_in_queue.qsize() if hasattr(self, '_audio_in_queue') else "no_queue"
-                                await self.push_audio_frame(frame)  # Audio frames go to audio channel
-                                queue_size_after = self._audio_in_queue.qsize() if hasattr(self, '_audio_in_queue') else "no_queue"
-                                
-                                logger.debug("🎯 Audio frame pushed to VAD queue", 
-                                           call_id=self._params.call_id,
-                                           queue_before=queue_size_before,
-                                           queue_after=queue_size_after,
-                                           note="Frame should now be processed by BaseInputTransport._audio_task_handler()")
+                                # Enqueue audio frames; drop oldest if queue is full
+                                try:
+                                    self._audio_queue.put_nowait(frame)
+                                    RTP_FRAMES_ENQUEUED.labels(self._params.call_id or "unknown").inc()
+                                    RTP_INPUT_QUEUE_DEPTH.labels(self._params.call_id or "unknown").set(self._audio_queue.qsize())
+                                except asyncio.QueueFull:
+                                    # Simple drop policy: get one and put
+                                    try:
+                                        _ = self._audio_queue.get_nowait()
+                                    except Exception:
+                                        pass
+                                    await self._audio_queue.put(frame)
+                                    RTP_FRAMES_ENQUEUED.labels(self._params.call_id or "unknown").inc()
+                                    RTP_INPUT_QUEUE_DEPTH.labels(self._params.call_id or "unknown").set(self._audio_queue.qsize())
                             else:
-                                await self.push_frame(frame)        # Other frames go to normal channel
+                                await self.push_frame(frame)
                         else:
                             logger.warning("❌ Serializer returned None frame", 
                                          call_id=self._params.call_id,
@@ -346,6 +364,17 @@ class OpenSIPSInputTransport(BaseInputTransport):
         except Exception as e:
             logger.error("Fatal error in RTP receiver", error=str(e))
             raise
+
+    async def _consume_audio_queue(self):
+        """Drain audio queue and push into BaseInputTransport for VAD/pipeline."""
+        try:
+            while True:
+                frame: InputAudioRawFrame = await self._audio_queue.get()
+                RTP_INPUT_QUEUE_DEPTH.labels(self._params.call_id or "unknown").set(self._audio_queue.qsize())
+                await self.push_audio_frame(frame)
+                RTP_FRAMES_PROCESSED.labels(self._params.call_id or "unknown").inc()
+        except asyncio.CancelledError:
+            return
 
 
 class OpenSIPSOutputTransport(BaseOutputTransport):

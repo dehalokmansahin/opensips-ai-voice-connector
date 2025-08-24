@@ -35,9 +35,12 @@ from config import (
 
 # Our simplified bot
 from opensips_bot import run_opensips_bot, get_bot_sdp_info
+from pipecat.pipeline.runner import PipelineRunner
 
 # OpenSIPS Event Integration
 from opensips_event_listener import OpenSIPSEventListener
+from monitoring.metrics import start_metrics_server
+from monitoring.tracing import setup_tracing, start_span
 
 
 def parse_arguments():
@@ -61,6 +64,8 @@ class OpenSIPSAIVoiceConnector:
         self.config_file = config_file or "cfg/opensips-ai-voice-connector.ini"
         self.rtvi_enabled = rtvi_enabled
         
+        # Central PipelineRunner for all calls
+        self.runner: PipelineRunner | None = None
         # Core components
         self.config = None
         self.event_listener = None
@@ -78,6 +83,16 @@ class OpenSIPSAIVoiceConnector:
         """Initialize all components - much simpler now!"""
         try:
             await self._initialize_config()
+            # Start Prometheus metrics server (REQ-009)
+            engine_cfg = get_config_section('engine') or get_config_section('opensips') or {}
+            metrics_port = int(engine_cfg.get('metrics_port', '9000'))
+            start_metrics_server(metrics_port)
+            # Setup tracing (REQ-010)
+            setup_tracing(
+                service_name="opensips-ai-voice-connector",
+                otlp_endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+            )
+            self.runner = PipelineRunner(handle_sigint=False, force_gc=True)
             await self._initialize_event_listener()
             await self._initialize_sip_listener()
             
@@ -172,7 +187,8 @@ class OpenSIPSAIVoiceConnector:
             call_id = invite_data.get('call_id', f"call_{random.randint(1000, 9999)}")
             sdp_info = invite_data.get('sdp_info')
             
-            logger.info("SIP INVITE received", call_id=call_id, sdp_info=sdp_info)
+            with start_span("sip.invite", {"conversation_id": call_id}):
+                logger.info("SIP INVITE received", call_id=call_id, sdp_info=sdp_info)
             
             if sdp_info and sdp_info.get('media_ip') and sdp_info.get('media_port'):
                 client_ip = sdp_info['media_ip']
@@ -200,17 +216,18 @@ class OpenSIPSAIVoiceConnector:
                 }
                 
                 # Start bot using Twilio/Telnyx pattern - single function call!
-                bot_task = asyncio.create_task(
-                    run_opensips_bot(
-                        call_id=call_id,
-                        client_ip=client_ip,
-                        client_port=client_port,
-                        bind_ip=bind_ip,
-                        bind_port=bind_port,
-                        config=config_dict,
-                        rtvi_enabled=self.rtvi_enabled
+                with start_span("call.start", {"conversation_id": call_id}):
+                    bot_task = asyncio.create_task(
+                        run_opensips_bot(
+                            call_id=call_id,
+                            client_ip=client_ip,
+                            client_port=client_port,
+                            bind_ip=bind_ip,
+                            bind_port=bind_port,
+                            config=config_dict,
+                            runner=self.runner
+                        )
                     )
-                )
                 
                 # Track active call
                 self.active_calls[call_id] = bot_task

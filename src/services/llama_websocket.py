@@ -21,6 +21,7 @@ from pipecat.processors.aggregators.llm_response import (
     LLMUserContextAggregator,
     LLMAssistantContextAggregator,
 )
+from .websocket_base import WebsocketClientMixin
 
 logger = structlog.get_logger()
 
@@ -38,7 +39,7 @@ class _LlamaContextAggregator:
         return LLMAssistantContextAggregator(self._context)
 
 
-class LlamaWebsocketLLMService(LLMService):
+class LlamaWebsocketLLMService(LLMService, WebsocketClientMixin):
     """
     Llama LLM service using OpenAI ChatCompletion format
     Compatible with updated server supporting both OpenAI and legacy formats
@@ -53,7 +54,8 @@ class LlamaWebsocketLLMService(LLMService):
         use_rag: bool = True,
         **kwargs
     ):
-        super().__init__(**kwargs)
+        LLMService.__init__(self, **kwargs)
+        WebsocketClientMixin.__init__(self)
         self._url = url
         self._model = model
         self._temperature = temperature  

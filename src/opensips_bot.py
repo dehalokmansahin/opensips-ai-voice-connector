@@ -53,7 +53,7 @@ from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.frames.frames import TextFrame
 from pipecat.observers.loggers.debug_log_observer import DebugLogObserver
-from pipecat.frames.frames import TTSStartedFrame, TTSStoppedFrame
+from pipecat.frames.frames import TTSStartedFrame, TTSStoppedFrame, TranscriptionFrame, LLMFullResponseStartFrame
 
 # Custom rate-limited wrapper to avoid log floods
 from rate_limited_observer import RateLimitedObserver
@@ -88,7 +88,7 @@ async def run_opensips_bot(
     bind_ip: str = "0.0.0.0",
     bind_port: int = 0,
     config: Dict[str, Any] = None,
-    rtvi_enabled: bool = False
+    runner: PipelineRunner | None = None
 ):
     """
     Run OpenSIPS bot following Twilio/Telnyx pattern with VAD Observer
@@ -134,34 +134,38 @@ async def run_opensips_bot(
                    vad_sample_rate=rtp_sample_rate,
                    pipeline_sample_rate=pipeline_sample_rate,
                    note="VAD processes 8kHz RTP, pipeline upsamples to 16kHz")
+
+        # PRD sample-rate validation end-to-end
+        logger.info("🔍 Sample-rate flow check",
+                   incoming_codec="PCMU",
+                   rtp_in_hz=rtp_sample_rate,
+                   stt_in_hz=pipeline_sample_rate,
+                   tts_out_hz=tts_config.get('sample_rate', '22050') if (config and 'tts' in config) else 22050,
+                   rtp_out_hz=rtp_sample_rate)
         
-        if rtvi_enabled:
-            logger.info("RTVI mode enabled, creating RTVI transport")
-            transport = RTVIOpenSIPSTransport(
-                RTVIOpenSIPSTransportParams(
-                    bind_ip=bind_ip,
-                    bind_port=bind_port,
-                    client_ip=client_ip,
-                    client_port=client_port,
-                    enable_rtvi_observer=True,
-                    vad_analyzer=vad_analyzer,
-                    call_id=call_id
-                )
-            )
-            rtvi_service_manager = RTVIServiceManager(
-                transport.rtvi_processor,
-                call_manager=None
-            )
-        else:
-            logger.info("Standard mode enabled, creating standard transport")
-            # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Create transport like examples
-            # Create transport with serializer and VAD analyzer in params
-            transport = create_opensips_transport(
+        # RTVI-only path (normalized)
+        logger.info("RTVI mode enforced, creating RTVI transport")
+        transport = RTVIOpenSIPSTransport(
+            RTVIOpenSIPSTransportParams(
                 bind_ip=bind_ip,
                 bind_port=bind_port,
-                call_id=call_id,
-                vad_analyzer=vad_analyzer  # VAD analyzer passed to transport params
+                client_ip=client_ip,
+                client_port=client_port,
+                enable_rtvi_observer=True,
+                vad_analyzer=vad_analyzer,
+                call_id=call_id
             )
+        )
+        rtvi_service_manager = RTVIServiceManager(
+            transport.rtvi_processor,
+            call_manager=None,
+            services={
+                "stt": stt,
+                "llm": llm,
+                "tts": tts,
+                "transport": transport
+            }
+        )
         
         # 🔧 DEBUG: Verify VAD analyzer is properly configured (following examples)
         if hasattr(transport._params, 'vad_analyzer') and transport._params.vad_analyzer:
@@ -235,9 +239,8 @@ async def run_opensips_bot(
             context_aggregator.assistant()  # Assistant context
         ]
 
-        if rtvi_enabled:
-            # Insert RTVI processor after transport input
-            pipeline_elements.insert(1, transport.rtvi_processor)
+        # Insert RTVI processor after transport input
+        pipeline_elements.insert(1, transport.rtvi_processor)
 
         pipeline = Pipeline(pipeline_elements)
         
@@ -245,29 +248,60 @@ async def run_opensips_bot(
         # 🔧 CRITICAL FIX: Sample rate configuration for RTP/OpenSIPS
         task = PipelineTask(
             pipeline,
+            # PRD-aligned: add conversation_id and idle_timeout_secs for lifecycle control
+            conversation_id=call_id,
+            idle_timeout_secs=int((config or {}).get('pipeline', {}).get('idle_timeout_secs', 90)),
             params=PipelineParams(
                 # 🔧 RTP comes in at 8kHz, but pipeline processes at 16kHz
                 audio_in_sample_rate=pipeline_sample_rate,     # 🔥 16 kHz
-                audio_out_sample_rate=rtp_sample_rate,    # 8kHz RTP output 
-                enable_metrics=False,                     # Disable metrics initially
-                enable_usage_metrics=False,               # Disable usage metrics initially
+                audio_out_sample_rate=rtp_sample_rate,         # 8kHz RTP output 
+                enable_metrics=True,                           # Enable metrics per PRD REQ-008/009
+                enable_usage_metrics=True,                     # Enable usage metrics
                 allow_interruptions=True
             )
         )
 
-        if rtvi_enabled:
-            if transport.rtvi_observer:
-                task.add_observer(transport.rtvi_observer)
-        else:
-            # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Attach observers for concise logging
-            task.add_observer(TranscriptionLogObserver())
-            task.add_observer(LLMLogObserver())
-            task.add_observer(UserBotLatencyLogObserver())
-            # Attach rate-limited debug observer to monitor TTS start/stop (no audio frames)
-            debug_observer = DebugLogObserver(
-                frame_types=(TTSStartedFrame, TTSStoppedFrame),
-            )
-            task.add_observer(debug_observer)
+        if transport.rtvi_observer:
+            task.add_observer(transport.rtvi_observer)
+
+        # LLM timeout fallback: observer + watchdog
+        class _LLMTimeoutObserver:
+            def __init__(self, state):
+                self._state = state
+
+            async def on_push_frame(self, data):
+                try:
+                    frame = data.get("frame") if isinstance(data, dict) else data
+                    if isinstance(frame, TranscriptionFrame):
+                        text = getattr(frame, 'text', '') or ''
+                        # Simple backchannel filter: require >= 3 words
+                        if len(text.strip().split()) >= 3:
+                            loop = asyncio.get_running_loop()
+                            self._state["awaiting"] = True
+                            self._state["awaiting_since"] = loop.time()
+                    elif isinstance(frame, LLMFullResponseStartFrame):
+                        self._state["awaiting"] = False
+                except Exception:
+                    pass
+
+        llm_timeout_secs = float((config or {}).get('llm', {}).get('completion_timeout_secs', 2.0))
+        _llm_state = {"awaiting": False, "awaiting_since": None}
+        task.add_observer(_LLMTimeoutObserver(_llm_state))
+
+        async def _llm_timeout_watchdog():
+            try:
+                loop = asyncio.get_running_loop()
+                while True:
+                    await asyncio.sleep(0.1)
+                    if _llm_state.get("awaiting") and _llm_state.get("awaiting_since") is not None:
+                        if loop.time() - _llm_state["awaiting_since"] >= llm_timeout_secs:
+                            _llm_state["awaiting"] = False
+                            try:
+                                await tts.say("Bir saniye, kontrol ediyorum...")
+                            except Exception:
+                                pass
+            except asyncio.CancelledError:
+                return
         # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Event handlers like examples
         # Send greeting only once even if transport fires the event multiple times
         greeting_sent = False
@@ -294,7 +328,8 @@ async def run_opensips_bot(
             await task.cancel()
         
         # 🔧 FOLLOW TWILIO/TELNYX PATTERN: Create and run pipeline like examples
-        runner = PipelineRunner(handle_sigint=False, force_gc=True)
+        # Use shared runner if provided for central lifecycle control
+        runner = runner or PipelineRunner(handle_sigint=False, force_gc=True)
         
         logger.info("Pipeline starting with VAD observer", 
                    call_id=call_id, 
@@ -302,7 +337,12 @@ async def run_opensips_bot(
                    rtp_sample_rate=f"{rtp_sample_rate}Hz",
                    pipeline_sample_rate=f"{pipeline_sample_rate}Hz",
                    vad_observer_enabled=True)
-        await runner.run(task)
+        # Start LLM timeout watchdog in parallel
+        watchdog_task = asyncio.create_task(_llm_timeout_watchdog())
+        try:
+            await runner.run(task)
+        finally:
+            watchdog_task.cancel()
         
     except Exception as e:
         logger.error("Error in OpenSIPS bot", call_id=call_id, error=str(e))

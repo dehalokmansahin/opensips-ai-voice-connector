@@ -7,7 +7,7 @@ from typing import Optional, Dict, Any
 import structlog
 from pipecat.processors.frameworks.rtvi import (
     RTVIProcessor, RTVIConfig, RTVIService,
-    RTVIServiceConfig, RTVIServiceOptionConfig
+    RTVIServiceConfig, RTVIServiceOptionConfig, RTVIObserver
 )
 from pipecat.transports.base_transport import BaseTransport
 from src.transports.opensips_transport import create_opensips_transport, OpenSIPSTransportParams
@@ -87,6 +87,14 @@ class RTVIOpenSIPSTransport(BaseTransport):
 
     def output(self):
         return self._rtp_transport.output()
+
+    def update_client_info(self, client_ip: str, client_port: int) -> None:
+        """Proxy to underlying OpenSIPS transport to update RTP destination."""
+        return self._rtp_transport.update_client_info(client_ip, client_port)
+
+    def get_sdp_info(self) -> Dict[str, Any]:
+        """Proxy SDP info from underlying transport for SIP 200 OK."""
+        return self._rtp_transport.get_sdp_info()
 
     @property
     def rtvi_processor(self) -> RTVIProcessor:
